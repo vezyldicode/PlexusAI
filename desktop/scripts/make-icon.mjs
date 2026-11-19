@@ -1,4 +1,5 @@
-// Generates build/icon.png (512x512): a dark rounded square with a hexagonal network of dots.
+// Generates build/icon.png (512x512): the Plexus mark (a hub node linked to three satellites,
+// same geometry as ui/public/plexus.svg) on a dark rounded square.
 // No image libraries: raw RGBA pixels, zlib-compressed into a PNG by hand.
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -7,16 +8,24 @@ import { join } from 'node:path';
 const S = 512;
 const px = Buffer.alloc(S * S * 4);
 
-const bg = [31, 36, 48], dot = [245, 165, 36], dotSoft = [120, 170, 255];
+const bg = [20, 20, 21], node = [237, 237, 237], edge = [161, 161, 166];
 const radius = 96; // corner radius of the background square
-const dots = [[0, 0, 62, dot]];
-for (let i = 0; i < 6; i++) {
-  const a = (Math.PI / 3) * i - Math.PI / 2;
-  dots.push([Math.cos(a) * 150, Math.sin(a) * 150, 42, i % 2 ? dotSoft : dot]);
-}
+// The mark lives in a 16x16 viewBox; map it onto the middle of the icon.
+const scale = 22, off = S / 2 - 8 * scale;
+const P = (x, y) => [off + x * scale, off + y * scale];
+const nodes = [[8, 8, 2], [2.5, 3.5, 1.25], [13.5, 4, 1.25], [12, 13, 1.25]].map(([x, y, r]) => [...P(x, y), r * scale]);
+const edges = [[3.5, 4.3, 6.4, 7], [12.4, 4.7, 9.6, 7], [11.2, 12.1, 9.4, 9.4]].map(([a, b, c, d]) => [...P(a, b), ...P(c, d)]);
+const edgeW = 1.1 * scale;
 
 /** Coverage (0..1) of a pixel by a shape given its signed distance, for cheap anti-aliasing. */
 const cover = (d) => Math.max(0, Math.min(1, 0.5 - d));
+/** Distance from (x, y) to the segment (ax, ay)-(bx, by). */
+const segDist = (x, y, ax, ay, bx, by) => {
+  const dx = bx - ax, dy = by - ay;
+  const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
+};
+const mix = (c, col, k) => [c[0] + (col[0] - c[0]) * k, c[1] + (col[1] - c[1]) * k, c[2] + (col[2] - c[2]) * k];
 
 for (let y = 0; y < S; y++) {
   for (let x = 0; x < S; x++) {
@@ -24,14 +33,12 @@ for (let y = 0; y < S; y++) {
     // rounded-square signed distance
     const qx = Math.abs(cx - S / 2) - (S / 2 - radius - 8), qy = Math.abs(cy - S / 2) - (S / 2 - radius - 8);
     const dSq = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius;
-    let a = cover(dSq);
-    let [r, g, b] = bg;
-    for (const [ox, oy, rad, col] of dots) {
-      const c = cover(Math.hypot(cx - (S / 2 + ox), cy - (S / 2 + oy)) - rad);
-      r = r + (col[0] - r) * c; g = g + (col[1] - g) * c; b = b + (col[2] - b) * c;
-    }
+    const a = cover(dSq);
+    let c = bg;
+    for (const [ax, ay, bx, by] of edges) c = mix(c, edge, cover(segDist(cx, cy, ax, ay, bx, by) - edgeW / 2));
+    for (const [nx, ny, r] of nodes) c = mix(c, node, cover(Math.hypot(cx - nx, cy - ny) - r));
     const i = (y * S + x) * 4;
-    px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = Math.round(a * 255);
+    px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = Math.round(a * 255);
   }
 }
 

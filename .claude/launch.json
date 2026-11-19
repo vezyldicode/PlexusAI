@@ -14,6 +14,13 @@
       "runtimeArgs": ["src/server/main.ts"],
       "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/mock-home", "PLEXUS_PORT": "4319" },
       "port": 4319
+    },
+    {
+      "name": "plexus-test",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/server/main.ts"],
+      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/test-home", "PLEXUS_PORT": "4320" },
+      "port": 4320
     }
   ]
 }
