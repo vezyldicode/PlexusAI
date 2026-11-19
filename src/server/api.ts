@@ -5,10 +5,11 @@ import { existsSync, mkdtempSync, readFileSync, statSync, openSync, readSync, cl
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
-import { applyActions, handleChat, resolveProposal } from './coordinator.ts';
+import { applyActions, coordinatorTarget, handleChat, resolveProposal } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
@@ -95,6 +96,13 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.delete('/api/accounts/:id', async req => { removeAccount(id(req)); return { ok: true }; });
   app.post('/api/accounts/:id/login', async req => openLogin(id(req)));
   app.post('/api/accounts/:id/probe', async req => probeAccount(id(req)));
+  // Re-check every enabled account (state + quota) in parallel; one failing account doesn't stop the others.
+  app.post('/api/accounts/probe', async () => {
+    const enabled = listAccounts().filter(a => a.enabled);
+    const results = await Promise.allSettled(enabled.map(a => probeAccount(a.id)));
+    const failed = results.flatMap((r, i) => r.status === 'rejected' ? [{ id: enabled[i].id, error: String(r.reason?.message ?? r.reason) }] : []);
+    return { probed: enabled.length, failed, accounts: listAccounts() };
+  });
   // Models and efforts offered by the enabled accounts' CLIs (cached 12 h; ?refresh=1 re-reads them).
   app.get('/api/models', async req => modelCatalog(listAccounts(), ['1', 'true'].includes(String((req.query as any)?.refresh ?? ''))));
 
@@ -124,6 +132,14 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return updateProject(id(req), { ...b, ...(st && { settings: st }) });
   });
   app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); deleteProject(id(req)); return { ok: true }; });
+  // Open the project folder in the system file manager (the daemon runs on the user's own machine).
+  app.post('/api/projects/:id/reveal', async req => {
+    const p = mustProject(id(req));
+    if (!existsSync(p.path)) throw new Error(`folder not found: ${p.path}`);
+    const [cmd, args] = process.platform === 'win32' ? ['explorer.exe', [p.path]] : process.platform === 'darwin' ? ['open', [p.path]] : ['xdg-open', [p.path]];
+    spawn(cmd, args as string[], { detached: true, stdio: 'ignore', windowsHide: false }).on('error', () => {}).unref();
+    return { ok: true };
+  });
   app.post('/api/projects/:id/start', async req => orchestrator.startProject(id(req), body(req).sessionId));
   app.post('/api/projects/:id/pause', async req => { orchestrator.pause(id(req), body(req).sessionId); return mustProject(id(req)); });
   app.post('/api/projects/:id/resume', async req => { await orchestrator.resume(id(req), body(req).sessionId); return mustProject(id(req)); });
@@ -161,6 +177,11 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return { ok: true };
   });
   app.post('/api/chat-sessions/:id/read', async req => markRead(id(req)));
+  // The account/model the coordinator would answer the next message with (what the chat's chip shows).
+  app.get('/api/projects/:id/coordinator-target', async req => {
+    const t = coordinatorTarget(mustProject(id(req)));
+    return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null, fallback: !!t.pinnedId && !t.pinned };
+  });
   app.post('/api/projects/:id/messages', async (req, reply) => {
     const text = String(body(req).text ?? '').trim();
     if (!text) throw new Error('empty message');

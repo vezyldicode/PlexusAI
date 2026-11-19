@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Pause, Play, Square } from 'lucide-react';
 import { api, clock, timeAgo } from './api.ts';
 import type { LogLine, ProjectDetail, Plexus } from './store.ts';
@@ -10,7 +10,7 @@ export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report'
 
 // ---------------------------------------------------------------- header
 
-export function ProjectHeader({ s, detail, view, onView }: { s: Plexus; detail: ProjectDetail; view: View; onView: (v: View) => void }) {
+export function ProjectHeader({ s, detail, view, onView, trailing }: { s: Plexus; detail: ProjectDetail; view: View; onView: (v: View) => void; trailing?: ReactNode }) {
   const p = detail.project;
   const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`, { sessionId: s.sessionId }).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
   const running = detail.tasks.filter(t => t.status === 'running').length;
@@ -36,6 +36,7 @@ export function ProjectHeader({ s, detail, view, onView }: { s: Plexus; detail: 
           {(p.status === 'paused' || p.status === 'stopped' || p.status === 'completed') && <button className="primary" onClick={() => act('resume')}><Ic i={Play} />Resume</button>}
           {p.status === 'running' && <button onClick={() => act('pause')}><Ic i={Pause} />Pause</button>}
           {(p.status === 'running' || p.status === 'paused') && <button className="danger" onClick={() => act('stop')}><Ic i={Square} />Stop</button>}
+          {trailing}
         </div>
       </div>
       <nav className="views" role="tablist">

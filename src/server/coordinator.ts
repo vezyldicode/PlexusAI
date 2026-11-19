@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Task } from '../shared/types.ts';
+import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
 import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
@@ -98,9 +98,8 @@ export async function handleChat(projectId: string, text: string, sessionId?: st
   try { await run; } finally { if (chatLocks.get(session.id) === run) chatLocks.delete(session.id); }
 }
 
-async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
-  const p = mustProject(projectId);
-  const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
+/** The account the coordinator would answer the next message on, and with which model/effort setting. */
+export function coordinatorTarget(p: Project) {
   const role = getRole('coordinator');
   const fake = { role: 'coordinator', kind: 'custom', status: 'pending', authorAccountId: null, lastAccountId: null } as unknown as Task;
   // Chat must stay responsive: the coordinator may share an account with a running worker
@@ -110,6 +109,15 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   // A pinned account is used whenever it can run; otherwise fall back to automatic selection.
   const pinned = pinnedId ? pickAccount(p, fake, accounts.filter(a => a.id === pinnedId)) : null;
   const account = pinned ?? pickAccount(p, fake, accounts);
+  const model = account ? p.settings.coordinatorModels?.[account.provider] || role.models[account.provider] : undefined;
+  const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] : undefined;
+  return { role, accounts, pinnedId, pinned, account, model, effort };
+}
+
+async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
+  const p = mustProject(projectId);
+  const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
+  const { role, accounts, pinnedId, pinned, account, model, effort } = coordinatorTarget(p);
   if (pinnedId && !pinned && account) {
     const a = accounts.find(x => x.id === pinnedId);
     say('system', `${a ? `${a.label || a.id} is ${a.enabled ? a.state : 'disabled'}` : `Account ${pinnedId} no longer exists`}; the coordinator answers on ${account.label || account.id} instead.`);
@@ -118,8 +126,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     say('system', 'No account is available to answer right now. The controls (pause/stop/resume, task actions) still work; your message is kept in the history.', { level: 'attention' });
     return;
   }
-  const model = p.settings.coordinatorModels?.[account.provider] || role.models[account.provider];
-  const eff = await effortForRun(account, model, p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider]);
+  const eff = await effortForRun(account, model, effort);
   if (eff.warning) say('system', `Coordinator: ${eff.warning}.`);
 
   // Continue the provider CLI conversation when it belongs to this very account (its history lives in the account's home);

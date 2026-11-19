@@ -4,7 +4,7 @@ import { api } from './api.ts';
 import type { ModelCatalog, ModelCatalogEntry, Provider } from './types.ts';
 
 /** Used until the daemon answers, or when no account could list its models. */
-const FALLBACK: Record<Provider, string[]> = { claude: ['opus', 'sonnet', 'haiku'], codex: [], mock: [] };
+export const FALLBACK: Record<Provider, string[]> = { claude: ['opus', 'sonnet', 'haiku'], codex: [], mock: [] };
 
 let shared: Promise<ModelCatalog> | null = null;
 const listeners = new Set<(c: ModelCatalog) => void>();
