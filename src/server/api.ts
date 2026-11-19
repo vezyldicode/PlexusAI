@@ -12,7 +12,7 @@ import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
 import {
-  createProject, deleteProject, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, swarmDir,
+  createProject, deleteProject, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
   updateProject, writeMemory,
 } from './projects.ts';
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
@@ -67,7 +67,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/api/') || req.url === '/api/health') return;
     const q = (req.query as any)?.token as string | undefined;
-    if (!check((req.headers['x-swarm-token'] as string | undefined) ?? q)) return reply.code(401).send({ error: 'unauthorized' });
+    if (!check((req.headers['x-plexus-token'] as string | undefined) ?? q)) return reply.code(401).send({ error: 'unauthorized' });
   });
 
   app.setErrorHandler((err: any, _req, reply) => { reply.code(err?.statusCode ?? 400).send({ error: String(err?.message ?? err) }); });
@@ -75,7 +75,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   const id = (req: FastifyRequest) => (req.params as any).id as string;
   const body = (req: FastifyRequest) => (req.body ?? {}) as any;
 
-  app.get('/api/health', async () => ({ ok: true, app: 'multiagent-swarm' }));
+  app.get('/api/health', async () => ({ ok: true, app: 'plexus' }));
   // Graceful stop (running agents are interrupted and resume on next start).
   app.post('/api/shutdown', async () => {
     setTimeout(() => { void hooks.shutdown().finally(() => process.exit(0)); }, 200);
@@ -125,7 +125,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return { ok: true };
   });
   app.get('/api/projects/:id/report', async req => {
-    const f = join(swarmDir(mustProject(id(req))), 'REPORT.md');
+    const f = join(plexusDir(mustProject(id(req))), 'REPORT.md');
     return { report: existsSync(f) ? readFileSync(f, 'utf8') : '' };
   });
   app.get('/api/projects/:id/events', async req => recentEvents(id(req), Number((req.query as any).limit ?? 300)));
@@ -178,7 +178,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.post('/api/skills/install', async req => installSkill(String(body(req).source ?? '')));
   app.post('/api/skills/upload', async req => {
     const b = body(req);
-    const dir = mkdtempSync(join(tmpdir(), 'swarm-upload-'));
+    const dir = mkdtempSync(join(tmpdir(), 'plexus-upload-'));
     try {
       const f = join(dir, String(b.filename ?? 'skill.zip').replace(/[^\w.-]/g, '_'));
       writeFileSync(f, Buffer.from(String(b.data ?? ''), 'base64'));
@@ -201,7 +201,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   const dist = join(appRoot, 'ui', 'dist');
   if (existsSync(join(dist, 'index.html'))) {
     await app.register(fastifyStatic, { root: dist, index: false, wildcard: false });
-    const page = () => readFileSync(join(dist, 'index.html'), 'utf8').replace('<head>', `<head><script>window.SWARM_TOKEN=${JSON.stringify(token)}</script>`);
+    const page = () => readFileSync(join(dist, 'index.html'), 'utf8').replace('<head>', `<head><script>window.PLEXUS_TOKEN=${JSON.stringify(token)}</script>`);
     app.get('/', async (_req, reply) => reply.type('text/html').send(page()));
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'not found' });

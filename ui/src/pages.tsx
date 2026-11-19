@@ -21,7 +21,7 @@ export function NewProjectDialog({ onClose, onCreated, onError }: { onClose: () 
         <label>Name<span className="field-note">Optional</span><input value={name} onChange={e => setName(e.target.value)} /></label>
         <label>Goal<span className="field-note">Optional when the folder has GOAL.md or docs</span><textarea value={goal} onChange={e => setGoal(e.target.value)} rows={5} placeholder="What should the finished product do" /></label>
         <label>Parallel tasks<input type="number" min={1} max={10} value={maxParallel} onChange={e => setMaxParallel(Number(e.target.value))} /></label>
-        <label className="check"><input type="checkbox" checked={start} onChange={e => setStart(e.target.checked)} />Start the swarm right away</label>
+        <label className="check"><input type="checkbox" checked={start} onChange={e => setStart(e.target.checked)} />Start Plexus right away</label>
         <div className="row end"><button onClick={onClose}>Cancel</button><button className="primary" disabled={!path} onClick={create}>Create project</button></div>
       </div>
     </div>
@@ -43,7 +43,7 @@ export function AccountsPage({ accounts, reload, onError }: { accounts: Account[
   return (
     <div className="page">
       <h1>Accounts</h1>
-      <p className="lead">Each account has its own folder, so several Claude or Codex accounts can run on this machine. The swarm spreads work across them and hands tasks over when one runs out of quota.</p>
+      <p className="lead">Each account has its own folder, so several Claude or Codex accounts can run on this machine. Plexus spreads work across them and hands tasks over when one runs out of quota.</p>
       <div className="toolbar">
         <select value={provider} onChange={e => setProvider(e.target.value as any)}><option value="claude">Claude (Claude Code)</option><option value="codex">ChatGPT (Codex CLI)</option><option value="mock">Mock (testing)</option></select>
         <input placeholder="Label" value={lbl} onChange={e => setLbl(e.target.value)} />

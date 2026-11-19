@@ -1,17 +1,17 @@
 {
-  "name": "multiagent-swarm",
+  "name": "plexus",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Autonomous multi-agent development swarm driving Claude Code and Codex CLI accounts",
+  "description": "Autonomous multi-agent development system driving Claude Code and Codex CLI accounts",
   "bin": {
-    "swarm": "src/cli/swarm.ts"
+    "plexus": "src/cli/plexus.ts"
   },
   "scripts": {
     "start": "node src/server/main.ts --open",
     "daemon": "node src/server/main.ts",
-    "stop": "node src/cli/swarm.ts shutdown",
-    "swarm": "node src/cli/swarm.ts",
+    "stop": "node src/cli/plexus.ts shutdown",
+    "plexus": "node src/cli/plexus.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"test/**/*.test.ts\" \"prototypes/**/*.test.mjs\"",
     "ui:dev": "npm --prefix ui run dev",

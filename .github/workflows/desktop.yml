@@ -30,7 +30,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
-          name: swarm-${{ matrix.os }}
+          name: plexus-${{ matrix.os }}
           path: |
             desktop/release/*.exe
             desktop/release/*.deb

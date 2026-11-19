@@ -1,14 +1,14 @@
-// Swarm desktop shell.
+// Plexus desktop shell.
 // The daemon (src/server) runs as its own background process, started with Electron's built-in Node
 // (ELECTRON_RUN_AS_NODE). This window is only a client of it: closing the window, or quitting the app,
-// leaves the swarm running, exactly like closing the browser tab with `npm start`.
+// leaves Plexus running, exactly like closing the browser tab with `npm start`.
 import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray, type MenuItemConstructorOptions } from 'electron';
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const PORT = Number(process.env.SWARM_PORT ?? 4317);
+const PORT = Number(process.env.PLEXUS_PORT ?? 4317);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 /** Folder holding src/server, defaults, ui/dist and the daemon's node_modules. */
@@ -16,40 +16,43 @@ const appRoot = app.isPackaged ? join(process.resourcesPath, 'app-root') : resol
 const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : resolve(import.meta.dirname, '..', 'build', 'icon.png');
 
 /** Same rule as src/server/paths.ts. */
-function swarmHome(): string {
-  return process.env.SWARM_HOME
-    ?? (process.platform === 'win32' ? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'swarm') : join(homedir(), '.swarm'));
+function plexusHome(): string {
+  if (process.env.PLEXUS_HOME) return process.env.PLEXUS_HOME;
+  const win = process.platform === 'win32';
+  const root = win ? process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming') : homedir();
+  const cur = join(root, win ? 'plexus' : '.plexus'), legacy = join(root, win ? 'swarm' : '.swarm');
+  return !existsSync(cur) && existsSync(legacy) ? legacy : cur;
 }
 
-// Electron's default userData on Windows is %APPDATA%\<productName> = %APPDATA%\Swarm, which is the daemon's
+// Electron's default userData on Windows is %APPDATA%\<productName> = %APPDATA%\Plexus, which is the daemon's
 // data folder (case-insensitive). Keep Chromium's cache out of it.
-app.setPath('userData', join(app.getPath('appData'), 'swarm-desktop'));
+app.setPath('userData', join(app.getPath('appData'), 'plexus-desktop'));
 
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let toldAboutBackground = false;
 
-type Health = 'swarm' | 'other' | 'down';
+type Health = 'plexus' | 'other' | 'down';
 async function health(): Promise<Health> {
   try {
     const r = await fetch(`${ORIGIN}/api/health`, { signal: AbortSignal.timeout(1500) });
     const j: any = await r.json().catch(() => null);
-    return j?.app === 'multiagent-swarm' || j?.ok === true ? 'swarm' : 'other';
+    return j?.app === 'plexus' || j?.ok === true ? 'plexus' : 'other';
   } catch (e: any) {
     // A non-HTTP listener on the port also ends up here; a refused connection means nothing is there.
     return e?.cause?.code === 'ECONNREFUSED' || e?.name === 'TimeoutError' ? 'down' : 'other';
   }
 }
 
-/** Start the daemon as a detached background process, logging to <SWARM_HOME>/logs/daemon.log. */
+/** Start the daemon as a detached background process, logging to <PLEXUS_HOME>/logs/daemon.log. */
 function spawnDaemon(): void {
-  const logs = join(swarmHome(), 'logs');
+  const logs = join(plexusHome(), 'logs');
   mkdirSync(logs, { recursive: true });
   const out = openSync(join(logs, 'daemon.log'), 'a');
   const child = spawn(process.execPath, [join(appRoot, 'src', 'server', 'main.ts')], {
     cwd: appRoot,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SWARM_PORT: String(PORT) },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PLEXUS_PORT: String(PORT) },
     detached: true,
     stdio: ['ignore', out, out],
     windowsHide: true,
@@ -57,29 +60,29 @@ function spawnDaemon(): void {
   child.unref();
 }
 
-/** Make sure a swarm daemon answers on PORT, starting one if needed. Returns an error message on failure. */
+/** Make sure a Plexus daemon answers on PORT, starting one if needed. Returns an error message on failure. */
 async function ensureDaemon(): Promise<string | null> {
   let h = await health();
-  if (h === 'swarm') return null;
-  if (h === 'other') return `Port ${PORT} is used by another program. Set the SWARM_PORT environment variable to another port and start Swarm again.`;
-  if (!existsSync(join(appRoot, 'src', 'server', 'main.ts'))) return `Swarm files not found in ${appRoot}.`;
+  if (h === 'plexus') return null;
+  if (h === 'other') return `Port ${PORT} is used by another program. Set the PLEXUS_PORT environment variable to another port and start Plexus again.`;
+  if (!existsSync(join(appRoot, 'src', 'server', 'main.ts'))) return `Plexus files not found in ${appRoot}.`;
   spawnDaemon();
   for (let i = 0; i < 60; i++) {
     await new Promise(r => setTimeout(r, 500));
     h = await health();
-    if (h === 'swarm') return null;
+    if (h === 'plexus') return null;
   }
-  return `The swarm daemon did not start within 30 s. See ${join(swarmHome(), 'logs', 'daemon.log')}.`;
+  return `Plexus daemon did not start within 30 s. See ${join(plexusHome(), 'logs', 'daemon.log')}.`;
 }
 
 async function stopDaemon(): Promise<void> {
   // The token is injected into the UI page; reuse the daemon's own token file.
   try {
     const { readFileSync } = await import('node:fs');
-    const token = readFileSync(join(swarmHome(), 'api-token'), 'utf8').trim();
-    await fetch(`${ORIGIN}/api/shutdown`, { method: 'POST', headers: { 'x-swarm-token': token, 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) });
+    const token = readFileSync(join(plexusHome(), 'api-token'), 'utf8').trim();
+    await fetch(`${ORIGIN}/api/shutdown`, { method: 'POST', headers: { 'x-plexus-token': token, 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) });
   } catch { /* already down */ }
-  for (let i = 0; i < 40 && (await health()) === 'swarm'; i++) await new Promise(r => setTimeout(r, 250));
+  for (let i = 0; i < 40 && (await health()) === 'plexus'; i++) await new Promise(r => setTimeout(r, 250));
 }
 
 function isInternal(url: string): boolean {
@@ -89,7 +92,7 @@ function isInternal(url: string): boolean {
 function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
     width: 1400, height: 900, minWidth: 900, minHeight: 600,
-    title: 'Swarm', icon: iconPath, show: false, backgroundColor: '#1f2430',
+    title: 'Plexus', icon: iconPath, show: false, backgroundColor: '#1f2430',
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   w.setMenuBarVisibility(false);
@@ -107,14 +110,14 @@ function createWindow(): BrowserWindow {
     setTimeout(() => { void ensureDaemon().then(err => { if (!err && !w.isDestroyed()) void w.loadURL(ORIGIN); }); }, 1500);
   });
   w.once('ready-to-show', () => w.show());
-  // Closing the window keeps the app (and the swarm) running in the tray.
+  // Closing the window keeps the app (and Plexus) running in the tray.
   w.on('close', e => {
     if (quitting || !tray) return;
     e.preventDefault();
     w.hide();
     if (!toldAboutBackground && process.platform === 'win32') {
       toldAboutBackground = true;
-      tray.displayBalloon({ iconType: 'info', title: 'Swarm is still running', content: 'The swarm keeps working in the background. Open it again from the tray icon.' });
+      tray.displayBalloon({ iconType: 'info', title: 'Plexus is still running', content: 'Plexus keeps working in the background. Open it again from the tray icon.' });
     }
   });
   w.on('closed', () => { if (win === w) win = null; });
@@ -124,7 +127,7 @@ function createWindow(): BrowserWindow {
 
 async function showWindow(): Promise<void> {
   const err = await ensureDaemon();
-  if (err) { dialog.showErrorBox('Swarm', err); return; }
+  if (err) { dialog.showErrorBox('Plexus', err); return; }
   if (!win || win.isDestroyed()) win = createWindow();
   else {
     if (win.webContents.getURL() === '' || !isInternal(win.webContents.getURL())) void win.loadURL(ORIGIN);
@@ -139,15 +142,15 @@ function quitApp(): void { quitting = true; app.quit(); }
 function buildTray(): void {
   const img = nativeImage.createFromPath(iconPath).resize({ width: process.platform === 'win32' ? 16 : 22 });
   tray = new Tray(img);
-  tray.setToolTip('Swarm');
+  tray.setToolTip('Plexus');
   const menu: MenuItemConstructorOptions[] = [
-    { label: 'Open Swarm', click: () => void showWindow() },
-    { label: 'Open data folder', click: () => void shell.openPath(swarmHome()) },
+    { label: 'Open Plexus', click: () => void showWindow() },
+    { label: 'Open data folder', click: () => void shell.openPath(plexusHome()) },
     { type: 'separator' },
-    { label: 'Restart swarm', click: async () => { await stopDaemon(); await showWindow(); win?.webContents.reload(); } },
+    { label: 'Restart Plexus', click: async () => { await stopDaemon(); await showWindow(); win?.webContents.reload(); } },
     { type: 'separator' },
-    { label: 'Quit (swarm keeps running)', click: quitApp },
-    { label: 'Stop swarm and quit', click: async () => { await stopDaemon(); quitApp(); } },
+    { label: 'Quit (Plexus keeps running)', click: quitApp },
+    { label: 'Stop Plexus and quit', click: async () => { await stopDaemon(); quitApp(); } },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(menu));
   tray.on('click', () => void showWindow());

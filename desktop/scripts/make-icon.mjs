@@ -1,4 +1,4 @@
-// Generates build/icon.png (512x512): a dark rounded square with a hexagonal "swarm" of dots.
+// Generates build/icon.png (512x512): a dark rounded square with a hexagonal network of dots.
 // No image libraries: raw RGBA pixels, zlib-compressed into a PNG by hand.
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';

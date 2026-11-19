@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { MessageSquare, Plus, X } from 'lucide-react';
-import { useSwarm } from './store.ts';
+import { usePlexus } from './store.ts';
 import { Sidebar, type Page } from './components/Sidebar.tsx';
 import { ChatPanel } from './components/ChatPanel.tsx';
 import { NetworkView } from './network/NetworkView.tsx';
@@ -15,16 +15,16 @@ const store = (k: string, v: string) => { try { localStorage.setItem(k, v); } ca
 
 export default function App() {
   const [page, setPage] = useState<Page>('project');
-  const [selected, setSelected] = useState<string | null>(() => stored('swarm.project'));
-  const [view, setView] = useState<View>(() => (VIEWS as string[]).includes(stored('swarm.view') ?? '') ? stored('swarm.view') as View : 'network');
+  const [selected, setSelected] = useState<string | null>(() => stored('plexus.project'));
+  const [view, setView] = useState<View>(() => (VIEWS as string[]).includes(stored('plexus.view') ?? '') ? stored('plexus.view') as View : 'network');
   const [showNew, setShowNew] = useState(false);
   const [tabs, setTabs] = useState<string[]>([]);
   const [active, setActive] = useState<string>(COORDINATOR);
   const [chatOpen, setChatOpen] = useState(() => innerWidth > 1180);
-  const s = useSwarm(selected);
+  const s = usePlexus(selected);
 
-  useEffect(() => { if (selected) store('swarm.project', selected); setTabs([]); setActive(COORDINATOR); }, [selected]);
-  useEffect(() => { store('swarm.view', view); }, [view]);
+  useEffect(() => { if (selected) store('plexus.project', selected); setTabs([]); setActive(COORDINATOR); }, [selected]);
+  useEffect(() => { store('plexus.view', view); }, [view]);
   useEffect(() => {
     if (!selected && s.projects.length) setSelected(s.projects[0].id);
     if (selected && s.projects.length && !s.projects.some(p => p.id === selected)) setSelected(s.projects[0]?.id ?? null);
@@ -71,7 +71,7 @@ export default function App() {
           </div>
         ) : (
           <Empty title="No project selected">
-            <p>Create a project from a folder that holds your documentation, then start the swarm.</p>
+            <p>Create a project from a folder that holds your documentation, then start Plexus.</p>
             <button className="primary" onClick={() => setShowNew(true)}><Ic i={Plus} />New project</button>
           </Empty>
         ))}

@@ -1,4 +1,4 @@
-# Multiagent Swarm
+# Plexus
 
 Phần mềm điều phối một nhóm AI (nhiều account Claude Code và Codex) tự phát triển một dự án phần mềm từ documentation tới thành phẩm. Các AI tự đọc tài liệu, tự lập kế hoạch, làm song song, review chéo, kiểm thử, đánh giá theo tiêu chí hoàn thành. Khi một account hết quota, task tự chuyển sang account khác.
 
@@ -46,13 +46,13 @@ npm run stop
 npm start
 ```
 
-`npm run stop` dừng daemon an toàn. Task đang chạy được giữ lại và tự chạy tiếp ở lần khởi động sau. Daemon chạy nền độc lập với giao diện: đóng trình duyệt thì swarm vẫn chạy.
+`npm run stop` dừng daemon an toàn. Task đang chạy được giữ lại và tự chạy tiếp ở lần khởi động sau. Daemon chạy nền độc lập với giao diện: đóng trình duyệt thì Plexus vẫn chạy.
 
-Dữ liệu (database, thư mục đăng nhập của từng account, roles, skills, worktree, log) nằm ở `%APPDATA%\swarm` trên Windows, `~/.swarm` trên macOS/Linux. Đổi vị trí bằng biến `SWARM_HOME`, đổi cổng bằng `SWARM_PORT`.
+Dữ liệu (database, thư mục đăng nhập của từng account, roles, skills, worktree, log) nằm ở `%APPDATA%\plexus` trên Windows, `~/.plexus` trên macOS/Linux. Đổi vị trí bằng biến `PLEXUS_HOME`, đổi cổng bằng `PLEXUS_PORT`.
 
 ## Desktop app (Windows, Linux)
 
-Bản desktop chạy cùng daemon và dữ liệu như trên, kèm icon ở khay hệ thống. Đóng cửa sổ thì swarm vẫn chạy nền. Chi tiết: [docs/04-desktop-app-feasibility.md](docs/04-desktop-app-feasibility.md).
+Bản desktop chạy cùng daemon và dữ liệu như trên, kèm icon ở khay hệ thống. Đóng cửa sổ thì Plexus vẫn chạy nền. Chi tiết: [docs/04-desktop-app-feasibility.md](docs/04-desktop-app-feasibility.md).
 
 ```bash
 npm --prefix desktop install
@@ -64,7 +64,7 @@ npm run desktop
 
 Lệnh trên chạy app từ mã nguồn. Muốn tạo bộ cài:
 
-- Windows: `npm run desktop:win` → `desktop/release/Swarm Setup <version>.exe`
+- Windows: `npm run desktop:win` → `desktop/release/Plexus Setup <version>.exe`
 - Linux (chạy trên máy Linux): `npm run desktop:linux` → `.deb` và `.tar.gz`
 
 Bản cài không cần Node.js (app có Node riêng). Vẫn cần git, Claude Code CLI và/hoặc Codex CLI như mục Yêu cầu.
@@ -75,33 +75,33 @@ Bản cài không cần Node.js (app có Node riêng). Vẫn cần git, Claude C
 2. Bấm **Log in**. Một cửa sổ terminal mở ra; bạn đăng nhập trên trình duyệt một lần là xong.
 3. **＋ New project.** Chọn thư mục chứa documentation (ví dụ `docs/`, `README`, `GOAL.md`), ghi mục tiêu, bấm **Create**.
 4. Theo dõi tiến độ ở các tab:
-   - **Chat**: hỏi tiến độ hoặc đưa chỉ đạo mới cho swarm.
+   - **Chat**: hỏi tiến độ hoặc đưa chỉ đạo mới cho Plexus.
    - **Tasks**: bảng công việc.
    - **Activity**: output trực tiếp của các agent.
    - **Memory**: bộ nhớ chung mà mọi agent đọc.
    - **Report**: báo cáo cuối.
-5. Swarm sai hướng thì bấm **Pause** hoặc **Stop**, rồi nhắn chỉ đạo trong Chat. Những thay đổi lớn hiện dưới dạng đề xuất để bạn **Approve** trước khi áp dụng.
+5. Plexus sai hướng thì bấm **Pause** hoặc **Stop**, rồi nhắn chỉ đạo trong Chat. Những thay đổi lớn hiện dưới dạng đề xuất để bạn **Approve** trước khi áp dụng.
 
-Kết quả nằm trong chính thư mục project (nhánh `main`). Báo cáo cuối ở `.swarm/REPORT.md`.
+Kết quả nằm trong chính thư mục project (nhánh `main`). Báo cáo cuối ở `.plexus/REPORT.md`.
 
 ## CLI
 
 ```bash
-node src/cli/swarm.ts help
+node src/cli/plexus.ts help
 ```
 
 Các lệnh chính:
 
 | Lệnh | Việc |
 |---|---|
-| `swarm account add claude --id claude-02` | Thêm account |
-| `swarm account login claude-02` | Đăng nhập account |
-| `swarm accounts` | Xem account và quota |
-| `swarm project add <thư mục> --goal "..." --start` | Tạo và chạy project |
-| `swarm tasks <project>` | Xem danh sách task |
-| `swarm chat <project> "..."` | Nhắn cho Coordinator |
-| `swarm watch <project>` | Theo dõi trực tiếp |
-| `swarm pause` · `swarm stop` · `swarm resume` | Điều khiển project |
+| `plexus account add claude --id claude-02` | Thêm account |
+| `plexus account login claude-02` | Đăng nhập account |
+| `plexus accounts` | Xem account và quota |
+| `plexus project add <thư mục> --goal "..." --start` | Tạo và chạy project |
+| `plexus tasks <project>` | Xem danh sách task |
+| `plexus chat <project> "..."` | Nhắn cho Coordinator |
+| `plexus watch <project>` | Theo dõi trực tiếp |
+| `plexus pause` · `plexus stop` · `plexus resume` | Điều khiển project |
 
 ## Kiểm thử
 
@@ -125,5 +125,5 @@ npm run typecheck
   - Mỗi task chỉ làm việc trong git worktree riêng.
   - Dù vậy, nên chạy daemon trong WSL2/Docker hoặc trên máy không chứa dữ liệu quan trọng.
 - Skill cài từ bên ngoài được để **tắt** cho tới khi bạn xem hết file của nó (Skills → Review files).
-- API chỉ nghe trên `127.0.0.1` và yêu cầu token, lưu tại `<SWARM_HOME>/api-token`.
+- API chỉ nghe trên `127.0.0.1` và yêu cầu token, lưu tại `<PLEXUS_HOME>/api-token`.
 - Dùng nhiều account để cộng dồn quota có thể vi phạm điều khoản của nhà cung cấp. Xem mục 10 trong tài liệu thiết kế.

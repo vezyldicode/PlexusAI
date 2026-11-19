@@ -54,7 +54,7 @@ class CodexClient {
     });
   }
   async init() {
-    await this.request('initialize', { clientInfo: { name: 'swarm-quota-probe', version: '0.0.1' } });
+    await this.request('initialize', { clientInfo: { name: 'plexus-quota-probe', version: '0.0.1' } });
     this.proc.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
   }
   async poll() {
@@ -101,13 +101,13 @@ function claudeSnapshot(acct) {
       tok.messages++;
     }
   }
-  const snapFile = join(acct.home, 'swarm-ratelimits.json');
+  const snapFile = join(acct.home, 'plexus-ratelimits.json');
   const rateLimits = existsSync(snapFile) ? JSON.parse(readFileSync(snapFile, 'utf8')) : null;
   return { status: rateLimits ? 'ok' : 'tokens_only', tokensLast5h: tok, rateLimits };
 }
 
 // Live probe for an idle Claude account: one minimal Haiku call (~5 s, tiny quota cost).
-// Only when --claude-probe is passed; the swarm should do this rarely (e.g. stale > 10 min).
+// Only when --claude-probe is passed; Plexus should do this rarely (e.g. stale > 10 min).
 function claudeProbe(acct) {
   return new Promise(resolve => {
     const p = spawn('claude -p ok --model haiku --output-format stream-json --verbose --max-turns 1 --tools ""', {

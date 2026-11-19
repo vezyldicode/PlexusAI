@@ -5,7 +5,7 @@ import { appRoot } from './paths.ts';
 import { readMemory } from './projects.ts';
 import { getTask, shortId } from './tasks.ts';
 
-export const TASK_DIR = '.swarm-task';
+export const TASK_DIR = '.plexus-task';
 export const RESULT_FILE = `${TASK_DIR}/result.json`;
 export const PROGRESS_FILE = `${TASK_DIR}/progress.md`;
 
@@ -84,7 +84,7 @@ ${head(progress, 6_000) || '(empty)'}`;
 }
 
 export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Account, progress: string, skills: string[]): string {
-  const meta = `<!-- swarm-meta\nrole: ${role.name}\nkind: ${t.kind}\ntask_id: ${shortId(t)}\nresult_file: ${RESULT_FILE}\n-->`;
+  const meta = `<!-- plexus-meta\nrole: ${role.name}\nkind: ${t.kind}\ntask_id: ${shortId(t)}\nresult_file: ${RESULT_FILE}\n-->`;
   return [
     meta,
     `# RULES\n${base()}`,
@@ -100,7 +100,7 @@ export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Accoun
 export interface StatusDigest { tasks: string; accounts: string; events: string; counts: string }
 
 export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string): string {
-  const meta = `<!-- swarm-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
+  const meta = `<!-- plexus-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
   const hist = history.slice(-20).map(m => `[${m.author}] ${head(m.text, 1500)}`).join('\n');
   return [
     meta,

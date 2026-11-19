@@ -19,7 +19,7 @@ export async function gitOk(cwd: string, ...args: string[]): Promise<string> {
   return r.stdout.trim();
 }
 
-const IDENTITY = ['-c', 'user.name=Swarm', '-c', 'user.email=swarm@localhost'];
+const IDENTITY = ['-c', 'user.name=Plexus', '-c', 'user.email=plexus@localhost'];
 
 /** Make sure `dir` is a git repo with at least one commit; returns the main branch name. */
 export async function ensureRepo(dir: string): Promise<string> {
@@ -30,20 +30,20 @@ export async function ensureRepo(dir: string): Promise<string> {
   if (top.code !== 0 || norm(top.stdout) !== norm(dir)) await gitOk(dir, 'init', '-b', 'main');
   if ((await git(dir, 'rev-parse', '--verify', 'HEAD')).code !== 0) {
     await gitOk(dir, 'add', '-A');
-    await gitOk(dir, ...IDENTITY, 'commit', '--allow-empty', '-m', 'chore: initial commit (swarm)');
+    await gitOk(dir, ...IDENTITY, 'commit', '--allow-empty', '-m', 'chore: initial commit (plexus)');
   }
-  addExcludes(dir, ['.swarm/', '.swarm-task/', '.claude/skills/', '.agents/skills/']);
+  addExcludes(dir, ['.plexus/', '.plexus-task/', '.claude/skills/', '.agents/skills/']);
   return gitOk(dir, 'rev-parse', '--abbrev-ref', 'HEAD');
 }
 
-/** Ignore swarm-internal paths in every worktree without touching the project's .gitignore. */
+/** Ignore plexus-internal paths in every worktree without touching the project's .gitignore. */
 export function addExcludes(repo: string, patterns: string[]) {
   const commonDir = join(repo, '.git');
   if (!existsSync(commonDir)) return;
   const file = join(commonDir, 'info', 'exclude');
   const cur = existsSync(file) ? readFileSync(file, 'utf8') : '';
   const missing = patterns.filter(p => !cur.split(/\r?\n/).includes(p));
-  if (missing.length) appendFileSync(file, (cur.endsWith('\n') || !cur ? '' : '\n') + '# multiagent-swarm\n' + missing.join('\n') + '\n');
+  if (missing.length) appendFileSync(file, (cur.endsWith('\n') || !cur ? '' : '\n') + '# plexus\n' + missing.join('\n') + '\n');
 }
 
 export async function addWorktree(repo: string, path: string, opts: { branch?: string; newBranchFrom?: string; detachAt?: string }): Promise<void> {

@@ -1,8 +1,8 @@
-# Packaging for the Swarm desktop app. Build from this folder:
-#   npm run dist:win     -> release/Swarm Setup <version>.exe (NSIS) + release/win-unpacked/
-#   npm run dist:linux   -> release/swarm-desktop_<version>_amd64.deb + .tar.gz   (run on Linux / WSL / CI)
-appId: local.multiagent-swarm
-productName: Swarm
+# Packaging for the Plexus desktop app. Build from this folder:
+#   npm run dist:win     -> release/Plexus Setup <version>.exe (NSIS) + release/win-unpacked/
+#   npm run dist:linux   -> release/plexus-desktop_<version>_amd64.deb + .tar.gz   (run on Linux / WSL / CI)
+appId: local.plexus
+productName: Plexus
 copyright: vezyldicode
 directories:
   output: release
@@ -43,8 +43,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Swarm
-  # Data in %APPDATA%\swarm (projects, accounts, logins) is never touched by uninstall.
+  shortcutName: Plexus
+  # Data in %APPDATA%\plexus (projects, accounts, logins) is never touched by uninstall.
   deleteAppDataOnUninstall: false
 
 linux:
@@ -56,4 +56,4 @@ linux:
   category: Development
   icon: build/icon.png
   maintainer: vezyldicode
-  synopsis: Multi-agent development swarm
+  synopsis: Multi-agent development system

@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-process.env.SWARM_HOME = mkdtempSync(join(tmpdir(), 'swarm-unit-'));
+process.env.PLEXUS_HOME = mkdtempSync(join(tmpdir(), 'plexus-unit-'));
 
 const { classifyCodexRun } = await import('../src/server/adapters/codex.ts');
 const { classifyClaudeRun } = await import('../src/server/adapters/claude-limits.ts');
@@ -54,7 +54,7 @@ test('claude: limited run gives cooldown at reset time', () => {
 });
 
 test('ensureRepo gives a nested folder its own repository (never commits to the parent)', async () => {
-  const parent = mkdtempSync(join(tmpdir(), 'swarm-parent-'));
+  const parent = mkdtempSync(join(tmpdir(), 'plexus-parent-'));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: parent });
   execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'parent'], { cwd: parent });
   const child = join(parent, 'sub', 'proj');
@@ -103,7 +103,7 @@ test('reviews prefer another account and another provider than the author', () =
 });
 
 test('readResult falls back to the json block of the final message', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'swarm-res-'));
+  const dir = mkdtempSync(join(tmpdir(), 'plexus-res-'));
   const r = readResult(dir, 'Done.\n```json\n{"status":"done","summary":"s","review":{"verdict":"approve"}}\n```');
   assert.equal(r?.review?.verdict, 'approve');
   assert.equal(readResult(dir, 'no json here'), null);
@@ -189,7 +189,7 @@ test('scheduler: per-role parallel limit and no two writers on overlapping paths
   const { saveRole, readRole } = await import('../src/server/roles.ts');
   const { Orchestrator } = await import('../src/server/orchestrator.ts');
   addAccount({ provider: 'mock', id: 'sched-m1', maxConcurrency: 5 });
-  const p = createProject({ path: mkdtempSync(join(tmpdir(), 'swarm-sched-')), settings: { maxParallel: 5 } });
+  const p = createProject({ path: mkdtempSync(join(tmpdir(), 'plexus-sched-')), settings: { maxParallel: 5 } });
   setProjectStatus(p.id, 'running');
   const t1 = createTask(p.id, { title: 'a', role: 'implementer', kind: 'build', paths: ['src/a'] });
   const t2 = createTask(p.id, { title: 'a2', role: 'implementer', kind: 'build', paths: ['src/a/x.ts'] });

@@ -33,7 +33,7 @@ const MIGRATIONS: string[] = [
      name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
      source TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, created_at TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
-  // Per-task model override, keyed by provider (set from the swarm network in the UI).
+  // Per-task model override, keyed by provider (set from the Plexus network in the UI).
   `ALTER TABLE tasks ADD COLUMN models TEXT NOT NULL DEFAULT '{}';`,
   // Files/directories a task expects to touch, so the scheduler can keep overlapping writers apart.
   `ALTER TABLE tasks ADD COLUMN paths TEXT NOT NULL DEFAULT '[]';`,

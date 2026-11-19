@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Project, type ProjectSettings, type ProjectStatus } from '../shared/types.ts';
@@ -71,10 +71,14 @@ export function deleteProject(id: string): void {
   db.prepare('DELETE FROM projects WHERE id = ?').run(id);
 }
 
-// ---------------- memory (lives in the project: <project>/.swarm/memory) ----------------
+// ---------------- memory (lives in the project: <project>/.plexus/memory) ----------------
 
-export const swarmDir = (p: Project) => join(p.path, '.swarm');
-export const memoryDir = (p: Project) => join(swarmDir(p), 'memory');
+export function plexusDir(p: Project): string {
+  const dir = join(p.path, '.plexus'), legacy = join(p.path, '.swarm'); // folder name before the rename
+  if (!existsSync(dir) && existsSync(legacy)) renameSync(legacy, dir);
+  return dir;
+}
+export const memoryDir = (p: Project) => join(plexusDir(p), 'memory');
 export const MEMORY_FILES = ['goal.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'] as const;
 
 export function readMemory(p: Project, file: string): string {

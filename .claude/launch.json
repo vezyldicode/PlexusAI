@@ -2,17 +2,17 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "swarm-dev",
+      "name": "plexus-dev",
       "runtimeExecutable": "node",
       "runtimeArgs": ["src/server/main.ts"],
-      "env": { "SWARM_HOME": "G:/03_Work/Projects/Multiagent-swarm/.swarm-dev/home", "SWARM_PORT": "4318" },
+      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/home", "PLEXUS_PORT": "4318" },
       "port": 4318
     },
     {
-      "name": "swarm-mock",
+      "name": "plexus-mock",
       "runtimeExecutable": "node",
       "runtimeArgs": ["src/server/main.ts"],
-      "env": { "SWARM_HOME": "G:/03_Work/Projects/Multiagent-swarm/.swarm-dev/mock-home", "SWARM_PORT": "4319" },
+      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/mock-home", "PLEXUS_PORT": "4319" },
       "port": 4319
     }
   ]

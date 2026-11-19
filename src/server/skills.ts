@@ -66,11 +66,11 @@ export function installSkill(source: string): Skill[] {
   try {
     if (/^(https?:\/\/|git@)/.test(source)) {
       const [url, sub] = source.split('#');
-      tmp = mkdtempSync(join(tmpdir(), 'swarm-skill-'));
+      tmp = mkdtempSync(join(tmpdir(), 'plexus-skill-'));
       execFileSync('git', ['clone', '--depth', '1', url, tmp], { stdio: 'pipe', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
       root = sub ? join(tmp, sub) : tmp;
     } else if (/\.zip$/i.test(source)) {
-      tmp = mkdtempSync(join(tmpdir(), 'swarm-skill-'));
+      tmp = mkdtempSync(join(tmpdir(), 'plexus-skill-'));
       execFileSync('tar', ['-xf', source, '-C', tmp], { stdio: 'pipe' });
       root = tmp;
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Thin CLI over the daemon's HTTP API.  Usage: node src/cli/swarm.ts <command> ...
+// Thin CLI over the daemon's HTTP API.  Usage: node src/cli/plexus.ts <command> ...
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { paths } from '../server/paths.ts';
@@ -13,13 +13,13 @@ for (let i = 0; i < rest.length; i++) {
   else args.push(a);
 }
 
-const base = `http://127.0.0.1:${process.env.SWARM_PORT ?? 4317}`;
+const base = `http://127.0.0.1:${process.env.PLEXUS_PORT ?? 4317}`;
 const token = existsSync(paths.token) ? readFileSync(paths.token, 'utf8').trim() : '';
 
 async function api(method: string, path: string, body?: unknown): Promise<any> {
   let r: Response;
   try {
-    r = await fetch(base + path, { method, headers: { 'content-type': 'application/json', 'x-swarm-token': token }, body: body === undefined ? undefined : JSON.stringify(body) });
+    r = await fetch(base + path, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': token }, body: body === undefined ? undefined : JSON.stringify(body) });
   } catch {
     console.error(`Daemon not reachable at ${base}. Start it with: npm run daemon`);
     process.exit(2);
@@ -31,22 +31,22 @@ async function api(method: string, path: string, body?: unknown): Promise<any> {
 
 const pct = (w: any) => (w?.usedPercent ?? null) === null ? '  -' : String(w.usedPercent).padStart(3) + '%';
 
-const help = `swarm — autonomous multi-agent swarm
+const help = `plexus — autonomous multi-agent development system
 
-  swarm daemon                                   start the daemon (foreground)
-  swarm shutdown                                 stop the running daemon (agents resume on next start)
-  swarm accounts                                 list accounts with quota
-  swarm account add <claude|codex|mock> [--id x] [--label "..."] [--home dir] [--max 1]
-  swarm account login <id>                       open a terminal to log this account in
-  swarm account probe <id>                       refresh state/quota now
-  swarm account enable|disable|remove <id>
-  swarm projects                                 list projects
-  swarm project add <path> [--name n] [--goal "..."] [--start]
-  swarm start|pause|resume|stop <project>
-  swarm tasks <project>                          task list
-  swarm log <task-id>                            log of the latest run
-  swarm chat <project> "message"                 talk to the coordinator
-  swarm watch <project>                          follow the chat and events`;
+  plexus daemon                                   start the daemon (foreground)
+  plexus shutdown                                 stop the running daemon (agents resume on next start)
+  plexus accounts                                 list accounts with quota
+  plexus account add <claude|codex|mock> [--id x] [--label "..."] [--home dir] [--max 1]
+  plexus account login <id>                       open a terminal to log this account in
+  plexus account probe <id>                       refresh state/quota now
+  plexus account enable|disable|remove <id>
+  plexus projects                                 list projects
+  plexus project add <path> [--name n] [--goal "..."] [--start]
+  plexus start|pause|resume|stop <project>
+  plexus tasks <project>                          task list
+  plexus log <task-id>                            log of the latest run
+  plexus chat <project> "message"                 talk to the coordinator
+  plexus watch <project>                          follow the chat and events`;
 
 switch (cmd) {
   case 'daemon': {
@@ -63,7 +63,7 @@ switch (cmd) {
   }
   case 'accounts': {
     const list = await api('GET', '/api/accounts');
-    if (!list.length) console.log('No accounts. Add one: swarm account add claude');
+    if (!list.length) console.log('No accounts. Add one: plexus account add claude');
     for (const a of list) console.log(`${a.id.padEnd(14)} ${a.provider.padEnd(7)} ${(a.enabled ? a.state : 'disabled').padEnd(12)} 5h ${pct(a.quota?.primary)}  week ${pct(a.quota?.secondary)}  running ${a.running}${a.cooldownUntil ? `  until ${a.cooldownUntil}` : ''}`);
     break;
   }
@@ -71,7 +71,7 @@ switch (cmd) {
     const [sub, x] = args;
     if (sub === 'add') {
       const a = await api('POST', '/api/accounts', { provider: x, id: flags.id, label: flags.label, home: flags.home ? resolve(String(flags.home)) : undefined, maxConcurrency: flags.max ? Number(flags.max) : undefined });
-      console.log(`Added ${a.id} (home ${a.home}).${a.provider !== 'mock' ? ` Log in with: swarm account login ${a.id}` : ''}`);
+      console.log(`Added ${a.id} (home ${a.home}).${a.provider !== 'mock' ? ` Log in with: plexus account login ${a.id}` : ''}`);
     } else if (sub === 'login') { const r = await api('POST', `/api/accounts/${x}/login`); console.log(r.opened ? 'A login window was opened.' : `Run this in a terminal:\n${r.command}`); }
     else if (sub === 'probe') { const a = await api('POST', `/api/accounts/${x}/probe`); console.log(`${a.id}: ${a.state} 5h ${pct(a.quota?.primary)} week ${pct(a.quota?.secondary)}`); }
     else if (sub === 'enable' || sub === 'disable') { await api('PATCH', `/api/accounts/${x}`, { enabled: sub === 'enable' }); console.log('ok'); }
@@ -86,7 +86,7 @@ switch (cmd) {
   case 'project': {
     if (args[0] !== 'add' || !args[1]) { console.log(help); break; }
     const p = await api('POST', '/api/projects', { path: resolve(args[1]), name: flags.name, goal: flags.goal, start: !!flags.start });
-    console.log(`Project ${p.id} (${p.status}).${flags.start ? '' : ` Start with: swarm start ${p.id}`}`);
+    console.log(`Project ${p.id} (${p.status}).${flags.start ? '' : ` Start with: plexus start ${p.id}`}`);
     break;
   }
   case 'start': case 'pause': case 'resume': case 'stop': {

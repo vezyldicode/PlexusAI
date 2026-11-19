@@ -6,7 +6,7 @@ import { getDb, now } from './db.ts';
 import { bus } from './events.ts';
 import {
   appendMemory, getProject, listProjects, mustProject, postMessage, readAcceptance, recordDecision, setProjectStatus,
-  swarmDir, updateProject, writeAcceptance, writeMemory,
+  plexusDir, updateProject, writeAcceptance, writeMemory,
 } from './projects.ts';
 import { getRole } from './roles.ts';
 import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask } from './tasks.ts';
@@ -81,7 +81,7 @@ export class Orchestrator {
   async startProject(id: string): Promise<Project> {
     let p = mustProject(id);
     const main = await ensureRepo(p.path);
-    if (await commitAll(p.path, 'chore: snapshot before swarm run')) postMessage(id, 'system', 'Committed uncommitted changes in the project before starting.');
+    if (await commitAll(p.path, 'chore: snapshot before Plexus run')) postMessage(id, 'system', 'Committed uncommitted changes in the project before starting.');
     p = updateProject(id, { mainBranch: main });
     if (!listTasks(id).length) {
       createTask(id, { title: 'Analyse documentation and goal', role: 'analyst', kind: 'ingest', priority: 100,
@@ -89,7 +89,7 @@ export class Orchestrator {
       updateProject(id, { phase: 'ingest' });
     }
     setProjectStatus(id, 'running');
-    postMessage(id, 'system', `Swarm started (phase: ${mustProject(id).phase}).`);
+    postMessage(id, 'system', `Plexus started (phase: ${mustProject(id).phase}).`);
     void this.tick();
     return mustProject(id);
   }
@@ -474,11 +474,11 @@ export class Orchestrator {
     if (mustProject(p.id).status === 'completed') return;
     const acc = readAcceptance(p);
     const passed = acc.filter(a => a.pass).length;
-    const header = `# Swarm report — ${p.name}\n\nStatus: ${complete ? 'COMPLETE' : 'STOPPED WITH GAPS' + (why ? ` (${why})` : '')}\nAcceptance: ${passed}/${acc.length} passed\nFinished: ${now()}\n\n`;
-    writeFileSync(join(swarmDir(p), 'REPORT.md'), header + report);
+    const header = `# Plexus report — ${p.name}\n\nStatus: ${complete ? 'COMPLETE' : 'STOPPED WITH GAPS' + (why ? ` (${why})` : '')}\nAcceptance: ${passed}/${acc.length} passed\nFinished: ${now()}\n\n`;
+    writeFileSync(join(plexusDir(p), 'REPORT.md'), header + report);
     updateProject(p.id, { phase: complete ? 'done' : 'done-with-gaps' });
     setProjectStatus(p.id, 'completed');
-    postMessage(p.id, 'system', `${complete ? 'Project complete' : 'Swarm stopped with gaps'}: acceptance ${passed}/${acc.length}. Report in .swarm/REPORT.md`, { level: 'done', report: true });
+    postMessage(p.id, 'system', `${complete ? 'Project complete' : 'Plexus stopped with gaps'}: acceptance ${passed}/${acc.length}. Report in .plexus/REPORT.md`, { level: 'done', report: true });
     bus.emitEvent('project.finished', p.id, { complete, passed, total: acc.length });
   }
 

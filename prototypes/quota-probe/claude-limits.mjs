@@ -1,5 +1,5 @@
 // Classify the outcome of one `claude -p ... --output-format stream-json --verbose` run
-// into an account state the swarm scheduler can act on.
+// into an account state the Plexus scheduler can act on.
 //
 // Evidence used (Claude Code 2.1.327):
 //  - rate_limit_event.rate_limit_info.status ∈ "allowed" | "allowed_warning" | "rejected"

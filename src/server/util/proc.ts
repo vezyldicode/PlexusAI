@@ -13,7 +13,7 @@ const cache = new Map<string, ResolvedCommand>();
 export function resolveCli(name: 'claude' | 'codex'): ResolvedCommand {
   const hit = cache.get(name);
   if (hit) return hit;
-  const override = process.env[`SWARM_${name.toUpperCase()}_BIN`];
+  const override = process.env[`PLEXUS_${name.toUpperCase()}_BIN`];
   let out: ResolvedCommand | null = override ? { cmd: override, prefixArgs: [] } : null;
   if (!out) {
     const found = which(name);
@@ -29,7 +29,7 @@ export function resolveCli(name: 'claude' | 'codex'): ResolvedCommand {
       if (!/\.(cmd|bat|ps1)$/i.test(shim) && existsSync(shim)) { out = { cmd: shim, prefixArgs: [] }; break; }
     }
   }
-  if (!out) throw new Error(`${name} CLI not found on PATH (set SWARM_${name.toUpperCase()}_BIN)`);
+  if (!out) throw new Error(`${name} CLI not found on PATH (set PLEXUS_${name.toUpperCase()}_BIN)`);
   cache.set(name, out);
   return out;
 }

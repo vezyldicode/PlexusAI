@@ -35,7 +35,7 @@ export class CodexAppServer {
     this.proc.stdout!.on('data', (d: string) => this.onData(d));
     this.proc.on('close', () => { this.closed = true; for (const r of this.pending.values()) r({ error: { message: 'app-server exited' } }); this.pending.clear(); });
     this.proc.on('error', () => { this.closed = true; });
-    this.ready = this.request('initialize', { clientInfo: { name: 'multiagent-swarm', version: '0.1.0' } }).then(m => {
+    this.ready = this.request('initialize', { clientInfo: { name: 'plexus', version: '0.1.0' } }).then(m => {
       if (m.error) throw new Error(m.error.message);
       this.proc.stdin!.write(JSON.stringify({ method: 'initialized' }) + '\n');
     });

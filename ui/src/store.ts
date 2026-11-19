@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Account, AcceptanceItemLike, ChatMessage, Project, Task } from './types.ts';
-import { api, connectEvents, type SwarmEvent } from './api.ts';
+import { api, connectEvents, type PlexusEvent } from './api.ts';
 
 export interface LogLine { at: string; taskSeq: number; taskId: string; account: string; kind: string; text: string }
 
@@ -8,7 +8,7 @@ export interface LogLine { at: string; taskSeq: number; taskId: string; account:
 export interface Waiting { since: string; nextReset: string | null; tasks: number }
 export interface ProjectDetail { project: Project; tasks: Task[]; counts: Record<string, number>; acceptance: AcceptanceItemLike[]; waiting: Waiting | null }
 
-export function useSwarm(selectedId: string | null) {
+export function usePlexus(selectedId: string | null) {
   const [projects, setProjects] = useState<(Project & { counts: Record<string, number> })[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -18,7 +18,7 @@ export function useSwarm(selectedId: string | null) {
   const [lastLine, setLastLine] = useState<Record<string, LogLine>>({});
   /** Bumped on every task.log event of the selected project, so open agent tabs can refresh. */
   const [logTick, setLogTick] = useState(0);
-  const [activity, setActivity] = useState<SwarmEvent[]>([]);
+  const [activity, setActivity] = useState<PlexusEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [thinking, setThinking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,7 +53,7 @@ export function useSwarm(selectedId: string | null) {
   useEffect(() => {
     setLogs([]); setLastLine({}); setThinking(null);
     loadDetail(); loadMessages();
-    if (selectedId) api<SwarmEvent[]>('GET', `/api/projects/${selectedId}/events?limit=150`).then(setActivity).catch(() => {});
+    if (selectedId) api<PlexusEvent[]>('GET', `/api/projects/${selectedId}/events?limit=150`).then(setActivity).catch(() => {});
     else setActivity([]);
   }, [selectedId, loadDetail, loadMessages]);
 
@@ -84,4 +84,4 @@ export function useSwarm(selectedId: string | null) {
   return { projects, accounts, detail, messages, logs, lastLine, logTick, activity, connected, thinking, error, setError, loadProjects, loadAccounts, loadDetail, loadMessages };
 }
 
-export type Swarm = ReturnType<typeof useSwarm>;
+export type Plexus = ReturnType<typeof usePlexus>;

@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const root = mkdtempSync(join(tmpdir(), 'swarm-res-'));
-process.env.SWARM_HOME = join(root, 'home');
+const root = mkdtempSync(join(tmpdir(), 'plexus-res-'));
+process.env.PLEXUS_HOME = join(root, 'home');
 const { startDaemon } = await import('../src/server/main.ts');
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -15,7 +15,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 test('stop → daemon restart → resume completes; crashed attempt is retried', { timeout: 300_000 }, async () => {
   let d = await startDaemon({ port: 0, quiet: true });
   const mk = (dd: typeof d) => async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${dd.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-swarm-token': dd.token }, body: body ? JSON.stringify(body) : undefined });
+    const r = await fetch(`http://127.0.0.1:${dd.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': dd.token }, body: body ? JSON.stringify(body) : undefined });
     const j = await r.json(); if (!r.ok) throw new Error(JSON.stringify(j)); return j;
   };
   let call = mk(d);

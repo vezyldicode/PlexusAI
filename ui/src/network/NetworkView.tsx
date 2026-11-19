@@ -21,7 +21,7 @@ const MODEL_HINTS: Record<Provider, string[]> = { claude: ['opus', 'sonnet', 'ha
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export function NetworkView({ detail, accounts, lastLine, thinking, active, onOpen, onError, reload }: Props) {
-  const [showFinished, setShowFinished] = useState(() => localStorage.getItem('swarm.net.finished') !== '0');
+  const [showFinished, setShowFinished] = useState(() => localStorage.getItem('plexus.net.finished') !== '0');
   const g = useMemo(() => layout(detail.tasks, showFinished), [detail.tasks, showFinished]);
   const [roles, setRoles] = useState<Role[]>([]);
   useEffect(() => { api<Role[]>('GET', '/api/roles').then(setRoles).catch(() => {}); }, []);
@@ -160,7 +160,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
         })}
       </div>
 
-      {!detail.tasks.length && <div className="net-hint">Agents appear here once the swarm starts</div>}
+      {!detail.tasks.length && <div className="net-hint">Agents appear here once Plexus starts</div>}
 
       {hover && !edit && (() => {
         const t = hover.task;
@@ -203,7 +203,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
       <div className="net-tools">
         {g.hiddenLanes > 0 && !showFinished && <span className="tool-note num">{g.hiddenLanes} finished hidden</span>}
         <button className="icon-btn" title={showFinished ? 'Hide finished features' : 'Show finished features'}
-          onClick={() => { const v = !showFinished; setShowFinished(v); try { localStorage.setItem('swarm.net.finished', v ? '1' : '0'); } catch { /* ignore */ } }}>
+          onClick={() => { const v = !showFinished; setShowFinished(v); try { localStorage.setItem('plexus.net.finished', v ? '1' : '0'); } catch { /* ignore */ } }}>
           <Ic i={showFinished ? Eye : EyeOff} />
         </button>
         <span className="tool-sep" />

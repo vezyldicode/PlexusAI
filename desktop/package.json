@@ -1,9 +1,9 @@
 {
-  "name": "swarm-desktop",
-  "productName": "Swarm",
+  "name": "plexus-desktop",
+  "productName": "Plexus",
   "private": true,
   "version": "0.1.0",
-  "description": "Desktop app for Multiagent Swarm",
+  "description": "Desktop app for Plexus",
   "author": "vezyldicode",
   "type": "module",
   "main": "src/main.ts",

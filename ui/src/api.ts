@@ -1,12 +1,12 @@
 declare const __DEV_TOKEN__: string;
-declare global { interface Window { SWARM_TOKEN?: string } }
+declare global { interface Window { PLEXUS_TOKEN?: string } }
 
-export const token: string = window.SWARM_TOKEN || __DEV_TOKEN__ || new URLSearchParams(location.search).get('token') || '';
+export const token: string = window.PLEXUS_TOKEN || __DEV_TOKEN__ || new URLSearchParams(location.search).get('token') || '';
 
 export async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
     method,
-    headers: { 'content-type': 'application/json', 'x-swarm-token': token },
+    headers: { 'content-type': 'application/json', 'x-plexus-token': token },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
@@ -14,10 +14,10 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   return j as T;
 }
 
-export interface SwarmEvent { id: number; projectId: string | null; type: string; data: any; createdAt: string }
+export interface PlexusEvent { id: number; projectId: string | null; type: string; data: any; createdAt: string }
 
 /** WebSocket with automatic reconnect. */
-export function connectEvents(onEvent: (e: SwarmEvent) => void, onStatus: (connected: boolean) => void): () => void {
+export function connectEvents(onEvent: (e: PlexusEvent) => void, onStatus: (connected: boolean) => void): () => void {
   let ws: WebSocket | null = null;
   let closed = false;
   let retry: number | undefined;

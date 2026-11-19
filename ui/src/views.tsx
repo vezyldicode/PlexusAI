@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pause, Play, Square } from 'lucide-react';
 import { api, clock, timeAgo } from './api.ts';
-import type { LogLine, ProjectDetail, Swarm } from './store.ts';
+import type { LogLine, ProjectDetail, Plexus } from './store.ts';
 import type { Project, Role, Task } from './types.ts';
 import { Dot, Ic, label } from './ui.tsx';
 
@@ -10,7 +10,7 @@ export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report'
 
 // ---------------------------------------------------------------- header
 
-export function ProjectHeader({ s, detail, view, onView }: { s: Swarm; detail: ProjectDetail; view: View; onView: (v: View) => void }) {
+export function ProjectHeader({ s, detail, view, onView }: { s: Plexus; detail: ProjectDetail; view: View; onView: (v: View) => void }) {
   const p = detail.project;
   const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
   const running = detail.tasks.filter(t => t.status === 'running').length;
@@ -25,7 +25,7 @@ export function ProjectHeader({ s, detail, view, onView }: { s: Swarm; detail: P
         </div>
         <div className="phead-state">
           {detail.waiting && p.status === 'running'
-            ? <span className="state waiting" title={`${detail.waiting.tasks} task(s) ready, no account with quota left. The swarm continues on its own when one is available.`}><Dot state="limited" /><span className="num">{detail.waiting.nextReset ? `Waiting for quota · reset ${timeAgo(detail.waiting.nextReset)}` : 'Waiting for quota'}</span></span>
+            ? <span className="state waiting" title={`${detail.waiting.tasks} task(s) ready, no account with quota left. Plexus continues on its own when one is available.`}><Dot state="limited" /><span className="num">{detail.waiting.nextReset ? `Waiting for quota · reset ${timeAgo(detail.waiting.nextReset)}` : 'Waiting for quota'}</span></span>
             : <span className="state"><Dot state={p.status} />{label(p.status)}</span>}
           <span className="state-meta">{p.phase}</span>
           {running > 0 && <span className="state-meta num">{running} running</span>}
@@ -89,7 +89,7 @@ export function TasksView({ detail, active, onOpen }: { detail: ProjectDetail; a
 
 // ---------------------------------------------------------------- activity
 
-export function ActivityView({ logs, activity, detail, onOpen }: { logs: LogLine[]; activity: Swarm['activity']; detail: ProjectDetail; onOpen: (id: string) => void }) {
+export function ActivityView({ logs, activity, detail, onOpen }: { logs: LogLine[]; activity: Plexus['activity']; detail: ProjectDetail; onOpen: (id: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const [agent, setAgent] = useState('');
@@ -171,7 +171,7 @@ export function MemoryView({ project, onError }: { project: Project; onError: (e
             <span className="nav-text mono">{f}</span>{!files[f]?.trim() && <span className="nav-meta">empty</span>}
           </button>
         ))}
-        <p className="memnote">Shared memory every agent reads. Editing it steers the swarm, for example by adding a directive.</p>
+        <p className="memnote">Shared memory every agent reads. Editing it steers Plexus, for example by adding a directive.</p>
       </div>
       <div className="memedit">
         <textarea value={draft} onChange={e => { setDraft(e.target.value); setDirty(true); }} spellCheck={false} />
@@ -186,7 +186,7 @@ export function MemoryView({ project, onError }: { project: Project; onError: (e
 export function ReportView({ project }: { project: Project }) {
   const [r, setR] = useState('');
   useEffect(() => { api('GET', `/api/projects/${project.id}/report`).then(d => setR(d.report)); }, [project.id, project.status]);
-  return <div className="report">{r ? <pre className="pre prose">{r}</pre> : <div className="stream-empty">The final report appears here when the swarm finishes</div>}</div>;
+  return <div className="report">{r ? <pre className="pre prose">{r}</pre> : <div className="stream-empty">The final report appears here when Plexus finishes</div>}</div>;
 }
 
 // ---------------------------------------------------------------- status

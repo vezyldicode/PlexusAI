@@ -1,7 +1,7 @@
 node_modules/
 ui/node_modules/
 ui/dist/
-.swarm-dev/
+.plexus-dev/
 *.log
 desktop/release/
 desktop/dist/

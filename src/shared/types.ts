@@ -137,7 +137,7 @@ export interface ChatMessage {
   createdAt: string;
 }
 
-export interface SwarmEvent {
+export interface PlexusEvent {
   id: number;
   projectId: string | null;
   type: string;

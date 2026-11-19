@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, ChevronRight, RotateCcw, Square, X } from 'lucide-react';
 import { api, clock } from '../api.ts';
-import type { ProjectDetail, Swarm } from '../store.ts';
+import type { ProjectDetail, Plexus } from '../store.ts';
 import type { Account, ChatMessage, Project, Task } from '../types.ts';
 import { Dot, Ic, label } from '../ui.tsx';
 import { COORDINATOR } from '../network/layout.ts';
 
 interface Props {
-  s: Swarm;
+  s: Plexus;
   detail: ProjectDetail;
   tabs: string[];
   active: string;
@@ -54,7 +54,7 @@ function useFollow(dep: unknown) {
   return { ref, onScroll };
 }
 
-const AUTHOR: Record<ChatMessage['author'], string> = { user: 'You', coordinator: 'Coordinator', agent: 'Agent', system: 'Swarm' };
+const AUTHOR: Record<ChatMessage['author'], string> = { user: 'You', coordinator: 'Coordinator', agent: 'Agent', system: 'Plexus' };
 
 function CoordinatorChat({ project, messages, thinking, onError }: { project: Project; messages: ChatMessage[]; thinking: string | null; onError: (e: string) => void }) {
   const [text, setText] = useState('');
@@ -69,7 +69,7 @@ function CoordinatorChat({ project, messages, thinking, onError }: { project: Pr
   return (
     <div className="chat">
       <div className="stream" ref={follow.ref} onScroll={follow.onScroll}>
-        {!messages.length && <div className="stream-empty">Ask the coordinator about progress, or give the swarm a direction</div>}
+        {!messages.length && <div className="stream-empty">Ask the coordinator about progress, or give Plexus a direction</div>}
         {messages.map(m => {
           const prop = m.meta?.proposal as any;
           const level = (m.meta?.level as string) ?? '';
@@ -185,7 +185,7 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
         {task.error && task.status !== 'done' && <div className="result err"><div className="io-label">Last error</div><pre className="pre">{task.error}</pre></div>}
         {shown?.classification?.reason && <div className="evt k-status"><span className="evt-kind">run</span><span className="evt-text">{shown.classification.reason}</span></div>}
       </div>
-      <div className="agent-foot">Read only · steer the swarm from the Coordinator tab</div>
+      <div className="agent-foot">Read only · steer Plexus from the Coordinator tab</div>
     </div>
   );
 }

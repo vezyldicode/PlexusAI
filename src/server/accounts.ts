@@ -152,7 +152,7 @@ export function openLogin(id: string): { opened: boolean; command: string } {
     // which breaks any quoted path (e.g. C:\Program Files\...). Put the command in a .cmd script instead and
     // start it with `call "script"`: the line no longer begins with a quote, so cmd keeps every quote.
     const script = writeLoginScript(a, lc);
-    spawn('cmd.exe', ['/c', 'start', `"Swarm login ${id}"`, 'cmd', '/k', `call "${script}"`], {
+    spawn('cmd.exe', ['/c', 'start', `"Plexus login ${id}"`, 'cmd', '/k', `call "${script}"`], {
       env: childEnv(lc.cmd, { ...process.env, ...lc.env }), detached: true, stdio: 'ignore', windowsVerbatimArguments: true,
     }).unref();
     return { opened: true, command };
@@ -160,19 +160,19 @@ export function openLogin(id: string): { opened: boolean; command: string } {
   return { opened: false, command };
 }
 
-/** Windows: write <home>/swarm-login.cmd that sets the account's env vars and runs the login command. */
+/** Windows: write <home>/plexus-login.cmd that sets the account's env vars and runs the login command. */
 export function writeLoginScript(a: Account, lc: { cmd: string; args: string[]; env: Record<string, string> }): string {
   const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
   const lines = [
     '@echo off',
-    `title Swarm login ${a.id}`,
+    `title Plexus login ${a.id}`,
     ...Object.entries(lc.env).map(([k, v]) => `set "${k}=${v}"`),
     `echo Signing in account ${a.id} (${a.provider}). Finish the sign-in in your browser.`,
     `${q(lc.cmd)} ${lc.args.map(q).join(' ')}`,
     'echo.',
-    'echo Done. You can close this window and click "Refresh" in Swarm.',
+    'echo Done. You can close this window and click "Refresh" in Plexus.',
   ];
-  const file = join(a.home, 'swarm-login.cmd');
+  const file = join(a.home, 'plexus-login.cmd');
   writeFileSync(file, lines.join('\r\n') + '\r\n');
   return file;
 }

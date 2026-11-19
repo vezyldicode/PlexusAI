@@ -24,7 +24,7 @@ export function Sidebar(p: Props) {
     <aside className="sidebar">
       <div className="brand">
         <svg className="mark" viewBox="0 0 16 16" aria-hidden><circle cx="8" cy="8" r="2" /><circle cx="2.5" cy="3.5" r="1.25" /><circle cx="13.5" cy="4" r="1.25" /><circle cx="12" cy="13" r="1.25" /><path d="M3.5 4.3 6.4 7M12.4 4.7 9.6 7M11.2 12.1 9.4 9.4" /></svg>
-        <span>Swarm</span>
+        <span>Plexus</span>
         <span className="spacer" />
         <span className={`conn ${p.connected ? 'ok' : 'bad'}`} title={p.connected ? 'Connected to the daemon' : 'Daemon not reachable'} />
       </div>

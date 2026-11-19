@@ -36,7 +36,7 @@ export async function prepareWorktree(p: Project, t: Task): Promise<string> {
   const dir = ensure(join(paths.worktrees, p.id));
   let wt = t.worktree;
   if (writesCode(t)) {
-    const branch = t.branch ?? `swarm/${shortId(t)}-${slug(t.title)}`;
+    const branch = t.branch ?? `plexus/${shortId(t)}-${slug(t.title)}`;
     wt = wt ?? join(dir, shortId(t));
     await addWorktree(p.path, wt, { branch, newBranchFrom: p.mainBranch });
     if (!t.branch || !t.worktree) updateTask(t.id, { branch, worktree: wt }, true);
@@ -138,6 +138,6 @@ async function preserveWork(p: Project, t: Task, wt: string, account: Account, r
     stat = await diffStat(wt, p.mainBranch);
   }
   const status = (await git(wt, 'status', '--short')).stdout.trim();
-  appendFileSync(join(wt, PROGRESS_FILE), `\n\n---\n[swarm ${now()}] Attempt by ${account.id} (${account.provider}) ended: ${reason}\n` +
+  appendFileSync(join(wt, PROGRESS_FILE), `\n\n---\n[plexus ${now()}] Attempt by ${account.id} (${account.provider}) ended: ${reason}\n` +
     (stat ? `Changes on this branch so far:\n${stat}\n` : '') + (status ? `Uncommitted:\n${status}\n` : ''));
 }

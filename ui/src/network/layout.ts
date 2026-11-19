@@ -1,11 +1,11 @@
 import type { Task } from '../types.ts';
 
 /**
- * Lays the swarm out as lanes, left to right:
+ * Lays the agent network out as lanes, left to right:
  *  - the coordinator (main agent) on the far left,
  *  - one "Pipeline" lane for the phase tasks (analyse → architect → plan → QA → evaluate),
  *  - one lane per feature: a root build task followed by its review / fix / integrate children.
- * Positions are deterministic so nodes don't jump around while the swarm runs.
+ * Positions are deterministic so nodes don't jump around while Plexus runs.
  */
 
 export const NODE_W = 208;

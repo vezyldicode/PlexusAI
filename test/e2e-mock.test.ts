@@ -1,4 +1,4 @@
-// End-to-end run of the whole swarm with mock agents (no quota spent):
+// End-to-end run of all of Plexus with mock agents (no quota spent):
 // ingest → architect → plan → build (parallel, with review + fix cycle) → merge → QA → evaluate → complete,
 // while one account hits its quota limit mid-run and its task is handed off to another account.
 import test from 'node:test';
@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const root = mkdtempSync(join(tmpdir(), 'swarm-e2e-'));
-process.env.SWARM_HOME = join(root, 'home');
+const root = mkdtempSync(join(tmpdir(), 'plexus-e2e-'));
+process.env.PLEXUS_HOME = join(root, 'home');
 
 const { startDaemon } = await import('../src/server/main.ts');
 const { orchestrator } = await import('../src/server/orchestrator.ts');
@@ -24,10 +24,10 @@ async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms: n
   throw new Error(`timeout waiting for ${label}`);
 }
 
-test('mock swarm completes a project with handoff, review and evaluation', { timeout: 240_000 }, async () => {
+test('mock Plexus completes a project with handoff, review and evaluation', { timeout: 240_000 }, async () => {
   const d = await startDaemon({ port: 0, quiet: true });
   const call = async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-swarm-token': d.token }, body: body ? JSON.stringify(body) : undefined });
+    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': d.token }, body: body ? JSON.stringify(body) : undefined });
     const j = await r.json();
     if (!r.ok) throw new Error(`${method} ${path}: ${JSON.stringify(j)}`);
     return j;
@@ -71,8 +71,8 @@ test('mock swarm completes a project with handoff, review and evaluation', { tim
     assert.match(files, /alpha\.txt/);
     assert.match(files, /beta\.txt/);
     assert.match(files, /ARCHITECTURE\.md/);
-    assert.ok(existsSync(join(proj, '.swarm', 'REPORT.md')));
-    assert.match(readFileSync(join(proj, '.swarm', 'memory', 'acceptance.md'), 'utf8'), /\[x\] \*\*AC1\*\*/);
+    assert.ok(existsSync(join(proj, '.plexus', 'REPORT.md')));
+    assert.match(readFileSync(join(proj, '.plexus', 'memory', 'acceptance.md'), 'utf8'), /\[x\] \*\*AC1\*\*/);
 
     // quota exhaustion on mock-a was detected and work continued on mock-b
     const accts = await call('GET', '/api/accounts');
