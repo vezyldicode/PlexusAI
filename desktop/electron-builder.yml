@@ -1,0 +1,59 @@
+# Packaging for the Swarm desktop app. Build from this folder:
+#   npm run dist:win     -> release/Swarm Setup <version>.exe (NSIS) + release/win-unpacked/
+#   npm run dist:linux   -> release/swarm-desktop_<version>_amd64.deb + .tar.gz   (run on Linux / WSL / CI)
+appId: local.multiagent-swarm
+productName: Swarm
+copyright: vezyldicode
+directories:
+  output: release
+  buildResources: build
+
+# The Electron shell itself (goes into app.asar).
+files:
+  - src/**/*
+  - package.json
+
+# The daemon runs on Electron's own Node (ELECTRON_RUN_AS_NODE), straight from TypeScript sources, so it ships
+# as plain files next to the app: <resources>/app-root/{src,defaults,ui/dist,node_modules,package.json}.
+extraResources:
+  - from: ..
+    to: app-root
+    filter:
+      - package.json
+      - src/**/*
+      - defaults/**/*
+      - ui/dist/**/*
+  - from: build/icon.png
+    to: icon.png
+
+# The daemon's runtime node_modules are copied by this hook (electron-builder skips node_modules in extraResources).
+afterPack: scripts/after-pack.cjs
+
+npmRebuild: false
+asar: true
+
+win:
+  target:
+    - nsis
+  icon: build/icon.png
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Swarm
+  # Data in %APPDATA%\swarm (projects, accounts, logins) is never touched by uninstall.
+  deleteAppDataOnUninstall: false
+
+linux:
+  # No AppImage: it runs from a temporary mount that disappears when the window app quits, which would pull
+  # the files out from under the background daemon. .deb and .tar.gz install real files.
+  target:
+    - deb
+    - tar.gz
+  category: Development
+  icon: build/icon.png
+  maintainer: vezyldicode
+  synopsis: Multi-agent development swarm

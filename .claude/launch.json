@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "swarm-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/server/main.ts"],
+      "env": { "SWARM_HOME": "G:/03_Work/Projects/Multiagent-swarm/.swarm-dev/home", "SWARM_PORT": "4318" },
+      "port": 4318
+    },
+    {
+      "name": "swarm-mock",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/server/main.ts"],
+      "env": { "SWARM_HOME": "G:/03_Work/Projects/Multiagent-swarm/.swarm-dev/mock-home", "SWARM_PORT": "4319" },
+      "port": 4319
+    }
+  ]
+}

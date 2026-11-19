@@ -1,0 +1,234 @@
+// Types shared by daemon, CLI and UI.
+import { z } from 'zod';
+
+export type Provider = 'claude' | 'codex' | 'mock';
+
+/** Account availability as decided by the classifier / quota service. */
+export type AccountState =
+  | 'unknown'      // not probed yet / cooldown elapsed
+  | 'ok'
+  | 'warning'      // near limit: avoid starting large tasks
+  | 'limited'      // quota exhausted, cooldown until cooldown_until
+  | 'transient'    // API hiccup, short cooldown
+  | 'needs_login'
+  | 'blocked'      // account on hold / billing / plan does not include the tool
+  | 'disabled';
+
+export interface QuotaWindow {
+  usedPercent: number | null;
+  resetsAt: string | null;
+  windowMins?: number | null;
+  status?: string | null;
+}
+
+export interface QuotaSnapshot {
+  primary: QuotaWindow | null;   // 5h window
+  secondary: QuotaWindow | null; // weekly window
+  plan?: string | null;
+  source: 'cli-event' | 'app-server' | 'probe' | 'estimate';
+  at: string;
+}
+
+export interface Account {
+  id: string;
+  provider: Provider;
+  label: string;
+  home: string;
+  enabled: boolean;
+  priority: number;
+  maxConcurrency: number;
+  state: AccountState;
+  stateReason: string | null;
+  cooldownUntil: string | null;
+  quota: QuotaSnapshot | null;
+  createdAt: string;
+  running?: number;
+}
+
+export type ProjectStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
+
+export interface ProjectSettings {
+  maxParallel: number;
+  maxTasks: number;
+  maxEvalRounds: number;
+  maxReviewCycles: number;
+  maxAttempts: number;
+  reviewEnabled: boolean;
+  quotaStrategy: 'spread' | 'drain' | 'priority';
+  /** How long a review/evaluation waits for an account other than the author before using the author's account. */
+  independentReviewWaitMin: number;
+}
+
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
+  maxParallel: 3,
+  maxTasks: 80,
+  maxEvalRounds: 4,
+  maxReviewCycles: 2,
+  maxAttempts: 4,
+  reviewEnabled: true,
+  quotaStrategy: 'spread',
+  independentReviewWaitMin: 20,
+};
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  goal: string;
+  status: ProjectStatus;
+  phase: string;
+  mainBranch: string;
+  settings: ProjectSettings;
+  evalRounds: number;
+  createdAt: string;
+}
+
+export type TaskKind = 'ingest' | 'architect' | 'plan' | 'build' | 'fix' | 'review' | 'integrate' | 'qa' | 'evaluate' | 'custom';
+export type TaskStatus = 'pending' | 'running' | 'interrupted' | 'in_review' | 'done' | 'failed' | 'cancelled';
+
+export interface Task {
+  id: string;
+  projectId: string;
+  seq: number;
+  title: string;
+  description: string;
+  role: string;
+  kind: TaskKind;
+  status: TaskStatus;
+  deps: string[];
+  parentId: string | null;
+  branch: string | null;
+  worktree: string | null;
+  priority: number;
+  attempts: number;
+  accountId: string | null;      // currently running on
+  lastAccountId: string | null;
+  authorAccountId: string | null; // who wrote the code (for reviewer independence)
+  reviewCycles: number;
+  acceptance: string[];
+  result: AgentResult | null;
+  error: string | null;
+  /** Model override per provider for this task only; falls back to the role's models. */
+  models: Partial<Record<Provider, string>>;
+  /** Files or directories this task expects to change (from the planner); used to keep parallel writers apart. */
+  paths: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Run {
+  id: number;
+  taskId: string;
+  accountId: string;
+  startedAt: string;
+  endedAt: string | null;
+  outcome: string | null;
+  classification: unknown;
+  logPath: string;
+  exitCode: number | null;
+}
+
+export interface ChatMessage {
+  id: number;
+  projectId: string;
+  author: 'user' | 'coordinator' | 'system' | 'agent';
+  text: string;
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface SwarmEvent {
+  id: number;
+  projectId: string | null;
+  type: string;
+  data: unknown;
+  createdAt: string;
+}
+
+export interface Role {
+  name: string;
+  description: string;
+  /** Preferred providers, best first (soft preference: other providers are used when these are unavailable). */
+  providers: Provider[];
+  /** Model per provider (e.g. { claude: 'opus' }); omitted = CLI default. */
+  models: Partial<Record<Provider, string>>;
+  skills: string[];
+  writesCode: boolean;
+  maxRuntimeMin: number;
+  /** Only run on the providers listed in `providers`; never fall back to others. */
+  onlyListed: boolean;
+  /** Most tasks of this role running at once in a project; 0 = no limit beyond the project's maxParallel. */
+  maxParallel: number;
+  instructions: string;
+}
+
+export interface Skill {
+  name: string;
+  description: string;
+  enabled: boolean;
+  source: string;
+  path: string;
+  createdAt: string;
+}
+
+// ---------------- Agent result contract ----------------
+
+export const FollowUpTaskSchema = z.object({
+  key: z.string().optional(),
+  title: z.string(),
+  description: z.string().default(''),
+  role: z.string().default('implementer'),
+  depends_on: z.array(z.string()).default([]),
+  acceptance: z.array(z.string()).default([]),
+  paths: z.array(z.string()).default([]),
+  priority: z.number().optional(),
+});
+export type FollowUpTask = z.infer<typeof FollowUpTaskSchema>;
+
+export const AgentResultSchema = z.object({
+  status: z.enum(['done', 'partial', 'blocked', 'failed']).default('done'),
+  summary: z.string().default(''),
+  decisions: z.array(z.object({ title: z.string(), decision: z.string(), rationale: z.string().default('') })).default([]),
+  issues: z.array(z.string()).default([]),
+  questions: z.array(z.object({ question: z.string(), default_answer: z.string().default('') })).default([]),
+  follow_up_tasks: z.array(FollowUpTaskSchema).default([]),
+  // analyst
+  project_brief: z.string().optional(),
+  acceptance_criteria: z.array(z.object({ id: z.string(), criterion: z.string(), verify: z.string().default('') })).optional(),
+  // planner
+  tasks: z.array(FollowUpTaskSchema).optional(),
+  // reviewer
+  review: z.object({ verdict: z.enum(['approve', 'changes_requested']), comments: z.array(z.string()).default([]) }).optional(),
+  // evaluator
+  evaluation: z.object({
+    complete: z.boolean(),
+    criteria: z.array(z.object({ id: z.string(), pass: z.boolean(), evidence: z.string().default('') })).default([]),
+    report: z.string().optional(),
+  }).optional(),
+}).passthrough();
+export type AgentResult = z.infer<typeof AgentResultSchema>;
+
+// ---------------- Coordinator contract ----------------
+
+export const CoordinatorActionSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('pause') }),
+  z.object({ type: z.literal('resume') }),
+  z.object({ type: z.literal('stop') }),
+  z.object({ type: z.literal('add_task'), title: z.string(), description: z.string().default(''), role: z.string().default('implementer'), depends_on: z.array(z.string()).default([]), priority: z.number().optional() }),
+  z.object({ type: z.literal('cancel_task'), task_id: z.string() }),
+  z.object({ type: z.literal('retry_task'), task_id: z.string() }),
+  z.object({ type: z.literal('reprioritize'), task_id: z.string(), priority: z.number() }),
+  z.object({ type: z.literal('update_task'), task_id: z.string(), description: z.string() }),
+  z.object({ type: z.literal('record_decision'), title: z.string(), decision: z.string(), rationale: z.string().default('') }),
+  z.object({ type: z.literal('add_directive'), text: z.string() }),
+  z.object({ type: z.literal('set_goal'), goal: z.string() }),
+  z.object({ type: z.literal('replan'), reason: z.string() }),
+]);
+export type CoordinatorAction = z.infer<typeof CoordinatorActionSchema>;
+
+export const CoordinatorOutputSchema = z.object({
+  reply: z.string(),
+  actions: z.array(CoordinatorActionSchema).default([]),
+  proposal: z.object({ summary: z.string(), actions: z.array(CoordinatorActionSchema) }).nullable().optional(),
+});
+export type CoordinatorOutput = z.infer<typeof CoordinatorOutputSchema>;

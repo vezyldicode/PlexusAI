@@ -1,0 +1,22 @@
+{
+  "name": "swarm-desktop",
+  "productName": "Swarm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop app for Multiagent Swarm",
+  "author": "vezyldicode",
+  "type": "module",
+  "main": "src/main.ts",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "build:ui": "npm --prefix .. run ui:build",
+    "dist:win": "npm run build:ui && electron-builder --win",
+    "dist:linux": "npm run build:ui && electron-builder --linux",
+    "dist:dir": "npm run build:ui && electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  }
+}

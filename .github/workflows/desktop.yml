@@ -1,0 +1,38 @@
+# Builds the desktop app for Windows and Linux. Run it from the Actions tab (Run workflow);
+# the installers are attached to the run as artifacts.
+name: desktop
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: dist:win
+          - os: ubuntu-latest
+            target: dist:linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - run: npm ci
+      - run: npm ci --prefix ui
+      - run: npm ci --prefix desktop
+      - run: npm test
+      - run: npm run ${{ matrix.target }} --prefix desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarm-${{ matrix.os }}
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.deb
+            desktop/release/*.tar.gz
+          if-no-files-found: error
