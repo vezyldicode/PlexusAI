@@ -1,7 +1,7 @@
 // Minimal JSON-RPC client for `codex app-server` (stdio). Verified on Codex CLI 0.157:
 // initialize → initialized → account/rateLimits/read, push notification account/rateLimits/updated.
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { QuotaSnapshot, QuotaWindow } from '../../shared/types.ts';
+import type { ModelInfo, QuotaSnapshot, QuotaWindow } from '../../shared/types.ts';
 import { childEnv, killTree, resolveCli } from '../util/proc.ts';
 
 export interface CodexRateLimits { quota: QuotaSnapshot | null; reached: string | null; error?: string; needsLogin?: boolean }
@@ -14,6 +14,21 @@ export function codexQuotaFrom(rl: any, source: QuotaSnapshot['source']): QuotaS
     resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null,
   } : null;
   return { primary: win(rl.primary), secondary: win(rl.secondary), plan: rl.planType ?? null, source, at: new Date().toISOString() };
+}
+
+/** Map `model/list` entries. `ultra` is kept: the CLI handles it client-side (verified with `codex exec` 0.157). */
+export function codexModelsFrom(result: any): ModelInfo[] {
+  const list = Array.isArray(result?.data) ? result.data : [];
+  return list.filter((m: any) => typeof (m?.model ?? m?.id) === 'string').map((m: any): ModelInfo => ({
+    id: m.model ?? m.id,
+    label: m.displayName ?? m.model ?? m.id,
+    description: m.description ?? undefined,
+    efforts: (Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts : [])
+      .map((e: any) => (typeof e === 'string' ? e : e?.reasoningEffort)).filter((e: any) => typeof e === 'string'),
+    defaultEffort: m.defaultReasoningEffort ?? null,
+    isDefault: !!m.isDefault,
+    hidden: !!m.hidden,
+  }));
 }
 
 export class CodexAppServer {
@@ -73,7 +88,27 @@ export class CodexAppServer {
     return { quota: codexQuotaFrom(rl, 'app-server'), reached: rl?.rateLimitReachedType ?? null };
   }
 
+  async listModels(): Promise<ModelInfo[]> {
+    await this.ready;
+    const out: ModelInfo[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 10; page++) {
+      const m = await this.request('model/list', cursor ? { cursor } : {});
+      if (m.error) throw new Error(m.error.message ?? 'model/list failed');
+      out.push(...codexModelsFrom(m.result));
+      cursor = m.result?.nextCursor ?? null;
+      if (!cursor) break;
+    }
+    return out;
+  }
+
   close() { this.closed = true; killTree(this.proc); }
+}
+
+/** One-shot model list (spawns and closes an app-server). */
+export async function listCodexModelsOnce(home: string): Promise<ModelInfo[]> {
+  const c = new CodexAppServer(home);
+  try { return await c.listModels(); } finally { c.close(); }
 }
 
 /** One-shot read (spawns and closes an app-server). */

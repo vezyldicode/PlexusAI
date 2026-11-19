@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
+import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
 import { applyActions, handleChat, resolveProposal } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
@@ -20,6 +21,7 @@ import { createSkill, deleteSkill, installSkill, listSkills, removeTemp, setSkil
 import { countByStatus, getTask, listRuns, listTasks, updateTask } from './tasks.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
+import { cleanEfforts, modelCatalog } from './models.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
 function promptOf(path: string, maxBytes = 400_000): string {
@@ -93,6 +95,8 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.delete('/api/accounts/:id', async req => { removeAccount(id(req)); return { ok: true }; });
   app.post('/api/accounts/:id/login', async req => openLogin(id(req)));
   app.post('/api/accounts/:id/probe', async req => probeAccount(id(req)));
+  // Models and efforts offered by the enabled accounts' CLIs (cached 12 h; ?refresh=1 re-reads them).
+  app.get('/api/models', async req => modelCatalog(listAccounts(), ['1', 'true'].includes(String((req.query as any)?.refresh ?? ''))));
 
   // ---- projects
   app.get('/api/projects', async () => listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })));
@@ -100,20 +104,31 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     const b = body(req);
     if (!b.path) throw new Error('path is required');
     const p = createProject({ path: b.path, name: b.name, goal: b.goal, settings: b.settings });
-    if (b.start) await orchestrator.startProject(p.id);
+    if (b.start) await orchestrator.startProject(p.id, b.sessionId);
     return getProject(p.id);
   });
   app.get('/api/projects/:id', async req => {
     const p = mustProject(id(req));
     return { project: p, tasks: listTasks(p.id), counts: countByStatus(p.id), acceptance: readAcceptance(p), waiting: orchestrator.waiting.get(p.id) ?? null };
   });
-  app.patch('/api/projects/:id', async req => updateProject(id(req), body(req)));
+  app.patch('/api/projects/:id', async req => {
+    const b = body(req);
+    const st = b.settings && typeof b.settings === 'object' ? { ...b.settings } : undefined;
+    if (st && 'coordinatorAccountId' in st) {
+      const acc = st.coordinatorAccountId ? String(st.coordinatorAccountId) : null;
+      if (acc && !listAccounts().some(a => a.id === acc)) throw new Error(`unknown account ${acc}`);
+      st.coordinatorAccountId = acc;
+    }
+    if (st && 'coordinatorModels' in st) st.coordinatorModels = st.coordinatorModels && typeof st.coordinatorModels === 'object' ? cleanModels(st.coordinatorModels) : {};
+    if (st && 'coordinatorEfforts' in st) st.coordinatorEfforts = st.coordinatorEfforts && typeof st.coordinatorEfforts === 'object' ? cleanEfforts(st.coordinatorEfforts) : {};
+    return updateProject(id(req), { ...b, ...(st && { settings: st }) });
+  });
   app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); deleteProject(id(req)); return { ok: true }; });
-  app.post('/api/projects/:id/start', async req => orchestrator.startProject(id(req)));
-  app.post('/api/projects/:id/pause', async req => { orchestrator.pause(id(req)); return mustProject(id(req)); });
-  app.post('/api/projects/:id/resume', async req => { await orchestrator.resume(id(req)); return mustProject(id(req)); });
-  app.post('/api/projects/:id/stop', async req => { orchestrator.stop(id(req)); return mustProject(id(req)); });
-  app.post('/api/projects/:id/actions', async req => ({ applied: applyActions(id(req), body(req).actions ?? [], 'user') }));
+  app.post('/api/projects/:id/start', async req => orchestrator.startProject(id(req), body(req).sessionId));
+  app.post('/api/projects/:id/pause', async req => { orchestrator.pause(id(req), body(req).sessionId); return mustProject(id(req)); });
+  app.post('/api/projects/:id/resume', async req => { await orchestrator.resume(id(req), body(req).sessionId); return mustProject(id(req)); });
+  app.post('/api/projects/:id/stop', async req => { orchestrator.stop(id(req), body(req).sessionId); return mustProject(id(req)); });
+  app.post('/api/projects/:id/actions', async req => ({ applied: applyActions(id(req), body(req).actions ?? [], 'user', body(req).sessionId) }));
   app.get('/api/projects/:id/memory', async req => {
     const p = mustProject(id(req));
     return Object.fromEntries(MEMORY_FILES.map(f => [f, readMemory(p, f)]));
@@ -131,12 +146,28 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.get('/api/projects/:id/events', async req => recentEvents(id(req), Number((req.query as any).limit ?? 300)));
 
   // ---- chat
-  app.get('/api/projects/:id/messages', async req => listMessages(id(req)));
+  // Messages of the whole project, or of one chat session (?session=<id>).
+  app.get('/api/projects/:id/messages', async req => listMessages(id(req), 300, (req.query as any)?.session || null));
+  app.get('/api/projects/:id/chat-sessions', async req => { mustProject(id(req)); return listSessions(id(req), ['1', 'true'].includes(String((req.query as any)?.archived ?? ''))); });
+  app.post('/api/projects/:id/chat-sessions', async req => { mustProject(id(req)); return createSession(id(req), String(body(req).title ?? '')); });
+  app.patch('/api/chat-sessions/:id', async req => {
+    const b = body(req);
+    return updateSession(id(req), { ...(b.title !== undefined && { title: String(b.title) }), ...(b.archived !== undefined && { archived: !!b.archived }) });
+  });
+  app.delete('/api/chat-sessions/:id', async req => {
+    const s = mustSession(id(req));
+    if (listSessions(s.projectId).filter(x => x.id !== s.id).length === 0) throw new Error('the last chat cannot be deleted; start a new one first');
+    deleteSession(s.id);
+    return { ok: true };
+  });
+  app.post('/api/chat-sessions/:id/read', async req => markRead(id(req)));
   app.post('/api/projects/:id/messages', async (req, reply) => {
     const text = String(body(req).text ?? '').trim();
     if (!text) throw new Error('empty message');
     mustProject(id(req));
-    void handleChat(id(req), text).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
+    const sid = body(req).sessionId ? String(body(req).sessionId) : defaultSession(id(req)).id;
+    if (mustSession(sid).projectId !== id(req)) throw new Error('chat session belongs to another project');
+    void handleChat(id(req), text, sid).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
     return reply.code(202).send({ ok: true });
   });
   app.post('/api/messages/:id/proposal', async req => ({ applied: resolveProposal(Number(id(req)), !!body(req).approve) }));
@@ -162,7 +193,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   });
   app.patch('/api/tasks/:id', async req => {
     const b = body(req);
-    return updateTask(id(req), { ...(b.priority !== undefined && { priority: Number(b.priority) }), ...(b.description !== undefined && { description: String(b.description) }), ...(b.title !== undefined && { title: String(b.title) }), ...(b.models && typeof b.models === 'object' && { models: cleanModels(b.models) }) });
+    return updateTask(id(req), { ...(b.priority !== undefined && { priority: Number(b.priority) }), ...(b.description !== undefined && { description: String(b.description) }), ...(b.title !== undefined && { title: String(b.title) }), ...(b.models && typeof b.models === 'object' && { models: cleanModels(b.models) }), ...(b.efforts && typeof b.efforts === 'object' && { efforts: cleanEfforts(b.efforts) }) });
   });
   app.post('/api/tasks/:id/cancel', async req => { orchestrator.cancelTask(id(req)); return getTask(id(req)); });
   app.post('/api/tasks/:id/retry', async req => { orchestrator.retryTask(id(req)); return getTask(id(req)); });

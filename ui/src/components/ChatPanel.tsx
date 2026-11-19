@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, ChevronRight, RotateCcw, Square, X } from 'lucide-react';
+import { ArrowUp, Check, ChevronRight, Pencil, Plus, RotateCcw, Square, Trash2, X } from 'lucide-react';
 import { api, clock } from '../api.ts';
 import type { ProjectDetail, Plexus } from '../store.ts';
-import type { Account, ChatMessage, Project, Task } from '../types.ts';
+import type { Account, ChatMessage, ChatSession, Project, Provider, Role, Task } from '../types.ts';
 import { Dot, Ic, label } from '../ui.tsx';
 import { COORDINATOR } from '../network/layout.ts';
+import { EffortSelect, ModelDatalist, useModels } from '../models.tsx';
 
 interface Props {
   s: Plexus;
   detail: ProjectDetail;
+  /** The chat panel is on screen (not hidden): unread marks of the open session are cleared while it is. */
+  visible: boolean;
   tabs: string[];
   active: string;
   onActivate: (id: string) => void;
@@ -16,13 +19,21 @@ interface Props {
   onHide: () => void;
 }
 
-export function ChatPanel({ s, detail, tabs, active, onActivate, onClose, onHide }: Props) {
+export function ChatPanel({ s, detail, visible, tabs, active, onActivate, onClose, onHide }: Props) {
   const byId = new Map(detail.tasks.map(t => [t.id, t]));
+  const onCoordinator = active === COORDINATOR || !byId.has(active);
+  const current = s.sessions.find(x => x.id === s.sessionId);
+  const unreadTotal = s.sessions.reduce((n, x) => n + x.unread, 0);
+  // Looking at a session counts as reading it: system/agent notices that arrive meanwhile are acknowledged right away.
+  const viewing = visible && onCoordinator;
+  useEffect(() => {
+    if (viewing && current && current.unread > 0) api('POST', `/api/chat-sessions/${current.id}/read`).then(s.loadSessions).catch(() => {});
+  }, [viewing, current?.id, current?.unread]);
   return (
     <aside className="chat-panel">
       <div className="chat-tabs" role="tablist">
         <button role="tab" aria-selected={active === COORDINATOR} className={`ctab ${active === COORDINATOR ? 'active' : ''}`} onClick={() => onActivate(COORDINATOR)}>
-          <Dot state={s.thinking ? 'running' : 'idle'} /><span>Coordinator</span>
+          <Dot state={Object.keys(s.thinking).length ? 'running' : 'idle'} /><span>Coordinator</span>{unreadTotal > 0 && !viewing && <span className="unread-dot" title={`${unreadTotal} unread`} />}
         </button>
         {tabs.map(id => {
           const t = byId.get(id);
@@ -37,8 +48,8 @@ export function ChatPanel({ s, detail, tabs, active, onActivate, onClose, onHide
         <span className="spacer" />
         <button className="icon-btn chat-hide" title="Hide chat" onClick={onHide}><Ic i={X} /></button>
       </div>
-      {active === COORDINATOR || !byId.has(active)
-        ? <CoordinatorChat project={detail.project} messages={s.messages} thinking={s.thinking} onError={s.setError} />
+      {onCoordinator
+        ? <CoordinatorChat project={detail.project} accounts={s.accounts} sessions={s.sessions} sessionId={s.sessionId} onSession={s.setSessionId} loadSessions={s.loadSessions} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null} thinkingIn={s.thinking} onError={s.setError} reload={s.loadDetail} />
         : <AgentChat key={active} task={byId.get(active)!} accounts={s.accounts} logTick={s.logTick} onError={s.setError} reload={s.loadDetail} />}
     </aside>
   );
@@ -56,18 +67,121 @@ function useFollow(dep: unknown) {
 
 const AUTHOR: Record<ChatMessage['author'], string> = { user: 'You', coordinator: 'Coordinator', agent: 'Agent', system: 'Plexus' };
 
-function CoordinatorChat({ project, messages, thinking, onError }: { project: Project; messages: ChatMessage[]; thinking: string | null; onError: (e: string) => void }) {
+const PROVIDER_NAME: Record<Provider, string> = { claude: 'Claude', codex: 'Codex', mock: 'Mock' };
+
+/** Account and model the coordinator answers with, stored in the project settings. */
+function CoordinatorOptions({ project, accounts, onError, reload }: { project: Project; accounts: Account[]; onError: (e: string) => void; reload: () => void }) {
+  const [coordRole, setCoordRole] = useState<Role | null>(null);
+  useEffect(() => { api<Role[]>('GET', '/api/roles').then(r => setCoordRole(r.find(x => x.name === 'coordinator') ?? null)).catch(() => {}); }, []);
+  const roleModels = coordRole?.models ?? {}, roleEfforts = coordRole?.efforts ?? {};
+  const catalog = useModels();
+  const saved = project.settings.coordinatorModels ?? {};
+  const savedEfforts = project.settings.coordinatorEfforts ?? {};
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  useEffect(() => setDraft({}), [project.id, JSON.stringify(saved)]);
+
+  const pinnedId = project.settings.coordinatorAccountId ?? null;
+  const pinned = pinnedId ? accounts.find(a => a.id === pinnedId) : undefined;
+  const providers: Provider[] = pinned ? [pinned.provider] : [...new Set(accounts.filter(a => a.enabled).map(a => a.provider))];
+
+  const save = (settings: Partial<Project['settings']>) =>
+    api('PATCH', `/api/projects/${project.id}`, { settings }).then(reload).catch(e => onError(e.message));
+  const commitModel = (p: Provider) => {
+    if (!(p in draft)) return;
+    const v = draft[p].trim();
+    if (v === (saved[p] ?? '')) return;
+    void save({ coordinatorModels: { ...saved, [p]: v || undefined } });
+  };
+
+  return (
+    <div className="coord-opts">
+      <select value={pinnedId ?? ''} title="Account the coordinator answers with" onChange={e => void save({ coordinatorAccountId: e.target.value || null })}>
+        <option value="">Account: automatic</option>
+        {pinnedId && !pinned && <option value={pinnedId}>{pinnedId} (missing)</option>}
+        {accounts.map(a => <option key={a.id} value={a.id}>{a.label || a.id} · {PROVIDER_NAME[a.provider]}{a.enabled ? (a.state === 'ok' || a.state === 'unknown' ? '' : ` · ${label(a.state)}`) : ' · disabled'}</option>)}
+      </select>
+      {providers.map(p => (
+        <label key={p} className="coord-model" title={`Model the coordinator uses on ${PROVIDER_NAME[p]} accounts; empty uses the coordinator role default`}>
+          {!pinned && <span>{PROVIDER_NAME[p]}</span>}
+          <input list={`coord-models-${p}`} value={draft[p] ?? saved[p] ?? ''} placeholder={roleModels[p] ? `${roleModels[p]} (default)` : 'CLI default'}
+            onChange={e => setDraft({ ...draft, [p]: e.target.value })} onBlur={() => commitModel(p)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } if (e.key === 'Escape') { setDraft({}); } }} />
+          <ModelDatalist id={`coord-models-${p}`} provider={p} catalog={catalog} />
+          <EffortSelect catalog={catalog} provider={p} model={(draft[p] ?? saved[p]) || roleModels[p]} value={savedEfforts[p] ?? ''}
+            fallbackLabel={roleEfforts[p] ? `Effort: ${roleEfforts[p]} (default)` : undefined}
+            title={`Reasoning effort the coordinator uses on ${PROVIDER_NAME[p]} accounts`}
+            onChange={v => void save({ coordinatorEfforts: { ...savedEfforts, [p]: v || undefined } })} />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+interface SessionProps { sessions: ChatSession[]; sessionId: string | null; onSession: (id: string) => void; loadSessions: () => void }
+
+/** Chat sessions of the project: one chip each, a red dot where system/agent notices wait to be read. */
+function SessionBar({ project, sessions, sessionId, onSession, loadSessions, thinkingIn, onError }: SessionProps & { project: Project; thinkingIn: Record<string, string>; onError: (e: string) => void }) {
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const done = () => { setRenaming(null); setDeleting(null); };
+  const create = () => api<ChatSession>('POST', `/api/projects/${project.id}/chat-sessions`, {}).then(c => { loadSessions(); onSession(c.id); }).catch(e => onError(e.message));
+  const rename = (id: string) => {
+    const t = name.trim();
+    done();
+    if (t) api('PATCH', `/api/chat-sessions/${id}`, { title: t }).then(loadSessions).catch(e => onError(e.message));
+  };
+  const remove = (id: string) => {
+    done();
+    api('DELETE', `/api/chat-sessions/${id}`).then(loadSessions).catch(e => onError(e.message));
+  };
+  return (
+    <div className="sessions" role="tablist" aria-label="Chats">
+      {sessions.map(x => {
+        const on = x.id === sessionId;
+        return (
+          <div key={x.id} role="tab" aria-selected={on} className={`schip ${on ? 'active' : ''}`} onClick={() => { if (!on) { done(); onSession(x.id); } }}
+            onDoubleClick={() => { setRenaming(x.id); setName(x.title); }} title={x.title || 'New chat'}>
+            {renaming === x.id
+              ? <input autoFocus value={name} onChange={e => setName(e.target.value)} onClick={e => e.stopPropagation()} onBlur={() => rename(x.id)}
+                  onKeyDown={e => { if (e.key === 'Enter') rename(x.id); if (e.key === 'Escape') done(); }} />
+              : <span className="schip-title">{x.title || 'New chat'}</span>}
+            {thinkingIn[x.id] && <span className="typing live" title="Coordinator is answering"><span /><span /><span /></span>}
+            {x.unread > 0 && !on && <span className="unread-dot" title={`${x.unread} unread`}>{x.unread > 9 ? '9+' : x.unread}</span>}
+            {on && renaming !== x.id && deleting !== x.id && (
+              <>
+                <button className="schip-btn" title="Rename (double-click)" onClick={e => { e.stopPropagation(); setRenaming(x.id); setName(x.title); }}><Ic i={Pencil} size={12} /></button>
+                {sessions.length > 1 && <button className="schip-btn" title="Delete chat" onClick={e => { e.stopPropagation(); setDeleting(x.id); }}><Ic i={Trash2} size={12} /></button>}
+              </>
+            )}
+            {deleting === x.id && (
+              <>
+                <span className="schip-ask">Delete?</span>
+                <button className="schip-btn danger" title="Delete this chat and its messages" onClick={e => { e.stopPropagation(); remove(x.id); }}><Ic i={Check} size={12} /></button>
+                <button className="schip-btn" title="Keep" onClick={e => { e.stopPropagation(); setDeleting(null); }}><Ic i={X} size={12} /></button>
+              </>
+            )}
+          </div>
+        );
+      })}
+      <button className="schip-new" title="New chat" onClick={create}><Ic i={Plus} size={14} /></button>
+    </div>
+  );
+}
+
+function CoordinatorChat({ project, accounts, sessions, sessionId, onSession, loadSessions, messages, thinking, thinkingIn, onError, reload }: SessionProps & { project: Project; accounts: Account[]; messages: ChatMessage[]; thinking: string | null; thinkingIn: Record<string, string>; onError: (e: string) => void; reload: () => void }) {
   const [text, setText] = useState('');
-  const follow = useFollow(`${messages.length}:${thinking}`);
+  const follow = useFollow(`${sessionId}:${messages.length}:${thinking}`);
   const send = async () => {
     const t = text.trim();
     if (!t) return;
     setText('');
-    await api('POST', `/api/projects/${project.id}/messages`, { text: t }).catch(e => onError(e.message));
+    await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId }).catch(e => onError(e.message));
   };
   const decide = (id: number, approve: boolean) => api('POST', `/api/messages/${id}/proposal`, { approve }).catch(e => onError(e.message));
   return (
     <div className="chat">
+      <SessionBar project={project} sessions={sessions} sessionId={sessionId} onSession={onSession} loadSessions={loadSessions} thinkingIn={thinkingIn} onError={onError} />
       <div className="stream" ref={follow.ref} onScroll={follow.onScroll}>
         {!messages.length && <div className="stream-empty">Ask the coordinator about progress, or give Plexus a direction</div>}
         {messages.map(m => {
@@ -75,7 +189,7 @@ function CoordinatorChat({ project, messages, thinking, onError }: { project: Pr
           const level = (m.meta?.level as string) ?? '';
           return (
             <div key={m.id} className={`msg m-${m.author} ${level}`}>
-              <div className="msg-head"><span className="msg-who">{AUTHOR[m.author]}</span><span className="msg-meta num">{clock(m.createdAt)}{m.meta?.account ? ` · ${m.meta.account}` : ''}</span></div>
+              <div className="msg-head"><span className="msg-who">{AUTHOR[m.author]}</span><span className="msg-meta num">{clock(m.createdAt)}{m.meta?.account ? ` · ${m.meta.account}` : ''}{m.meta?.model ? ` · ${m.meta.model}` : ''}</span></div>
               <div className="msg-text">{m.text}</div>
               {Array.isArray(m.meta?.applied) && (m.meta!.applied as string[]).length > 0 && <div className="msg-applied">Applied: {(m.meta!.applied as string[]).join(', ')}</div>}
               {prop && (
@@ -94,11 +208,12 @@ function CoordinatorChat({ project, messages, thinking, onError }: { project: Pr
         {thinking && <div className="msg m-coordinator"><div className="msg-head"><span className="msg-who">Coordinator</span><span className="msg-meta">thinking on {thinking}</span></div><div className="typing"><span /><span /><span /></div></div>}
       </div>
       <div className="composer">
+        <CoordinatorOptions project={project} accounts={accounts} onError={onError} reload={reload} />
         <textarea value={text} rows={3} placeholder="Message the coordinator" onChange={e => setText(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
         <div className="composer-bar">
           <span className="hint"><kbd>Enter</kbd> send · <kbd>Shift</kbd> <kbd>Enter</kbd> new line</span>
-          <button className="primary icon-send" disabled={!text.trim()} onClick={send} title="Send"><Ic i={ArrowUp} /></button>
+          <button className="primary icon-send" disabled={!text.trim() || !sessionId} onClick={send} title="Send"><Ic i={ArrowUp} /></button>
         </div>
       </div>
     </div>

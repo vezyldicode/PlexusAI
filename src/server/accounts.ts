@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path';
 import type { Account, AccountState, Provider, QuotaSnapshot } from '../shared/types.ts';
 import { adapterFor, type Classification } from './adapters/index.ts';
 import { CodexAppServer } from './adapters/codex-appserver.ts';
+import { readClaudeStatus } from './adapters/claude-control.ts';
+import { forgetModels, rememberModels } from './models.ts';
 import { getDb, json, now } from './db.ts';
 import { bus } from './events.ts';
 import { paths } from './paths.ts';
@@ -179,12 +181,17 @@ export function writeLoginScript(a: Account, lc: { cmd: string; args: string[]; 
 
 // ---------------- Quota service ----------------
 
+const CLAUDE_POLL_MS = 5 * 60_000;
+
 class QuotaService {
   private codex = new Map<string, CodexAppServer>();
   private timer: NodeJS.Timeout | null = null;
   private loginTimer: NodeJS.Timeout | null = null;
   private recheckTimer: NodeJS.Timeout | null = null;
   private lastProbe = new Map<string, number>();
+  /** Claude idle-account usage poll: next allowed time and current backoff per account (get_usage hits a rate-limited endpoint). */
+  private claudeNext = new Map<string, number>();
+  private claudeBackoff = new Map<string, number>();
   private started = false;
 
   start(pollMs = 60_000) {
@@ -192,7 +199,7 @@ class QuotaService {
     for (const a of listAccounts()) if (a.provider === 'codex') this.watch(a);
     this.timer = setInterval(() => this.pollCodex(), pollMs);
     this.checkClaudeLogins();
-    this.loginTimer = setInterval(() => this.checkClaudeLogins(), 5 * 60_000);
+    this.loginTimer = setInterval(() => void this.checkClaudeLogins(), CLAUDE_POLL_MS);
     this.recheckTimer = setInterval(() => void this.recheckLimited(), 5 * 60_000);
   }
 
@@ -238,9 +245,36 @@ class QuotaService {
     }
   }
 
+  /**
+   * Every 5 minutes: login state, quota and models of idle Claude accounts through the control protocol (no model call).
+   * Busy accounts are skipped: their runs report quota in the stream for free. Falls back to `claude auth status`.
+   */
   async checkClaudeLogins() {
     for (const a of listAccounts()) {
       if (a.provider !== 'claude' || !a.enabled) continue;
+      if ((a.running ?? 0) > 0 || Date.now() < (this.claudeNext.get(a.id) ?? 0)) continue;
+      if (a.state === 'limited' && a.cooldownUntil && a.cooldownUntil > now()) continue;
+      const st = await readClaudeStatus(a).catch(() => null);
+      if (st && st.loggedIn !== null) {
+        this.claudeBackoff.delete(a.id);
+        this.claudeNext.set(a.id, Date.now() + CLAUDE_POLL_MS - 30_000);
+        if (st.models.length && st.loggedIn) rememberModels(a.id, st.models);
+        if (!st.loggedIn) {
+          if (a.state !== 'needs_login') { forgetModels(a.id); applyClassification(a.id, { state: 'needs_login', reason: 'not_logged_in', evidence: ['claude initialize: no credentials'] }, null); }
+          continue;
+        }
+        if (st.classification) {
+          // Do not override a transient cooldown with 'ok'; everything else follows the live quota.
+          if (!(a.state === 'transient' && st.classification.state === 'ok')) applyClassification(a.id, st.classification, st.quota);
+          else setQuota(a.id, st.quota);
+          continue;
+        }
+        if (a.state === 'needs_login') { forgetModels(a.id); setState(a.id, 'unknown', 'logged in', null); const after = getAccount(a.id)!; bus.emitEvent('account.updated', null, after); announceIfAvailable(a, after); }
+        continue;
+      }
+      const back = Math.min(30 * 60_000, (this.claudeBackoff.get(a.id) ?? CLAUDE_POLL_MS / 2) * 2);
+      this.claudeBackoff.set(a.id, back);
+      this.claudeNext.set(a.id, Date.now() + back);
       const ok = await claudeLoggedIn(a);
       if (ok === false && a.state !== 'needs_login') applyClassification(a.id, { state: 'needs_login', reason: 'not_logged_in', evidence: ['claude auth status'] }, null);
       if (ok === true && a.state === 'needs_login') { setState(a.id, 'unknown', 'logged in', null); const after = getAccount(a.id)!; bus.emitEvent('account.updated', null, after); announceIfAvailable(a, after); }

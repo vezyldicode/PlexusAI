@@ -3,6 +3,7 @@ import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Project, type ProjectSettings, type ProjectStatus } from '../shared/types.ts';
 import { getDb, json, now } from './db.ts';
+import { deleteProjectSessions, touchSession, routeSession } from './chat.ts';
 import { bus } from './events.ts';
 
 function rowToProject(r: any): Project {
@@ -67,6 +68,7 @@ export function deleteProject(id: string): void {
   const db = getDb();
   db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id);
   db.prepare('DELETE FROM messages WHERE project_id = ?').run(id);
+  deleteProjectSessions(id);
   db.prepare('DELETE FROM events WHERE project_id = ?').run(id);
   db.prepare('DELETE FROM projects WHERE id = ?').run(id);
 }
@@ -117,9 +119,19 @@ export function recordDecision(p: Project, d: { title: string; decision: string;
 
 // ---------------- chat ----------------
 
-export function postMessage(projectId: string, author: ChatMessage['author'], text: string, meta: Record<string, unknown> | null = null): ChatMessage {
-  const r = getDb().prepare('INSERT INTO messages (project_id, author, text, meta, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(projectId, author, text, meta ? JSON.stringify(meta) : null, now());
+const rowToMessage = (r: any): ChatMessage => ({
+  id: r.id, projectId: r.project_id, sessionId: r.session_id, author: r.author, text: r.text, meta: json(r.meta, null), createdAt: r.created_at,
+});
+
+/**
+ * Store a chat message. user/coordinator messages must name their session; system/agent messages without one are routed
+ * (task origin → control session → latest session) so the user sees an unread mark on the right conversation.
+ */
+export function postMessage(projectId: string, author: ChatMessage['author'], text: string, meta: Record<string, unknown> | null = null, sessionId?: string | null): ChatMessage {
+  const sid = sessionId || routeSession(projectId, meta);
+  const r = getDb().prepare('INSERT INTO messages (project_id, session_id, author, text, meta, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(projectId, sid, author, text, meta ? JSON.stringify(meta) : null, now());
+  if (author === 'user' || author === 'coordinator') touchSession(sid);
   const m = getMessage(Number(r.lastInsertRowid))!;
   bus.emitEvent('chat.message', projectId, m, false);
   return m;
@@ -127,7 +139,7 @@ export function postMessage(projectId: string, author: ChatMessage['author'], te
 
 export function getMessage(id: number): ChatMessage | null {
   const r = getDb().prepare('SELECT * FROM messages WHERE id = ?').get(id) as any;
-  return r ? { id: r.id, projectId: r.project_id, author: r.author, text: r.text, meta: json(r.meta, null), createdAt: r.created_at } : null;
+  return r ? rowToMessage(r) : null;
 }
 
 export function updateMessageMeta(id: number, meta: Record<string, unknown>): void {
@@ -136,7 +148,15 @@ export function updateMessageMeta(id: number, meta: Record<string, unknown>): vo
   if (m) bus.emitEvent('chat.updated', m.projectId, m, false);
 }
 
-export function listMessages(projectId: string, limit = 300): ChatMessage[] {
-  const rows = getDb().prepare('SELECT * FROM messages WHERE project_id = ? ORDER BY id DESC LIMIT ?').all(projectId, limit) as any[];
-  return rows.reverse().map(r => ({ id: r.id, projectId: r.project_id, author: r.author, text: r.text, meta: json(r.meta, null), createdAt: r.created_at }));
+/** Latest messages of a project, or of one chat session when given. */
+export function listMessages(projectId: string, limit = 300, sessionId?: string | null): ChatMessage[] {
+  const rows = (sessionId
+    ? getDb().prepare('SELECT * FROM messages WHERE project_id = ? AND session_id = ? ORDER BY id DESC LIMIT ?').all(projectId, sessionId, limit)
+    : getDb().prepare('SELECT * FROM messages WHERE project_id = ? ORDER BY id DESC LIMIT ?').all(projectId, limit)) as any[];
+  return rows.reverse().map(rowToMessage);
+}
+
+/** Messages of a session after a given id (oldest first), for catching a resumed CLI conversation up. */
+export function messagesAfter(sessionId: string, afterId: number, beforeId: number): ChatMessage[] {
+  return (getDb().prepare('SELECT * FROM messages WHERE session_id = ? AND id > ? AND id < ? ORDER BY id').all(sessionId, afterId, beforeId) as any[]).map(rowToMessage);
 }

@@ -12,7 +12,7 @@ export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report'
 
 export function ProjectHeader({ s, detail, view, onView }: { s: Plexus; detail: ProjectDetail; view: View; onView: (v: View) => void }) {
   const p = detail.project;
-  const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
+  const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`, { sessionId: s.sessionId }).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
   const running = detail.tasks.filter(t => t.status === 'running').length;
   const acc = detail.acceptance;
   const passed = acc.filter(a => a.pass).length;

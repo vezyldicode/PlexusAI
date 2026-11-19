@@ -5,6 +5,7 @@ import type { LogLine, ProjectDetail } from '../store.ts';
 import type { Account, Provider, Role, Task } from '../types.ts';
 import { Dot, Ic, label } from '../ui.tsx';
 import { COORD_H, COORD_W, COORDINATOR, layout, NODE_H, NODE_W, type NodeBox } from './layout.ts';
+import { EffortSelect, ModelDatalist, useModels } from '../models.tsx';
 
 interface Props {
   detail: ProjectDetail;
@@ -17,7 +18,6 @@ interface Props {
   reload: () => void;
 }
 
-const MODEL_HINTS: Record<Provider, string[]> = { claude: ['opus', 'sonnet', 'haiku'], codex: [], mock: [] };
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export function NetworkView({ detail, accounts, lastLine, thinking, active, onOpen, onError, reload }: Props) {
@@ -35,6 +35,8 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
     return roleOf(t)?.providers.find(p => usable.has(p)) ?? accounts.find(x => x.enabled)?.provider ?? roleOf(t)?.providers[0] ?? 'claude';
   };
   const modelOf = (t: Task) => { const p = providerOf(t); return t.models?.[p] || roleOf(t)?.models[p] || ''; };
+  const effortOf = (t: Task) => { const p = providerOf(t); return t.efforts?.[p] || roleOf(t)?.efforts?.[p] || ''; };
+  const catalog = useModels();
 
   // ---- pan & zoom
   const box = useRef<HTMLDivElement>(null);
@@ -80,12 +82,14 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
 
   // ---- hover card & model popover
   const [hover, setHover] = useState<NodeBox | null>(null);
-  const [edit, setEdit] = useState<{ n: NodeBox; provider: Provider; model: string } | null>(null);
+  const [edit, setEdit] = useState<{ n: NodeBox; provider: Provider; model: string; effort: string } | null>(null);
+  const editFor = (n: NodeBox, provider: Provider) => ({ n, provider, model: n.task.models?.[provider] ?? '', effort: n.task.efforts?.[provider] ?? '' });
   const saveModel = () => {
     if (!edit) return;
     const t = edit.n.task;
     const models = { ...t.models, [edit.provider]: edit.model.trim() || undefined };
-    api('PATCH', `/api/tasks/${t.id}`, { models }).then(() => { setEdit(null); reload(); }).catch(e => onError(e.message));
+    const efforts = { ...t.efforts, [edit.provider]: edit.effort || undefined };
+    api('PATCH', `/api/tasks/${t.id}`, { models, efforts }).then(() => { setEdit(null); reload(); }).catch(e => onError(e.message));
   };
   const screen = (x: number, y: number) => ({ left: view.x + x * view.k, top: view.y + y * view.k });
 
@@ -150,9 +154,9 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
               <div className="node-title">{t.title}</div>
               <div className="node-meta">
                 <span className="node-acct">{acct?.label ?? (t.status === 'pending' ? 'queued' : '—')}</span>
-                <button className="chip" title="Model for this task (applies from the next attempt)"
-                  onClick={e => { e.stopPropagation(); setHover(null); setEdit({ n, provider: providerOf(t), model: t.models?.[providerOf(t)] ?? '' }); }}>
-                  {model || 'default'}
+                <button className="chip" title="Model and effort for this task (applies from the next attempt)"
+                  onClick={e => { e.stopPropagation(); setHover(null); setEdit(editFor(n, providerOf(t))); }}>
+                  {model || 'default'}{effortOf(t) ? ` · ${effortOf(t)}` : ''}
                 </button>
               </div>
             </div>
@@ -173,7 +177,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
               <dt>Status</dt><dd>{label(t.status)}</dd>
               <dt>Role</dt><dd>{t.role} · {t.kind}</dd>
               <dt>Account</dt><dd>{accountOf(t)?.label ?? '—'}</dd>
-              <dt>Model</dt><dd>{modelOf(t) || 'CLI default'}</dd>
+              <dt>Model</dt><dd>{modelOf(t) || 'CLI default'}{effortOf(t) ? ` · ${effortOf(t)} effort` : ''}</dd>
               {t.branch && <><dt>Branch</dt><dd className="mono">{t.branch}</dd></>}
               {t.paths.length > 0 && <><dt>Files</dt><dd className="mono">{t.paths.join(', ')}</dd></>}
               <dt>Updated</dt><dd>{timeAgo(t.updatedAt)}</dd>
@@ -187,13 +191,18 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
 
       {edit && (
         <div className="popover" style={screen(edit.n.x, edit.n.y + NODE_H + 8)} onKeyDown={e => { if (e.key === 'Escape') setEdit(null); if (e.key === 'Enter') saveModel(); }}>
-          <div className="pop-title">Model for T{edit.n.task.seq}</div>
+          <div className="pop-title">Model and effort for T{edit.n.task.seq}</div>
           <div className="pop-row">
-            <select value={edit.provider} onChange={e => setEdit({ ...edit, provider: e.target.value as Provider, model: edit.n.task.models?.[e.target.value as Provider] ?? '' })}>
+            <select value={edit.provider} onChange={e => setEdit(editFor(edit.n, e.target.value as Provider))}>
               <option value="claude">Claude</option><option value="codex">Codex</option><option value="mock">Mock</option>
             </select>
             <input autoFocus list="model-hints" value={edit.model} placeholder={roleOf(edit.n.task)?.models[edit.provider] || 'CLI default'} onChange={e => setEdit({ ...edit, model: e.target.value })} />
-            <datalist id="model-hints">{MODEL_HINTS[edit.provider].map(m => <option key={m} value={m} />)}</datalist>
+            <ModelDatalist id="model-hints" provider={edit.provider} catalog={catalog} />
+          </div>
+          <div className="pop-row">
+            <EffortSelect catalog={catalog} provider={edit.provider} model={edit.model.trim() || roleOf(edit.n.task)?.models[edit.provider]} value={edit.effort}
+              fallbackLabel={roleOf(edit.n.task)?.efforts?.[edit.provider] ? `Effort: ${roleOf(edit.n.task)!.efforts[edit.provider]} (role)` : undefined}
+              onChange={v => setEdit({ ...edit, effort: v })} />
           </div>
           <div className="pop-note">{edit.n.task.status === 'running' ? 'Applies from the next attempt' : 'Empty uses the role default'}</div>
           <div className="pop-actions"><button onClick={() => setEdit(null)}>Cancel</button><button className="primary" onClick={saveModel}>Save</button></div>

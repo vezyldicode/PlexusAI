@@ -2,6 +2,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Account, AgentResult, Project, Task } from '../shared/types.ts';
 import { listAccounts, releaseCooldowns } from './accounts.ts';
+import { setControlSession } from './chat.ts';
 import { getDb, now } from './db.ts';
 import { bus } from './events.ts';
 import {
@@ -78,7 +79,9 @@ export class Orchestrator {
 
   // ---------------- project control ----------------
 
-  async startProject(id: string): Promise<Project> {
+  /** `sessionId` is the chat session the user acted from: project-level notices go there (see chat.ts routeSession). */
+  async startProject(id: string, sessionId?: string | null): Promise<Project> {
+    setControlSession(id, sessionId);
     let p = mustProject(id);
     const main = await ensureRepo(p.path);
     if (await commitAll(p.path, 'chore: snapshot before Plexus run')) postMessage(id, 'system', 'Committed uncommitted changes in the project before starting.');
@@ -94,14 +97,16 @@ export class Orchestrator {
     return mustProject(id);
   }
 
-  pause(id: string) {
+  pause(id: string, sessionId?: string | null) {
+    setControlSession(id, sessionId);
     setProjectStatus(id, 'paused');
     postMessage(id, 'system', 'Paused: no new tasks will start; running tasks finish their current attempt.');
   }
 
-  resume(id: string) {
+  resume(id: string, sessionId?: string | null) {
+    setControlSession(id, sessionId);
     const p = mustProject(id);
-    if (p.phase === 'new' || !listTasks(id).length) return this.startProject(id);
+    if (p.phase === 'new' || !listTasks(id).length) return this.startProject(id, sessionId);
     // Resuming a finished project means "keep working": new/remaining tasks run, then QA and evaluation again.
     if (p.status === 'completed' || p.phase.startsWith('done')) updateProject(id, { phase: 'build' });
     setProjectStatus(id, 'running');
@@ -109,7 +114,8 @@ export class Orchestrator {
     void this.tick();
   }
 
-  stop(id: string) {
+  stop(id: string, sessionId?: string | null) {
+    setControlSession(id, sessionId);
     setProjectStatus(id, 'stopped');
     let n = 0;
     for (const t of listTasks(id)) if (t.status === 'running') { running.get(t.id)?.abort(); n++; }
@@ -419,7 +425,7 @@ export class Orchestrator {
       const role = it.role || 'implementer';
       const t = createTask(p.id, {
         title: it.title, description: it.description, role, kind: role === 'implementer' ? 'build' : 'custom',
-        acceptance: it.acceptance, priority: it.priority ?? 50, deps: [], paths: it.paths,
+        acceptance: it.acceptance, priority: it.priority ?? 50, deps: [], paths: it.paths, originSessionId: plan.originSessionId,
       });
       if (it.key) keyToId.set(it.key, t.id);
       keyToId.set(it.title, t.id);
@@ -444,7 +450,7 @@ export class Orchestrator {
     for (const f of r.follow_up_tasks) {
       if (budget-- <= 0) { postMessage(p.id, 'system', `Task budget reached; follow-up "${f.title}" not created.`); break; }
       const role = f.role || 'implementer';
-      createTask(p.id, { title: f.title, description: f.description, role, kind: role === 'implementer' ? 'build' : 'custom', acceptance: f.acceptance, priority: f.priority ?? 60, parentId: null, paths: f.paths });
+      createTask(p.id, { title: f.title, description: f.description, role, kind: role === 'implementer' ? 'build' : 'custom', acceptance: f.acceptance, priority: f.priority ?? 60, parentId: null, paths: f.paths, originSessionId: t.originSessionId });
     }
   }
 

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, Plus, X } from 'lucide-react';
 import { api, clock } from './api.ts';
 import type { Account, Project, Role, Skill } from './types.ts';
 import { Dot, Ic, Meter } from './ui.tsx';
+import { EffortSelect, ModelDatalist, useModels } from './models.tsx';
 
 // ---------------------------------------------------------------- new project
 
@@ -88,7 +89,12 @@ const MODEL_HINT: Record<string, string> = { claude: 'opus, sonnet, haiku', code
 function PreferenceList({ role, set }: { role: Role; set: (p: Partial<Role>) => void }) {
   const list = role.providers;
   const move = (i: number, d: number) => { const n = [...list]; [n[i], n[i + d]] = [n[i + d], n[i]]; set({ providers: n }); };
-  const remove = (p: string) => { const models = { ...role.models }; delete (models as any)[p]; set({ providers: list.filter(x => x !== p), models, onlyListed: list.length > 1 && role.onlyListed }); };
+  const remove = (p: string) => {
+    const models = { ...role.models }, efforts = { ...role.efforts };
+    delete (models as any)[p]; delete (efforts as any)[p];
+    set({ providers: list.filter(x => x !== p), models, efforts, onlyListed: list.length > 1 && role.onlyListed });
+  };
+  const catalog = useModels();
   const free = PROVIDERS.filter(p => !list.includes(p));
   return (
     <div className="pref">
@@ -96,7 +102,10 @@ function PreferenceList({ role, set }: { role: Role; set: (p: Partial<Role>) => 
         <div key={p} className="pref-row">
           <span className="pref-rank num">{i + 1}</span>
           <span className="pref-name">{PROVIDER_NAME[p] ?? p}</span>
-          <input placeholder={MODEL_HINT[p] || 'Model'} value={role.models[p] ?? ''} onChange={e => set({ models: { ...role.models, [p]: e.target.value || undefined } })} />
+          <input list={`role-models-${p}`} placeholder={MODEL_HINT[p] || 'Model'} value={role.models[p] ?? ''} onChange={e => set({ models: { ...role.models, [p]: e.target.value || undefined } })} />
+          <ModelDatalist id={`role-models-${p}`} provider={p} catalog={catalog} />
+          <EffortSelect catalog={catalog} provider={p} model={role.models[p]} value={role.efforts?.[p] ?? ''}
+            onChange={v => set({ efforts: { ...role.efforts, [p]: v || undefined } })} />
           <button className="icon-btn" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}><Ic i={ChevronUp} /></button>
           <button className="icon-btn" title="Move down" disabled={i === list.length - 1} onClick={() => move(i, 1)}><Ic i={ChevronDown} /></button>
           <button className="icon-btn" title="Remove" onClick={() => remove(p)}><Ic i={X} /></button>
@@ -119,7 +128,7 @@ export function RolesPage({ onError }: { onError: (e: string) => void }) {
   const load = () => Promise.all([api<Role[]>('GET', '/api/roles'), api<Skill[]>('GET', '/api/skills')]).then(([r, s]) => { setRoles(r); setSkills(s); return r; });
   useEffect(() => { load().then(r => setCur(c => c ?? r[0] ?? null)); }, []);
   const save = () => cur && api<Role>('PUT', `/api/roles/${cur.name}`, cur).then(r => { setCur(r); void load(); }).catch(e => onError(e.message));
-  const newRole = () => { const name = prompt('Role name, lowercase, for example security-auditor'); if (name) setCur({ name, description: '', providers: [], models: {}, skills: [], writesCode: true, maxRuntimeMin: 60, onlyListed: false, maxParallel: 0, instructions: `You are the ${name}.\n` }); };
+  const newRole = () => { const name = prompt('Role name, lowercase, for example security-auditor'); if (name) setCur({ name, description: '', providers: [], models: {}, efforts: {}, skills: [], writesCode: true, maxRuntimeMin: 60, onlyListed: false, maxParallel: 0, instructions: `You are the ${name}.\n` }); };
   const set = (patch: Partial<Role>) => cur && setCur({ ...cur, ...patch });
   return (
     <div className="page split">

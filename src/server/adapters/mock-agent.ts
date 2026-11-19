@@ -16,12 +16,20 @@ writeFileSync(statePath, JSON.stringify(state));
 
 const prompt = readFileSync(0, 'utf8');
 const meta = Object.fromEntries([...prompt.matchAll(/^(role|kind|task_id|result_file):\s*(.+)$/gm)].map(m => [m[1], m[2].trim()]));
-const out = (o: unknown) => process.stdout.write(JSON.stringify(o) + '\n');
+// Conversation id like Claude's session_id. `--resume <id>` continues it; ids starting with "dead" are unknown (a purged session).
+const resumeIdx = process.argv.indexOf('--resume');
+const resumeId = resumeIdx >= 0 ? process.argv[resumeIdx + 1] ?? '' : '';
+const sessionId = resumeId || `mock-${Math.random().toString(16).slice(2, 10)}`;
+const out = (o: unknown) => process.stdout.write(JSON.stringify({ session_id: sessionId, ...(o as object) }) + '\n');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const resetsAt = Math.floor(Date.now() / 1000) + 3600;
 
 const util = Math.min(1, state.runs * 0.1);
 const limited = typeof cfg.limitAfterRuns === 'number' && state.runs > cfg.limitAfterRuns;
+if (resumeId.startsWith('dead')) {
+  out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: `No conversation found with session ID: ${resumeId}` });
+  process.exit(1);
+}
 out({ type: 'system', subtype: 'init', model: 'mock' });
 out({
   type: 'rate_limit_event',
@@ -59,8 +67,11 @@ switch (meta.kind) {
     if (/resume|tiếp tục/i.test(msg)) actions.push({ type: 'resume' });
     const add = msg.match(/add task:?\s*(.+)/i);
     if (add) actions.push({ type: 'add_task', title: add[1], description: `FILE: ${slug(add[1])}.txt`, role: 'implementer' });
-    say(JSON.stringify({ reply: `Mock coordinator received: ${msg}`, actions, proposal: null }));
-    out({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify({ reply: `Mock coordinator received: ${msg}`, actions, proposal: null }) });
+    // A resumed turn carries only what is new; it says so, and which of the new notices it saw, so tests can check the delta.
+    const news = prompt.match(/# NEW SINCE YOUR LAST REPLY\n([\s\S]*?)\n\n/)?.[1];
+    const reply = `Mock coordinator received: ${msg}${resumeId ? ` [resumed ${resumeId}${news ? `; news: ${news.replace(/\n/g, ' | ')}` : ''}]` : ''}${prompt.includes('# CHAT HISTORY') ? ' [full history]' : ''}`;
+    say(JSON.stringify({ reply, actions, proposal: null }));
+    out({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify({ reply, actions, proposal: null }) });
     process.exit(0);
   }
   case 'ingest':

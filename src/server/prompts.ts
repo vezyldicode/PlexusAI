@@ -99,17 +99,39 @@ export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Accoun
 
 export interface StatusDigest { tasks: string; accounts: string; events: string; counts: string }
 
-export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string): string {
-  const meta = `<!-- plexus-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
-  const hist = history.slice(-20).map(m => `[${m.author}] ${head(m.text, 1500)}`).join('\n');
+const COORDINATOR_META = `<!-- plexus-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
+const statusSection = (p: Project, status: StatusDigest) =>
+  `# STATUS\nProject status: ${p.status} · phase: ${p.phase}\nTask counts: ${status.counts}\n\n## Tasks\n${status.tasks}\n\n## Accounts\n${status.accounts}\n\n## Recent events\n${status.events}`;
+const fmtMsg = (m: ChatMessage) => `[${m.author}] ${head(m.text, 1500)}`;
+
+/**
+ * A turn of a resumed CLI conversation: the role, project context and earlier chat are already in it, so send only the
+ * fresh status, what happened in this chat since the last reply, and the new message.
+ */
+export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, news: ChatMessage[], userText: string): string {
   return [
-    meta,
+    COORDINATOR_META,
+    statusSection(p, status),
+    news.length ? `# NEW SINCE YOUR LAST REPLY\n${news.slice(-20).map(fmtMsg).join('\n')}` : '',
+    `USER MESSAGE:\n${userText}\n---`,
+    COORDINATOR_OUTPUT,
+  ].filter(Boolean).join('\n\n');
+}
+
+export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string): string {
+  const hist = history.slice(-20).map(fmtMsg).join('\n');
+  return [
+    COORDINATOR_META,
     `# YOUR ROLE: coordinator\n${role.instructions}`,
     projectContext(p),
-    `# STATUS\nProject status: ${p.status} · phase: ${p.phase}\nTask counts: ${status.counts}\n\n## Tasks\n${status.tasks}\n\n## Accounts\n${status.accounts}\n\n## Recent events\n${status.events}`,
+    statusSection(p, status),
     `# CHAT HISTORY\n${hist || '(empty)'}`,
     `USER MESSAGE:\n${userText}\n---`,
-    `# OUTPUT
+    COORDINATOR_OUTPUT,
+  ].join('\n\n');
+}
+
+const COORDINATOR_OUTPUT = `# OUTPUT
 You may read files in the repository to answer, but do not modify anything.
 Respond with ONLY one JSON object (no prose before or after):
 { "reply": "your answer to the user",
@@ -123,6 +145,4 @@ Action types:
 {"type":"record_decision","title":"...","decision":"...","rationale":"..."}
 {"type":"add_directive","text":"instruction all agents must follow from now on"}
 {"type":"set_goal","goal":"..."} {"type":"replan","reason":"..."}
-Use "actions" only for what the user clearly asked; put large changes in "proposal". Questions only need a reply.`,
-  ].join('\n\n');
-}
+Use "actions" only for what the user clearly asked; put large changes in "proposal". Questions only need a reply.`;

@@ -61,7 +61,7 @@ export default function App() {
             <ProjectHeader s={s} detail={d} view={view} onView={setView} />
             <button className="chat-toggle" onClick={() => setChatOpen(o => !o)} title="Toggle chat"><Ic i={MessageSquare} /></button>
             <div className="view-body">
-              {view === 'network' && <NetworkView detail={d} accounts={s.accounts} lastLine={s.lastLine} thinking={s.thinking} active={active} onOpen={open} onError={s.setError} reload={s.loadDetail} />}
+              {view === 'network' && <NetworkView detail={d} accounts={s.accounts} lastLine={s.lastLine} thinking={Object.values(s.thinking)[0] ?? null} active={active} onOpen={open} onError={s.setError} reload={s.loadDetail} />}
               {view === 'tasks' && <TasksView detail={d} active={active} onOpen={open} />}
               {view === 'activity' && <ActivityView logs={s.logs} activity={s.activity} detail={d} onOpen={open} />}
               {view === 'memory' && <MemoryView project={d.project} onError={s.setError} />}
@@ -80,7 +80,7 @@ export default function App() {
         {page === 'skills' && <SkillsPage onError={s.setError} />}
       </main>
 
-      {showChat && <ChatPanel s={s} detail={d!} tabs={tabs} active={active} onActivate={setActive} onClose={close} onHide={() => setChatOpen(false)} />}
+      {showChat && <ChatPanel s={s} detail={d!} visible={chatOpen} tabs={tabs} active={active} onActivate={setActive} onClose={close} onHide={() => setChatOpen(false)} />}
       {showNew && <NewProjectDialog onClose={() => setShowNew(false)} onCreated={id => { setShowNew(false); setSelected(id); setPage('project'); s.loadProjects(); }} onError={s.setError} />}
     </div>
   );

@@ -37,6 +37,23 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tasks ADD COLUMN models TEXT NOT NULL DEFAULT '{}';`,
   // Files/directories a task expects to touch, so the scheduler can keep overlapping writers apart.
   `ALTER TABLE tasks ADD COLUMN paths TEXT NOT NULL DEFAULT '[]';`,
+  // Per-task reasoning effort override, keyed by provider.
+  `ALTER TABLE tasks ADD COLUMN efforts TEXT NOT NULL DEFAULT '{}';`,
+  // Coordinator chat sessions: every message belongs to exactly one session. cli_* remember the provider CLI conversation
+  // (claude --resume / codex exec resume) so a turn only has to send what is new.
+  `CREATE TABLE IF NOT EXISTS chat_sessions (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0,
+     last_read_message_id INTEGER NOT NULL DEFAULT 0, cli_session_id TEXT, cli_account_id TEXT, cli_synced_message_id INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS chat_sessions_project ON chat_sessions(project_id);
+   ALTER TABLE messages ADD COLUMN session_id TEXT;
+   CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
+   ALTER TABLE tasks ADD COLUMN origin_session_id TEXT;
+   ALTER TABLE projects ADD COLUMN control_session_id TEXT;
+   INSERT INTO chat_sessions (id, project_id, title, last_read_message_id, created_at, updated_at)
+     SELECT p.id || '-default', p.id, 'Default', COALESCE((SELECT MAX(id) FROM messages m WHERE m.project_id = p.id), 0), p.created_at, p.created_at FROM projects p;
+   UPDATE messages SET session_id = project_id || '-default' WHERE project_id IN (SELECT id FROM projects);
+   UPDATE projects SET control_session_id = id || '-default';`,
 ];
 
 export function getDb(): DatabaseSync {

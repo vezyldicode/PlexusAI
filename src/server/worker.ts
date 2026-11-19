@@ -4,6 +4,7 @@ import { AgentResultSchema, type Account, type AgentResult, type Project, type T
 import { applyClassification, getAccount, runningByAccount } from './accounts.ts';
 import { adapterFor, type Classification } from './adapters/index.ts';
 import { now } from './db.ts';
+import { effortForRun } from './models.ts';
 import { bus } from './events.ts';
 import { ensure, paths } from './paths.ts';
 import { buildTaskPrompt, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
@@ -93,10 +94,13 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
     const progress = readFileSync(join(wt, PROGRESS_FILE), 'utf8');
     rmSync(join(wt, RESULT_FILE), { force: true });
     const prompt = buildTaskPrompt(p, task, role, account, progress, skills);
-    writeFileSync(logPath, `# prompt (${now()})\n${prompt}\n\n# output\n`);
+    const model = task.models?.[account.provider] || role.models[account.provider];
+    const eff = await effortForRun(account, model, task.efforts?.[account.provider] || role.efforts?.[account.provider]);
+    writeFileSync(logPath, `# prompt (${now()})\n${prompt}\n\n# output\n${eff.warning ? `[plexus] ${eff.warning}\n` : ''}`);
+    if (eff.warning) bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: 'status', text: eff.warning }, false);
 
     const out = await adapter.run({
-      account, cwd: wt, prompt, model: task.models?.[account.provider] || role.models[account.provider], readOnly: false,
+      account, cwd: wt, prompt, model, effort: eff.effort, readOnly: false,
       timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: Math.max(10, Math.min(30, role.maxRuntimeMin)) * 60_000,
       logPath, signal: ctl.signal,
       onEvent: e => bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: e.kind, text: e.text.slice(0, 2000) }, false),

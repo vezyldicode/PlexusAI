@@ -1,6 +1,7 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
-import { classifyClaudeRun, claudeQuota } from './claude-limits.ts';
+import { classifyClaudeRun, claudeQuota, parseEvents } from './claude-limits.ts';
+import { readClaudeStatus } from './claude-control.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
@@ -23,6 +24,12 @@ export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'st
   return null;
 }
 
+/** The conversation id Claude Code reports in its stream (system init / result events). */
+export function claudeSessionId(stdout: string): string | undefined {
+  for (const e of parseEvents(stdout)) if (typeof e.session_id === 'string' && e.session_id) return e.session_id;
+  return undefined;
+}
+
 function summarizeInput(input: any): string {
   if (!input || typeof input !== 'object') return '';
   const v = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.description ?? '';
@@ -39,7 +46,9 @@ export const claudeAdapter: ProviderAdapter = {
   async run(spec: RunSpec): Promise<RunOutcome> {
     const { cmd, prefixArgs } = resolveCli('claude');
     const args = [...prefixArgs, '-p', '--output-format', 'stream-json', '--verbose'];
+    if (spec.resumeId) args.push('--resume', spec.resumeId);
     if (spec.model) args.push('--model', spec.model);
+    if (spec.effort) args.push('--effort', spec.effort);
     if (spec.readOnly) args.push('--tools', 'Read,Glob,Grep');
     args.push('--dangerously-skip-permissions');
     const r = await runStreaming({
@@ -50,13 +59,18 @@ export const claudeAdapter: ProviderAdapter = {
     });
     const a = classifyClaudeRun({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
     return {
-      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage,
+      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, sessionId: claudeSessionId(r.stdout),
       classification: { state: a.state, reason: a.reason, limitedWindow: a.limitedWindow, resetsAt: a.resetsAt, cooldownUntil: a.cooldownUntil, evidence: a.evidence },
       quota: claudeQuota(a.windows, 'cli-event'),
     };
   },
 
   async probe(account: Account) {
+    // Free path first: login state and live quota through the control protocol (no model call).
+    const st = await readClaudeStatus(account).catch(() => null);
+    if (st?.loggedIn === false) return { classification: { state: 'needs_login' as const, reason: 'not_logged_in', evidence: ['initialize: no credentials'] }, quota: null };
+    if (st?.classification) return { classification: st.classification, quota: st.quota };
+    // Fallback: one tiny Haiku call, which reports the rate limits in its stream (costs a little quota).
     const { cmd, prefixArgs } = resolveCli('claude');
     const r = await runStreaming({
       cmd, args: [...prefixArgs, '-p', 'ok', '--model', 'haiku', '--output-format', 'stream-json', '--verbose', '--max-turns', '1', '--tools', ''],
@@ -67,6 +81,10 @@ export const claudeAdapter: ProviderAdapter = {
       classification: { state: a.state, reason: a.reason, limitedWindow: a.limitedWindow, resetsAt: a.resetsAt, cooldownUntil: a.cooldownUntil, evidence: a.evidence },
       quota: claudeQuota(a.windows, 'probe'),
     };
+  },
+
+  async listModels(account: Account) {
+    return (await readClaudeStatus(account)).models;
   },
 
   loginCommand(account: Account) {

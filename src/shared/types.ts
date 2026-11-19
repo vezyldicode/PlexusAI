@@ -25,7 +25,7 @@ export interface QuotaSnapshot {
   primary: QuotaWindow | null;   // 5h window
   secondary: QuotaWindow | null; // weekly window
   plan?: string | null;
-  source: 'cli-event' | 'app-server' | 'probe' | 'estimate';
+  source: 'cli-event' | 'app-server' | 'usage-api' | 'probe' | 'estimate';
   at: string;
 }
 
@@ -45,6 +45,25 @@ export interface Account {
   running?: number;
 }
 
+/** A model a provider CLI offers on one account, read from the CLI itself (Claude `initialize`, Codex `model/list`). */
+export interface ModelInfo {
+  /** Value passed to --model / -m (an alias such as `opus` or a full id). */
+  id: string;
+  /** Full model id an alias resolves to, when the CLI reports it. */
+  resolved?: string | null;
+  label: string;
+  description?: string;
+  /** Supported reasoning efforts; empty = the model takes no effort setting. */
+  efforts: string[];
+  defaultEffort?: string | null;
+  isDefault?: boolean;
+  hidden?: boolean;
+}
+
+/** Models per provider, merged over the enabled accounts (GET /api/models). */
+export interface ModelCatalogEntry extends ModelInfo { accounts: string[] }
+export type ModelCatalog = Partial<Record<Provider, ModelCatalogEntry[]>>;
+
 export type ProjectStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
 
 export interface ProjectSettings {
@@ -57,6 +76,12 @@ export interface ProjectSettings {
   quotaStrategy: 'spread' | 'drain' | 'priority';
   /** How long a review/evaluation waits for an account other than the author before using the author's account. */
   independentReviewWaitMin: number;
+  /** Account the coordinator chat runs on; null picks one automatically. */
+  coordinatorAccountId: string | null;
+  /** Coordinator chat model per provider; empty falls back to the coordinator role's models. */
+  coordinatorModels: Partial<Record<Provider, string>>;
+  /** Coordinator chat effort per provider; empty falls back to the coordinator role's efforts. */
+  coordinatorEfforts: Partial<Record<Provider, string>>;
 }
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -68,6 +93,9 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   reviewEnabled: true,
   quotaStrategy: 'spread',
   independentReviewWaitMin: 20,
+  coordinatorAccountId: null,
+  coordinatorModels: {},
+  coordinatorEfforts: {},
 };
 
 export interface Project {
@@ -110,8 +138,12 @@ export interface Task {
   error: string | null;
   /** Model override per provider for this task only; falls back to the role's models. */
   models: Partial<Record<Provider, string>>;
+  /** Effort override per provider for this task only; falls back to the role's efforts. */
+  efforts: Partial<Record<Provider, string>>;
   /** Files or directories this task expects to change (from the planner); used to keep parallel writers apart. */
   paths: string[];
+  /** Chat session that created this task (children inherit it); its notices go to that session. */
+  originSessionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -131,10 +163,27 @@ export interface Run {
 export interface ChatMessage {
   id: number;
   projectId: string;
+  sessionId: string;
   author: 'user' | 'coordinator' | 'system' | 'agent';
   text: string;
   meta: Record<string, unknown> | null;
   createdAt: string;
+}
+
+/** A coordinator conversation. `unread` counts system/agent messages the user has not seen yet. */
+export interface ChatSession {
+  id: string;
+  projectId: string;
+  title: string;
+  archived: boolean;
+  unread: number;
+  /** Provider CLI conversation to resume (claude --resume / codex exec resume), bound to one account. */
+  cliSessionId: string | null;
+  cliAccountId: string | null;
+  /** Last message id the CLI conversation already knows about. */
+  cliSyncedMessageId: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PlexusEvent {
@@ -152,6 +201,8 @@ export interface Role {
   providers: Provider[];
   /** Model per provider (e.g. { claude: 'opus' }); omitted = CLI default. */
   models: Partial<Record<Provider, string>>;
+  /** Reasoning effort per provider (e.g. { claude: 'high' }); omitted = CLI default. */
+  efforts: Partial<Record<Provider, string>>;
   skills: string[];
   writesCode: boolean;
   maxRuntimeMin: number;

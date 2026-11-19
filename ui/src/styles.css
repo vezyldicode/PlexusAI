@@ -288,6 +288,26 @@ kbd { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 4px;
 .ctab:hover .ctab-x, .ctab.active .ctab-x { opacity: 1; }
 .ctab-x:hover { background: var(--raised-2); color: var(--text); }
 
+/* chat sessions */
+.sessions { display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); overflow-x: auto; flex: none; scrollbar-width: none; }
+.schip {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; max-width: 200px; padding: 0 8px; border-radius: 8px; flex: none; cursor: pointer;
+  font-size: 12px; color: var(--text-2); border: 1px solid transparent;
+  transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.schip:hover { background: var(--card); color: var(--text); }
+.schip.active { background: var(--raised); border-color: var(--line); color: var(--text); }
+.schip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schip input { width: 120px; height: 22px; font-size: 12px; padding: 0 4px; }
+.schip-btn { width: 20px; height: 20px; padding: 0; border-radius: 4px; background: transparent; border: none; box-shadow: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; }
+.schip-btn:hover { background: var(--raised-2); color: var(--text); }
+.schip-btn.danger:hover { color: var(--bad-text); }
+.schip-ask { font-size: 12px; color: var(--bad-text); }
+.schip-new { width: 28px; height: 28px; padding: 0; flex: none; border-radius: 8px; background: transparent; border: 1px dashed var(--line-strong); box-shadow: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; }
+.schip-new:hover { color: var(--text); background: var(--card); }
+.unread-dot { min-width: 8px; height: 8px; border-radius: 8px; background: var(--bad); color: #fff; font-size: 10px; line-height: 14px; font-weight: 600; flex: none; }
+.unread-dot:not(:empty) { min-width: 14px; height: 14px; padding: 0 4px; text-align: center; box-sizing: border-box; }
+
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .stream { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 .stream-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
@@ -318,6 +338,11 @@ kbd { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 4px;
 
 .composer { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex: none; }
 .composer textarea { resize: none; background: var(--card); }
+.coord-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.coord-opts select, .coord-opts input { width: auto; height: 28px; font-size: 12px; }
+.coord-opts select { max-width: 220px; }
+.coord-model { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); margin: 0; }
+.coord-model input { width: 140px; margin-top: 0; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .hint { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; }
 .icon-send { width: 32px; padding: 0; }
@@ -483,7 +508,7 @@ textarea.tall { min-height: 320px; font-family: var(--mono); font-size: 13px; }
 
 /* role provider preference list (issue #4) */
 .pref { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
-.pref-row { display: grid; grid-template-columns: 20px 112px minmax(0, 1fr) 28px 28px 28px; gap: 4px; align-items: center; height: 36px; padding: 0 4px 0 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); }
+.pref-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 124px 28px 28px 28px; gap: 4px; align-items: center; min-height: 36px; padding: 4px 4px 4px 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); }
 .pref-row input { height: 28px; }
 .pref-rank { color: var(--muted); font-size: 12px; }
 .pref-name { font-size: 13px; }
@@ -503,3 +528,11 @@ textarea.tall { min-height: 320px; font-family: var(--mono); font-size: 13px; }
 /* waiting for quota (issue #5) */
 .state.waiting { color: var(--warn); }
 .agent-paths { margin-top: 4px; padding-left: 16px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Reasoning effort pickers (options come from the provider CLIs) */
+select.effort { height: 28px; font-size: 12px; width: auto; }
+select.effort.bad { border-color: var(--warn, #b7791f); }
+.pref-row > .pref-name { grid-column: 2 / 4; grid-row: 1; }
+.pref-row > input { grid-column: 2; grid-row: 2; }
+.pref-row select.effort { grid-column: 3 / 7; grid-row: 2; width: 100%; margin-top: 0; }
+.pop-row > select.effort:only-child { grid-column: 1 / -1; width: 100%; }

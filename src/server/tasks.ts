@@ -8,7 +8,7 @@ function rowToTask(r: any): Task {
     status: r.status, deps: json(r.deps, []), parentId: r.parent_id, branch: r.branch, worktree: r.worktree, priority: r.priority,
     attempts: r.attempts, accountId: r.account_id, lastAccountId: r.last_account_id, authorAccountId: r.author_account_id,
     reviewCycles: r.review_cycles, acceptance: json(r.acceptance, []), result: json<AgentResult | null>(r.result, null), error: r.error,
-    models: json(r.models, {}), paths: json(r.paths, []), createdAt: r.created_at, updatedAt: r.updated_at,
+    models: json(r.models, {}), efforts: json(r.efforts, {}), paths: json(r.paths, []), originSessionId: r.origin_session_id ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -45,14 +45,17 @@ export const shortId = (t: Pick<Task, 'seq'>) => `T${t.seq}`;
 export function createTask(projectId: string, t: {
   title: string; description?: string; role: string; kind: TaskKind; deps?: string[]; parentId?: string | null;
   branch?: string | null; worktree?: string | null; priority?: number; acceptance?: string[]; authorAccountId?: string | null; reviewCycles?: number; paths?: string[];
+  /** Chat session this work belongs to; defaults to the parent task's. */
+  originSessionId?: string | null;
 }): Task {
   const db = getDb();
   const seq = ((db.prepare('SELECT MAX(seq) AS m FROM tasks WHERE project_id = ?').get(projectId) as any)?.m ?? 0) + 1;
   const id = `${projectId}-T${seq}`;
+  const origin = t.originSessionId ?? (t.parentId ? (db.prepare('SELECT origin_session_id AS o FROM tasks WHERE id = ?').get(t.parentId) as any)?.o : null) ?? null;
   db.prepare(`INSERT INTO tasks (id, project_id, seq, title, description, role, kind, status, deps, parent_id, branch, worktree, priority,
-              acceptance, author_account_id, review_cycles, paths, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              acceptance, author_account_id, review_cycles, paths, origin_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, projectId, seq, t.title, t.description ?? '', t.role, t.kind, JSON.stringify(t.deps ?? []), t.parentId ?? null, t.branch ?? null,
-      t.worktree ?? null, t.priority ?? 50, JSON.stringify(t.acceptance ?? []), t.authorAccountId ?? null, t.reviewCycles ?? 0, JSON.stringify(normPaths(t.paths ?? [])), now(), now());
+      t.worktree ?? null, t.priority ?? 50, JSON.stringify(t.acceptance ?? []), t.authorAccountId ?? null, t.reviewCycles ?? 0, JSON.stringify(normPaths(t.paths ?? [])), origin, now(), now());
   const task = getTask(id)!;
   bus.emitEvent('task.created', projectId, { id, seq, title: task.title, role: task.role, kind: task.kind });
   return task;
@@ -61,7 +64,7 @@ export function createTask(projectId: string, t: {
 const COLS: Record<string, string> = {
   title: 'title', description: 'description', role: 'role', status: 'status', deps: 'deps', branch: 'branch', worktree: 'worktree',
   priority: 'priority', attempts: 'attempts', accountId: 'account_id', lastAccountId: 'last_account_id', authorAccountId: 'author_account_id',
-  reviewCycles: 'review_cycles', result: 'result', error: 'error', acceptance: 'acceptance', models: 'models', paths: 'paths',
+  reviewCycles: 'review_cycles', result: 'result', error: 'error', acceptance: 'acceptance', models: 'models', efforts: 'efforts', paths: 'paths',
 };
 
 export function updateTask(id: string, patch: Partial<Task>, quiet = false): Task {

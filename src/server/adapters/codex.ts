@@ -1,6 +1,6 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
-import { readCodexRateLimitsOnce } from './codex-appserver.ts';
+import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 const UNKNOWN_RESET_BACKOFF_MS = 15 * 60 * 1000;
@@ -21,6 +21,15 @@ export function describeCodexEvent(line: string): { kind: 'text' | 'tool' | 'sta
   if (e.type === 'turn.failed') return { kind: 'status', text: `turn failed: ${e.error?.message ?? ''}` };
   if (e.type === 'error') return { kind: 'status', text: `error: ${e.message}` };
   return null;
+}
+
+/** The thread id of a `codex exec --json` run (thread.started event), usable with `codex exec resume`. */
+export function codexThreadId(stdout: string): string | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.includes('thread.started')) continue;
+    try { const e = JSON.parse(line); if (e.type === 'thread.started' && typeof e.thread_id === 'string') return e.thread_id; } catch { /* next */ }
+  }
+  return undefined;
 }
 
 export interface CodexRunAnalysis extends Classification { finalText: string; usage?: Record<string, number> }
@@ -67,10 +76,15 @@ export const codexAdapter: ProviderAdapter = {
   async run(spec: RunSpec): Promise<RunOutcome> {
     const { cmd, prefixArgs } = resolveCli('codex');
     // --ignore-user-config: workers must not inherit per-machine config (custom endpoints, MCP servers...).
-    const args = [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--skip-git-repo-check', '-C', spec.cwd];
+    // `exec resume` has no -C/--sandbox: the working directory is the spawn cwd and read-only is a config override.
+    const args = spec.resumeId
+      ? [...prefixArgs, 'exec', 'resume', '--json', '--ignore-user-config', '--skip-git-repo-check']
+      : [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--skip-git-repo-check', '-C', spec.cwd];
     if (spec.model) args.push('-m', spec.model);
-    if (spec.readOnly) args.push('--sandbox', 'read-only');
+    if (spec.effort) args.push('-c', `model_reasoning_effort="${spec.effort}"`);
+    if (spec.readOnly) args.push(...(spec.resumeId ? ['-c', 'sandbox_mode="read-only"'] : ['--sandbox', 'read-only']));
     else args.push('--dangerously-bypass-approvals-and-sandbox');
+    if (spec.resumeId) args.push(spec.resumeId);
     args.push('-');
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
@@ -90,7 +104,7 @@ export const codexAdapter: ProviderAdapter = {
       classification.reason = 'quota_exhausted';
       if (exhausted.length) classification.cooldownUntil = classification.resetsAt = exhausted.sort().at(-1)!;
     }
-    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, classification, quota: rl?.quota ?? null };
+    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, classification, quota: rl?.quota ?? null, sessionId: codexThreadId(r.stdout) };
   },
 
   async probe(account: Account) {
@@ -104,6 +118,10 @@ export const codexAdapter: ProviderAdapter = {
       return { classification: { state: 'limited', reason: 'quota_exhausted', resetsAt: resets, cooldownUntil: resets ?? new Date(Date.now() + UNKNOWN_RESET_BACKOFF_MS).toISOString(), evidence: [`used ${maxUsed}%`] }, quota: rl.quota };
     }
     return { classification: { state: maxUsed >= 90 ? 'warning' : 'ok', reason: 'probe', evidence: [] }, quota: rl.quota };
+  },
+
+  listModels(account: Account) {
+    return listCodexModelsOnce(account.home);
   },
 
   loginCommand(account: Account) {

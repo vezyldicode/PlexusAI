@@ -2,11 +2,13 @@ import { join } from 'node:path';
 import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Task } from '../shared/types.ts';
 import { applyClassification, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
+import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
 import { now } from './db.ts';
+import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
 import { ensure, paths } from './paths.ts';
-import { appendMemory, getMessage, listMessages, mustProject, postMessage, recordDecision, updateMessageMeta, updateProject } from './projects.ts';
-import { buildCoordinatorPrompt, type StatusDigest } from './prompts.ts';
+import { appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, updateMessageMeta, updateProject } from './projects.ts';
+import { buildCoordinatorPrompt, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { countByStatus, createTask, findTask, listTasks, shortId, updateTask } from './tasks.ts';
 import { orchestrator, pickAccount } from './orchestrator.ts';
@@ -43,21 +45,21 @@ export function parseCoordinatorOutput(text: string): CoordinatorOutput | null {
 }
 
 /** Apply coordinator / user actions. Returns human-readable summaries. */
-export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator'): string[] {
+export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null): string[] {
   const p = mustProject(projectId);
   const done: string[] = [];
   const task = (ref: string) => { const t = findTask(projectId, ref); if (!t) throw new Error(`unknown task ${ref}`); return t; };
   for (const a of actions) {
     try {
       switch (a.type) {
-        case 'pause': orchestrator.pause(projectId); done.push('paused'); break;
-        case 'resume': void orchestrator.resume(projectId); done.push('resumed'); break;
-        case 'stop': orchestrator.stop(projectId); done.push('stopped'); break;
+        case 'pause': orchestrator.pause(projectId, sessionId); done.push('paused'); break;
+        case 'resume': void orchestrator.resume(projectId, sessionId); done.push('resumed'); break;
+        case 'stop': orchestrator.stop(projectId, sessionId); done.push('stopped'); break;
         case 'add_task': {
           const deps = a.depends_on.map(d => findTask(projectId, d)?.id).filter((x): x is string => !!x);
-          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps, priority: a.priority ?? 70 });
+          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps, priority: a.priority ?? 70, originSessionId: sessionId });
           done.push(`added ${shortId(t)} "${t.title}"`);
-          if (mustProject(projectId).status === 'completed') { void orchestrator.resume(projectId); done.push('project resumed'); }
+          if (mustProject(projectId).status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
           break;
         }
         case 'cancel_task': { const t = task(a.task_id); orchestrator.cancelTask(t.id); done.push(`cancelled ${shortId(t)}`); break; }
@@ -71,7 +73,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           let n = 0;
           for (const t of listTasks(projectId)) if (['pending', 'interrupted'].includes(t.status) && ['build', 'custom'].includes(t.kind)) { orchestrator.cancelTask(t.id); n++; }
           appendMemory(p, 'directives.md', `- Replan requested: ${a.reason} _(${now().slice(0, 16)})_`);
-          createTask(projectId, { title: 'Re-plan remaining work', role: 'planner', kind: 'plan', priority: 95, description: `Re-plan the remaining work. Reason: ${a.reason}\nInspect what is already built on the main branch and plan only what is missing or must change.` });
+          createTask(projectId, { title: 'Re-plan remaining work', role: 'planner', kind: 'plan', priority: 95, originSessionId: sessionId, description: `Re-plan the remaining work. Reason: ${a.reason}\nInspect what is already built on the main branch and plan only what is missing or must change.` });
           updateProject(projectId, { phase: 'plan' });
           done.push(`replanning (cancelled ${n} pending task(s))`);
           break;
@@ -82,42 +84,84 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
   return done;
 }
 
-export async function handleChat(projectId: string, text: string): Promise<void> {
+/** One answer at a time per chat session: a resumed CLI conversation must not get two turns at once. */
+const chatLocks = new Map<string, Promise<unknown>>();
+
+export async function handleChat(projectId: string, text: string, sessionId?: string | null): Promise<void> {
+  mustProject(projectId);
+  const session = sessionId ? mustSession(sessionId) : defaultSession(projectId);
+  if (session.projectId !== projectId) throw new Error('chat session belongs to another project');
+  const userMsg = postMessage(projectId, 'user', text, null, session.id);
+  autoTitle(session.id, text);
+  const run = (chatLocks.get(session.id) ?? Promise.resolve()).catch(() => {}).then(() => answer(projectId, session.id, userMsg.id, text));
+  chatLocks.set(session.id, run);
+  try { await run; } finally { if (chatLocks.get(session.id) === run) chatLocks.delete(session.id); }
+}
+
+async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
   const p = mustProject(projectId);
-  postMessage(projectId, 'user', text);
+  const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
   const role = getRole('coordinator');
   const fake = { role: 'coordinator', kind: 'custom', status: 'pending', authorAccountId: null, lastAccountId: null } as unknown as Task;
   // Chat must stay responsive: the coordinator may share an account with a running worker
   // (a CLI account can run several sessions; they just share its quota).
-  const account = pickAccount(p, fake, listAccounts().map(a => ({ ...a, running: 0 })));
+  const accounts = listAccounts().map(a => ({ ...a, running: 0 }));
+  const pinnedId = p.settings.coordinatorAccountId;
+  // A pinned account is used whenever it can run; otherwise fall back to automatic selection.
+  const pinned = pinnedId ? pickAccount(p, fake, accounts.filter(a => a.id === pinnedId)) : null;
+  const account = pinned ?? pickAccount(p, fake, accounts);
+  if (pinnedId && !pinned && account) {
+    const a = accounts.find(x => x.id === pinnedId);
+    say('system', `${a ? `${a.label || a.id} is ${a.enabled ? a.state : 'disabled'}` : `Account ${pinnedId} no longer exists`}; the coordinator answers on ${account.label || account.id} instead.`);
+  }
   if (!account) {
-    postMessage(projectId, 'system', 'No account is available to answer right now. The controls (pause/stop/resume, task actions) still work; your message is kept in the history.', { level: 'attention' });
+    say('system', 'No account is available to answer right now. The controls (pause/stop/resume, task actions) still work; your message is kept in the history.', { level: 'attention' });
     return;
   }
-  const history = listMessages(projectId, 40).slice(0, -1);
-  const prompt = buildCoordinatorPrompt(p, role, statusDigest(projectId), history, text);
-  const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}.log`);
+  const model = p.settings.coordinatorModels?.[account.provider] || role.models[account.provider];
+  const eff = await effortForRun(account, model, p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider]);
+  if (eff.warning) say('system', `Coordinator: ${eff.warning}.`);
+
+  // Continue the provider CLI conversation when it belongs to this very account (its history lives in the account's home);
+  // otherwise start one with the chat history of this session in the prompt.
+  const session = mustSession(sessionId);
+  const status = statusDigest(projectId);
+  const fullPrompt = () => buildCoordinatorPrompt(p, role, status, listMessages(projectId, 40, sessionId).filter(m => m.id < userMsgId), text);
+  const deltaPrompt = () => buildCoordinatorTurnPrompt(p, status,
+    messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text);
+  const attempt = (resumeId: string | undefined, tag: string) => adapterFor(account.provider).run({
+    account, cwd: p.path, prompt: resumeId ? deltaPrompt() : fullPrompt(), resumeId, model, effort: eff.effort, readOnly: true,
+    timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: 5 * 60_000,
+    logPath: join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`),
+  });
+
   runningByAccount.set(account.id, (runningByAccount.get(account.id) ?? 0) + 1);
-  bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: true }, false);
+  bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: true, sessionId }, false);
   try {
-    const out = await adapterFor(account.provider).run({
-      account, cwd: p.path, prompt, model: role.models[account.provider], readOnly: true,
-      timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: 5 * 60_000, logPath,
-    });
+    const resumeId = session.cliSessionId && session.cliAccountId === account.id ? session.cliSessionId : undefined;
+    let out = await attempt(resumeId, resumeId ? '-resume' : '');
+    // The CLI no longer knows the conversation (purged, other machine...): start over from this session's history.
+    const lostCli = !!resumeId && out.classification.state === 'task_error';
+    if (lostCli) out = await attempt(undefined, '');
     applyClassification(account.id, out.classification, out.quota);
+    const usable = ['ok', 'warning'].includes(out.classification.state);
+    if (usable && out.sessionId) setCliSession(sessionId, { sessionId: out.sessionId, accountId: account.id, syncedMessageId: userMsgId });
+    else if (lostCli) setCliSession(sessionId, null);
+
     const parsed = parseCoordinatorOutput(out.finalText);
+    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli };
     if (!parsed) {
-      const why = out.classification.state !== 'ok' && out.classification.state !== 'warning' ? ` (${account.id}: ${out.classification.state})` : '';
-      postMessage(projectId, 'coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, { account: account.id });
+      const why = !usable ? ` (${account.id}: ${out.classification.state})` : '';
+      say('coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, meta);
       return;
     }
-    const applied = applyActions(projectId, parsed.actions);
-    const meta: Record<string, unknown> = { account: account.id, applied };
+    const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId);
+    meta.applied = applied;
     if (parsed.proposal?.actions.length) meta.proposal = { ...parsed.proposal, status: 'pending' };
-    postMessage(projectId, 'coordinator', parsed.reply, meta);
+    say('coordinator', parsed.reply, meta);
   } finally {
     runningByAccount.set(account.id, Math.max(0, (runningByAccount.get(account.id) ?? 1) - 1));
-    bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: false }, false);
+    bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: false, sessionId }, false);
   }
 }
 
@@ -126,8 +170,8 @@ export function resolveProposal(messageId: number, approve: boolean): string[] {
   const prop = m?.meta?.proposal as { summary: string; actions: CoordinatorAction[]; status: string } | undefined;
   if (!m || !prop) throw new Error('no proposal on this message');
   if (prop.status !== 'pending') throw new Error(`proposal already ${prop.status}`);
-  const applied = approve ? applyActions(m.projectId, prop.actions, 'approved proposal') : [];
+  const applied = approve ? applyActions(m.projectId, prop.actions, 'approved proposal', m.sessionId) : [];
   updateMessageMeta(m.id, { ...m.meta, proposal: { ...prop, status: approve ? 'approved' : 'rejected', applied } });
-  postMessage(m.projectId, 'system', approve ? `Proposal approved: ${applied.join('; ')}` : 'Proposal rejected.');
+  postMessage(m.projectId, 'system', approve ? `Proposal approved: ${applied.join('; ')}` : 'Proposal rejected.', null, m.sessionId);
   return applied;
 }

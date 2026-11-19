@@ -1,5 +1,6 @@
 export type {
-  Account, AccountState, ChatMessage, Project, ProjectSettings, Role, Skill, Task, TaskStatus, QuotaWindow, Provider,
+  Account, AccountState, ChatMessage, ChatSession, Project, ProjectSettings, Role, Skill, Task, TaskStatus, QuotaWindow, Provider,
+  ModelCatalog, ModelCatalogEntry, ModelInfo,
 } from '../../src/shared/types.ts';
 
 export interface AcceptanceItemLike { id: string; criterion: string; verify: string; pass?: boolean | null; evidence?: string }

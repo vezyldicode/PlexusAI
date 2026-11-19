@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Role } from '../shared/types.ts';
+import { cleanEfforts } from './models.ts';
 import { appRoot, paths } from './paths.ts';
 
 const defaultsFile = join(appRoot, 'defaults', 'roles.json');
@@ -34,7 +35,7 @@ export function readRole(name: string): Role | null {
   const m = JSON.parse(readFileSync(meta, 'utf8'));
   const mdPath = join(paths.roles, `${name}.md`);
   return {
-    name, description: m.description ?? '', providers: m.providers ?? [], models: m.models ?? {}, skills: m.skills ?? [],
+    name, description: m.description ?? '', providers: m.providers ?? [], models: m.models ?? {}, efforts: m.efforts ?? {}, skills: m.skills ?? [],
     writesCode: !!m.writesCode, maxRuntimeMin: m.maxRuntimeMin ?? 60,
     onlyListed: !!m.onlyListed, maxParallel: Math.max(0, Number(m.maxParallel ?? 0) || 0),
     instructions: existsSync(mdPath) ? readFileSync(mdPath, 'utf8') : '',
@@ -47,7 +48,7 @@ export function getRole(name: string): Role {
 
 export function saveRole(r: Role): Role {
   if (!NAME.test(r.name)) throw new Error('role name must be lowercase letters, digits and dashes');
-  writeRole({ ...r, providers: [...new Set(r.providers ?? [])], models: r.models ?? {}, skills: r.skills ?? [], onlyListed: !!r.onlyListed, maxParallel: Math.max(0, Math.floor(Number(r.maxParallel) || 0)) });
+  writeRole({ ...r, providers: [...new Set(r.providers ?? [])], models: r.models ?? {}, efforts: cleanEfforts(r.efforts ?? {}), skills: r.skills ?? [], onlyListed: !!r.onlyListed, maxParallel: Math.max(0, Math.floor(Number(r.maxParallel) || 0)) });
   return readRole(r.name)!;
 }
 
