@@ -6,7 +6,7 @@ import { setControlSession } from './chat.ts';
 import { getDb, now } from './db.ts';
 import { bus } from './events.ts';
 import {
-  appendMemory, getProject, listProjects, mustProject, parseDecisions, postMessage, readAcceptance, readMemory, recordDecision, replaceDecisions,
+  appendIssues, appendMemory, getProject, listProjects, mustProject, parseDecisions, postMessage, readAcceptance, readMemory, recordDecision, replaceDecisions,
   setProjectStatus, plexusDir, updateProject, writeAcceptance, writeMemory,
 } from './projects.ts';
 import { getRole } from './roles.ts';
@@ -55,6 +55,8 @@ export function pickAccount(p: Project, t: Task, accounts: Account[] = listAccou
   const nowIso = now();
   let cands = accounts.filter(a => a.enabled && !UNAVAILABLE.has(a.state) && (a.running ?? 0) < a.maxConcurrency
     && (!a.cooldownUntil || a.cooldownUntil <= nowIso));
+  // A pinned task runs on its account whenever that one can run; otherwise any other account takes over (below).
+  if (t.pinnedAccountId) { const pin = cands.find(a => a.id === t.pinnedAccountId); if (pin) return pin; }
   // role.providers is a preference order; unless the role says onlyListed, any account can take any role when needed.
   if (role.onlyListed && role.providers.length) cands = cands.filter(a => role.providers.includes(a.provider));
   const author = t.authorAccountId ? accounts.find(a => a.id === t.authorAccountId) : null;
@@ -75,8 +77,9 @@ export function pickAccount(p: Project, t: Task, accounts: Account[] = listAccou
   const strategy = p.settings.quotaStrategy;
   // Stay on the account that holds the context: retries and fixes/merges go back to the author (its CLI conversation
   // can be resumed), single-agent work to the coordinator's account.
-  const preferred = t.kind === 'solo' ? t.lastAccountId ?? p.settings.coordinatorAccountId
-    : t.status === 'interrupted' || t.kind === 'fix' || t.kind === 'integrate' ? t.lastAccountId : null;
+  // A task holding a CLI conversation (its own, or one it continues) prefers the account that conversation lives on.
+  const preferred = t.cliAccountId ?? (t.kind === 'solo' ? t.lastAccountId ?? p.settings.coordinatorAccountId
+    : t.status === 'interrupted' || t.kind === 'fix' || t.kind === 'integrate' ? t.lastAccountId : null);
   return cands.sort((a, b) =>
     stateRank(a) - stateRank(b)
     || (INDEPENDENT_KINDS.has(t.kind) && author ? Number(a.provider === author.provider) - Number(b.provider === author.provider) : 0)
@@ -93,6 +96,7 @@ export class Orchestrator {
   private inflight = new Set<Promise<void>>();
   private mergeLocks = new Map<string, Promise<unknown>>();
   private lastNoAccountNotice = new Map<string, number>();
+  private pinNotified = new Set<string>();
   /** Outcomes being post-processed per project; phase transitions wait for them (avoids double finish). */
   private processing = new Map<string, number>();
 
@@ -124,7 +128,7 @@ export class Orchestrator {
     if (await commitAll(p.path, 'chore: snapshot before Plexus run')) postMessage(id, 'system', 'Committed uncommitted changes in the project before starting.');
     p = updateProject(id, { mainBranch: main });
     const pipeline = listTasks(id).filter(t => !t.adhoc);
-    if ((!pipeline.length || p.phase === 'new' || p.phase === 'needs_input') && !pipeline.some(t => t.kind === 'ingest' && ACTIVE.includes(t.status))) {
+    if ((!pipeline.length || p.phase === 'new' || p.phase === 'needs_input') && !pipeline.some(t => t.kind === 'ingest' && ACTIVE.includes(t.status) && t.status !== 'blocked')) {
       // Look before spending quota: with no goal and no documentation there is nothing to analyse yet.
       const docs = scanDocs(p.path);
       const said = `${readMemory(p, 'goal.md') || p.goal}\n${readMemory(p, 'directives.md')}`.trim();
@@ -138,9 +142,16 @@ export class Orchestrator {
       const list = docs.files.length
         ? `\nDocumentation files found: ${docs.files.slice(0, 60).join(', ')}${docs.files.length > 60 ? ', …' : ''}`
         : '\nNo documentation files were found; the goal and directives are all there is.';
-      createTask(id, { title: 'Check the documentation, then analyse goal and docs', role: 'analyst', kind: 'ingest', priority: 100,
-        description: 'First check whether the goal and documentation say clearly what to build; if not, return docs_check.sufficient=false with your questions and stop. ' +
-          'Otherwise produce the project brief, the acceptance criteria and the execution mode.' + list });
+      // The user answered the analyst's questions: the same analyst continues in its conversation (it has read the docs).
+      const asked = p.phase === 'needs_input' ? pipeline.filter(t => t.kind === 'ingest' && t.status === 'done' && t.cliSessionId).at(-1) : null;
+      if (asked) {
+        setStatus(asked.id, 'pending', { attempts: 0, error: null, inbox: [...asked.inbox,
+          'The user has answered your questions: the goal and directives now say what to build. Check them again; if they are enough, do the full analysis (brief, criteria, execution mode, code map).'] });
+      } else {
+        createTask(id, { title: 'Check the documentation, then analyse goal and docs', role: 'analyst', kind: 'ingest', priority: 100,
+          description: 'First check whether the goal and documentation say clearly what to build; if not, return docs_check.sufficient=false with your questions and stop. ' +
+            'Otherwise produce the project brief, the acceptance criteria and the execution mode.' + list });
+      }
       updateProject(id, { phase: 'ingest' });
     }
     setProjectStatus(id, 'running');
@@ -168,6 +179,9 @@ export class Orchestrator {
     setControlSession(id, sessionId);
     const p = mustProject(id);
     if (p.phase === 'new' || p.phase === 'needs_input' || !listTasks(id).some(t => !t.adhoc)) return this.startProject(id, sessionId);
+    // Plexus stopped to ask (gaps that made no progress, or a blocked task): the user answered, continue from there.
+    if (p.phase === 'waiting') { this.continueAfterWait(p); return; }
+    for (const t of listTasks(id)) if (t.status === 'blocked' && !t.adhoc) setStatus(t.id, 'pending', { error: null });
     // Resuming a finished project means "keep working": new/remaining tasks run, then QA and evaluation again.
     if (p.status === 'completed' || p.phase.startsWith('done')) updateProject(id, { phase: 'build' });
     setProjectStatus(id, 'running');
@@ -197,6 +211,75 @@ export class Orchestrator {
     void this.tick();
   }
 
+  /** A message for a task's agent: delivered with its next run (a blocked task is woken up by it). */
+  sendMessage(id: string, text: string): Task {
+    const t = getTask(id);
+    if (!t) throw new Error('no such task');
+    const out = updateTask(t.id, { inbox: [...t.inbox, text.trim()] });
+    if (t.status === 'blocked') { setStatus(t.id, 'pending', { error: null }); void this.tick(); }
+    return out;
+  }
+
+  /**
+   * More work for the agent that did `id`: a new task that continues its CLI conversation in the same worktree path
+   * (a lane), so the agent does not re-read the project. Code-writing kinds continue as single-agent work.
+   */
+  continueTask(id: string, instructions: string, title = '', sessionId?: string | null): Task {
+    const prev = getTask(id);
+    if (!prev) throw new Error('no such task');
+    if (ACTIVE.includes(prev.status) && prev.status !== 'blocked') {
+      // Still running or queued: the instructions go to its inbox instead.
+      return this.sendMessage(prev.id, instructions);
+    }
+    const t = createTask(prev.projectId, {
+      title: title || `Continue ${shortId(prev)}: ${instructions.split('\n')[0].slice(0, 60)}`, description: instructions,
+      role: 'solo', kind: 'solo', priority: 80, adhoc: true, originSessionId: sessionId ?? prev.originSessionId, laneFrom: prev,
+      paths: prev.paths, pinnedAccountId: prev.pinnedAccountId,
+    });
+    void this.tick();
+    return t;
+  }
+
+  // ---------------- coordinator edits on the main checkout ----------------
+
+  private mainHolds = new Map<string, { release: () => void; timer: NodeJS.Timeout }>();
+
+  /**
+   * The coordinator edits the main checkout: merges wait until it commits (plexus_main_commit) or 10 minutes pass, so a
+   * merge never meets a half-edited working tree.
+   */
+  holdMain(projectId: string, maxMs = 10 * 60_000): Promise<void> {
+    if (this.mainHolds.has(projectId)) return Promise.resolve();
+    const prev = this.mergeLocks.get(projectId) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    const timer = setTimeout(() => this.releaseMain(projectId), maxMs);
+    this.mainHolds.set(projectId, { release, timer });
+    const acquired: Promise<void> = prev.then(() => {}, () => {});
+    this.mergeLocks.set(projectId, acquired.then(() => held));
+    return acquired;
+  }
+
+  releaseMain(projectId: string): boolean {
+    const h = this.mainHolds.get(projectId);
+    if (!h) return false;
+    clearTimeout(h.timer);
+    this.mainHolds.delete(projectId);
+    h.release();
+    return true;
+  }
+
+  /** Merge a branch the coordinator worked on (its own worktree) through the same queue as task merges. */
+  mergeCoordinatorBranch(p: Project, branch: string, message: string): Promise<{ ok: boolean; detail: string }> {
+    const prev = this.mergeLocks.get(p.id) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(async () => {
+      const r = await mergeBranch(p.path, p.mainBranch, branch, message);
+      return { ok: r.ok, detail: r.ok ? 'merged' : `${r.conflict ? 'conflict' : 'failed'}: ${r.detail}` };
+    });
+    this.mergeLocks.set(p.id, next.catch(() => {}));
+    return next;
+  }
+
   // ---------------- scheduler ----------------
 
   async tick() {
@@ -208,7 +291,7 @@ export class Orchestrator {
         if (p.status === 'running') {
           await this.advance(p.id);
           this.schedule(mustProject(p.id));
-        } else if (p.status === 'idle' || p.status === 'completed') this.schedule(p, true); // chat requests only
+        } else this.schedule(p, true); // idle, completed, paused, stopped: chat requests only
       }
     } catch (e: any) {
       bus.emitEvent('orchestrator.error', null, { message: String(e?.stack ?? e) });
@@ -253,6 +336,10 @@ export class Orchestrator {
         if (clash) continue;
       }
       const a = pickAccount(p, t, accounts);
+      if (a && t.pinnedAccountId && a.id !== t.pinnedAccountId && !this.pinNotified.has(t.id)) {
+        this.pinNotified.add(t.id);
+        postMessage(p.id, 'system', `${shortId(t)} is pinned to ${t.pinnedAccountId}, which cannot run now; ${a.label || a.id} continues it.`, { taskId: t.id, level: 'handoff' });
+      }
       if (!a) {
         noAccount++;
         const last = this.lastNoAccountNotice.get(p.id) ?? 0;
@@ -317,6 +404,19 @@ export class Orchestrator {
     if (t.status === 'cancelled') return;
     const accountProblem = ['limited', 'transient', 'needs_login', 'blocked'].includes(out.classification.state);
 
+    if (out.outcome === 'blocked') {
+      // Retrying with the same input gives the same answer: wait for the user (or the coordinator) instead.
+      const r = out.result!;
+      this.absorbCommon(p, t, account, r);
+      updateTask(t.id, { status: 'blocked', result: r, accountId: null, error: out.reason });
+      const pipeline = !t.adhoc && mustProject(p.id).status === 'running';
+      postMessage(p.id, 'system', `${shortId(t)} "${t.title}" is blocked and waits for you: ${r.summary}${r.questions.length ? `\n${r.questions.map(q => `- ${q.question}`).join('\n')}` : ''}\n` +
+        `Answer in the chat (the coordinator passes it on with send_message), or retry the task.${pipeline ? ' The project is paused meanwhile.' : ''}`,
+        { taskId: t.id, level: 'attention' });
+      if (pipeline && !listTasks(p.id).some(x => x.id !== t.id && x.status === 'running')) this.pause(p.id);
+      return;
+    }
+
     if (out.outcome !== 'success') {
       const stopped = out.reason === 'stopped by user';
       const attempts = t.attempts + (accountProblem || stopped ? 0 : 1);
@@ -348,6 +448,7 @@ export class Orchestrator {
           break;
         }
         if (r.project_brief) writeMemory(p, 'brief.md', r.project_brief);
+        if (r.codemap?.trim()) writeMemory(p, 'codemap.md', r.codemap);
         if (r.project_summary) writeMemory(p, 'summary.md', r.project_summary);
         if (r.acceptance_criteria?.length) writeAcceptance(p, r.acceptance_criteria.map(a => ({ ...a, pass: null })));
         // Single agent unless the settings or the analyst say the work needs a team.
@@ -405,15 +506,19 @@ export class Orchestrator {
     }
   }
 
-  /** One agent (the coordinator's model) builds the whole project, or closes the gaps of the previous round. */
-  private createSoloBuild(p: Project, after: Task | null, round: number, gaps = '') {
+  /**
+   * One agent (the coordinator's model) builds the whole project, or closes the gaps of the previous round. A gap round
+   * continues the previous round's agent (same conversation and worktree path) and only carries the open criteria.
+   */
+  private createSoloBuild(p: Project, after: Task | null, round: number, gaps = '', prev: Task | null = null, openIds: string[] = []) {
     createTask(p.id, {
       title: round === 1 ? 'Build the project (single agent)' : `Close the remaining gaps (round ${round})`, role: 'solo', kind: 'solo', priority: 90,
       deps: after ? [after.id] : [],
       description: round === 1
         ? 'Build the whole project described by the brief and the acceptance criteria on your own: design (short ARCHITECTURE.md), implement, ' +
           'test, review your own diff, and verify every acceptance criterion by running its check. Report the verification in `evaluation`.'
-        : `The project is not complete yet. Close these gaps, then verify every acceptance criterion again and report in \`evaluation\`:\n${gaps}`,
+        : `The project is not complete yet. Close these gaps (change the code where needed), then re-check the affected criteria and report every criterion in \`evaluation\`:\n${gaps}`,
+      laneFrom: prev, acIds: openIds, pinnedAccountId: prev?.pinnedAccountId ?? null,
     });
     updateProject(p.id, { phase: 'solo' });
   }
@@ -423,16 +528,67 @@ export class Orchestrator {
     const acc = readAcceptance(p);
     for (const c of ev.criteria) {
       const a = acc.find(x => x.id === c.id);
-      if (a) { a.pass = c.pass; a.evidence = c.evidence; }
+      if (a) { a.pass = c.pass; a.evidence = c.evidence; a.needs = c.pass === 'blocked' ? c.needs ?? 'environment' : undefined; }
     }
     if (acc.length) writeAcceptance(p, acc);
   }
 
-  /** What is still missing after an evaluation: failing criteria and follow-up items, as one list for one agent. */
+  /** What is still missing after an evaluation: failing criteria and follow-up items, as one list for one agent. Blocked criteria are not gaps. */
   private gapList(ev: AgentResult['evaluation'], followUps: AgentResult['follow_up_tasks']): string {
-    const failing = (ev?.criteria ?? []).filter(c => !c.pass).map(c => `- ${c.id} fails: ${c.evidence}`);
+    const failing = (ev?.criteria ?? []).filter(c => c.pass === false).map(c => `- ${c.id} fails: ${c.evidence}`);
     const items = followUps.map(f => `- ${f.title}: ${f.description}${f.acceptance.length ? ` (done when: ${f.acceptance.join('; ')})` : ''}`);
     return [...failing, ...items].join('\n') || '- (the previous round reported the project incomplete without details; re-check every criterion)';
+  }
+
+  /** The evaluation (solo or evaluator) before `t` in the project pipeline, to tell whether a round made progress. */
+  private previousEvaluation(p: Project, t: Task): AgentResult['evaluation'] | null {
+    const prev = listTasks(p.id).filter(x => !x.adhoc && x.seq < t.seq && x.status === 'done' && ['solo', 'evaluate'].includes(x.kind) && x.result?.evaluation).at(-1);
+    return prev?.result?.evaluation ?? null;
+  }
+
+  /**
+   * Is another round worth it? Not when the round changed no code, or did not reduce the failing criteria, or when only
+   * criteria that cannot be checked here (blocked) remain: another agent would hit the same wall.
+   */
+  private stalled(ev: AgentResult['evaluation'], prev: AgentResult['evaluation'] | null, changedCode: boolean): string | null {
+    const failing = (ev?.criteria ?? []).filter(c => c.pass === false).length;
+    const blocked = (ev?.criteria ?? []).filter(c => c.pass === 'blocked').length;
+    if (!failing && blocked) return `only criteria that cannot be checked here remain (${blocked})`;
+    if (!prev) return changedCode ? null : 'the round changed no code';
+    const before = prev.criteria.filter(c => c.pass === false).length;
+    if (failing >= before) return changedCode ? `the failing criteria did not go down (${before} → ${failing})` : 'the round changed no code and fixed no criterion';
+    return null;
+  }
+
+  /**
+   * Stop and ask instead of starting a round that would not converge. The open gaps are kept (open-gaps.md); after the
+   * user's answer (a directive, an install, a decision) `resume` continues with them.
+   */
+  private waitForUser(p: Project, t: Task, ev: AgentResult['evaluation'], gaps: string, why: string) {
+    const blocked = (ev?.criteria ?? []).filter(c => c.pass === 'blocked');
+    writeMemory(p, 'open-gaps.md', `# Open gaps after ${shortId(t)}\n\nStopped because ${why}.\n\n${gaps}\n${blocked.length ? `\n## Cannot be checked here\n${blocked.map(c => `- ${c.id} (needs ${c.needs ?? 'environment'}): ${c.evidence}`).join('\n')}\n` : ''}`);
+    updateProject(p.id, { phase: 'waiting' });
+    setProjectStatus(p.id, 'paused');
+    const lines = [
+      `Plexus stopped instead of starting another round: ${why}.`,
+      gaps.trim() ? `Still failing:\n${gaps}` : '',
+      blocked.length ? `Cannot be checked here:\n${blocked.map(c => `- ${c.id} (needs ${c.needs ?? 'environment'}): ${c.evidence}`).join('\n')}` : '',
+      'Tell the coordinator what to change (install something, drop or reword a criterion, give a decision), then Resume. Or Stop to keep it as it is.',
+    ];
+    postMessage(p.id, 'system', lines.filter(Boolean).join('\n\n'), { taskId: t.id, level: 'attention' });
+  }
+
+  /** Resume after waitForUser: one more round with the open gaps, continuing the last agent. */
+  private continueAfterWait(p: Project) {
+    const pipeline = listTasks(p.id).filter(t => !t.adhoc);
+    const last = pipeline.filter(t => ['solo', 'evaluate'].includes(t.kind)).at(-1) ?? null;
+    const lane = pipeline.filter(t => t.kind === 'solo').at(-1) ?? null;
+    const gaps = readMemory(p, 'open-gaps.md').trim() || '- re-check every criterion';
+    const open = (last?.result?.evaluation?.criteria ?? []).filter(c => c.pass !== true).map(c => c.id);
+    setProjectStatus(p.id, 'running');
+    this.createSoloBuild(p, null, p.evalRounds + 1, `${gaps}\n\nThe user has answered in the meantime: read the directives and messages first.`, lane, open);
+    postMessage(p.id, 'system', 'Resumed: one agent continues with the open gaps.');
+    void this.tick();
   }
 
   /**
@@ -440,10 +596,13 @@ export class Orchestrator {
    * project's single-agent build is complete, continues with the gaps, or hands the rest to a team when it escalated.
    */
   private async onSolo(p: Project, t: Task, r: AgentResult) {
+    const changedCode = !!t.branch && await hasCommitsAhead(p.path, t.branch, p.mainBranch);
+    if (r.codemap?.trim()) writeMemory(p, 'codemap.md', r.codemap);
     await this.integrate(p, t);
     if (t.adhoc) {
       const fu = r.follow_up_tasks.length ? `\nSuggested follow-ups (not started): ${r.follow_up_tasks.map(f => f.title).join('; ')}` : '';
-      postMessage(p.id, 'agent', `${shortId(t)} "${t.title}" finished (${r.status}): ${r.summary}${fu}`, { taskId: t.id, level: 'done' });
+      postMessage(p.id, 'agent', `${shortId(t)} "${t.title}" finished (${r.status}): ${r.summary || '(no summary given)'}${fu}\n` +
+        `To give this agent more work in the same context: continue_task ${shortId(t)}.`, { taskId: t.id, level: 'done' });
       return;
     }
     const cur = mustProject(p.id);
@@ -455,19 +614,25 @@ export class Orchestrator {
       return;
     }
     const ev = r.evaluation;
+    const prevEv = this.previousEvaluation(p, t);
     this.applyEvaluation(p, ev);
     const rounds = cur.evalRounds + 1;
     updateProject(p.id, { evalRounds: rounds });
     if (ev?.complete) return this.finish(p, ev.report ?? r.summary, true);
     if (rounds >= p.settings.maxEvalRounds) return this.finish(p, ev?.report ?? r.summary, false, 'evaluation round limit reached');
-    postMessage(p.id, 'system', `Round ${rounds}: not complete yet; the same single agent continues with the gaps.`, { taskId: t.id });
-    this.createSoloBuild(p, null, rounds + 1, this.gapList(ev, r.follow_up_tasks));
+    const gaps = this.gapList(ev, r.follow_up_tasks);
+    // A round must show progress (fewer failing criteria) to get another one; the first round must at least have changed code.
+    const why = this.stalled(ev, prevEv, changedCode);
+    if (why) return this.waitForUser(mustProject(p.id), getTask(t.id)!, ev, gaps, why);
+    postMessage(p.id, 'system', `Round ${rounds}: not complete yet; the same agent continues with the gaps in its own conversation.`, { taskId: t.id });
+    const open = (ev?.criteria ?? []).filter(c => c.pass === false).map(c => c.id);
+    this.createSoloBuild(p, null, rounds + 1, gaps, getTask(t.id), open);
   }
 
   private absorbCommon(p: Project, t: Task, a: Account, r: AgentResult) {
     for (const d of r.decisions) recordDecision(p, d, `${shortId(t)} (${t.role}, ${a.id})`);
     if (r.decisions.length) this.maybeCompactDecisions(p);
-    for (const i of r.issues) appendMemory(p, 'known-issues.md', `- [${shortId(t)}] ${i}`);
+    appendIssues(p, shortId(t), r.issues);
     for (const q of r.questions) postMessage(p.id, 'agent', `${t.role} (${shortId(t)}) asks: ${q.question}\nAssumed for now: ${q.default_answer || '—'}`, { taskId: t.id, question: q.question, defaultAnswer: q.default_answer });
     bus.emitEvent('task.result', p.id, { id: t.id, seq: t.seq, title: t.title, status: r.status, summary: r.summary.slice(0, 1000), account: a.id });
   }
@@ -657,12 +822,20 @@ export class Orchestrator {
       return this.finish(p, ev?.report ?? r.summary, false, rounds >= p.settings.maxEvalRounds ? 'evaluation round limit reached' : 'evaluator found gaps but proposed no tasks');
     }
     const fus = r.follow_up_tasks;
+    // Rounds since the last evaluation that changed nothing, or did not reduce the failing criteria: ask, do not loop.
+    const prevEv = this.previousEvaluation(p, t);
+    const since = listTasks(p.id).filter(x => !x.adhoc && x.seq < t.seq && ['solo', 'evaluate'].includes(x.kind) && x.result?.evaluation).at(-1)?.updatedAt;
+    const changed = !since || Number((await git(p.path, 'rev-list', '--count', `--since=${since}`, p.mainBranch)).stdout.trim()) > 0;
+    const why = this.stalled(ev, prevEv, changed);
+    if (why) return this.waitForUser(mustProject(p.id), t, ev, this.gapList(ev, fus), why);
     // A few gaps go to one agent (one hand-off, no review); many go back to the team as separate tasks.
     if (fus.length <= BUNDLE_GAPS_MAX || p.settings.pipeline === 'single') {
+      const lane = listTasks(p.id).filter(x => x.kind === 'solo' && x.status === 'done').at(-1) ?? null;
       createTask(p.id, {
         title: `Fix the gaps found by evaluation round ${rounds}`, role: 'solo', kind: 'solo', priority: 70,
         description: `The evaluation found these gaps. Fix all of them, run the tests and re-check the affected acceptance criteria:\n${this.gapList(ev, fus)}`,
-        acIds: fus.flatMap(f => f.ac_ids), paths: fus.flatMap(f => f.paths), originSessionId: t.originSessionId,
+        acIds: [...fus.flatMap(f => f.ac_ids), ...(ev?.criteria ?? []).filter(c => c.pass === false).map(c => c.id)],
+        paths: fus.flatMap(f => f.paths), originSessionId: t.originSessionId, laneFrom: lane,
       });
     } else this.createFollowUps(p, t, r);
     updateProject(p.id, { phase: 'build' });
@@ -672,12 +845,13 @@ export class Orchestrator {
   private finish(p: Project, report: string, complete: boolean, why = '') {
     if (mustProject(p.id).status === 'completed') return;
     const acc = readAcceptance(p);
-    const passed = acc.filter(a => a.pass).length;
-    const header = `# Plexus report — ${p.name}\n\nStatus: ${complete ? 'COMPLETE' : 'STOPPED WITH GAPS' + (why ? ` (${why})` : '')}\nAcceptance: ${passed}/${acc.length} passed\nFinished: ${now()}\n\n`;
+    const passed = acc.filter(a => a.pass === true).length;
+    const blocked = acc.filter(a => a.pass === 'blocked').length;
+    const header = `# Plexus report — ${p.name}\n\nStatus: ${complete ? 'COMPLETE' : 'STOPPED WITH GAPS' + (why ? ` (${why})` : '')}\nAcceptance: ${passed}/${acc.length} passed${blocked ? `, ${blocked} cannot be checked here` : ''}\nFinished: ${now()}\n\n`;
     writeFileSync(join(plexusDir(p), 'REPORT.md'), header + report);
     updateProject(p.id, { phase: complete ? 'done' : 'done-with-gaps' });
     setProjectStatus(p.id, 'completed');
-    postMessage(p.id, 'system', `${complete ? 'Project complete' : 'Plexus stopped with gaps'}: acceptance ${passed}/${acc.length}. Report in .plexus/REPORT.md`, { level: 'done', report: true });
+    postMessage(p.id, 'system', `${complete ? 'Project complete' : 'Plexus stopped with gaps'}: acceptance ${passed}/${acc.length}${blocked ? ` (${blocked} need a person or another environment)` : ''}. Report in .plexus/REPORT.md`, { level: 'done', report: true });
     bus.emitEvent('project.finished', p.id, { complete, passed, total: acc.length });
   }
 
@@ -697,6 +871,8 @@ export class Orchestrator {
     }
     const active = listTasks(projectId).some(t => ACTIVE.includes(t.status));
     if (active) return;
+    // A pipeline task waits for the user: no phase moves on without it.
+    if (listTasks(projectId).some(t => t.status === 'blocked' && !t.adhoc)) return;
     const pipeline = listTasks(projectId).filter(t => !t.adhoc);
     const evaluate = () => {
       createTask(p.id, { title: `Evaluate against goal and acceptance criteria (round ${p.evalRounds + 1})`, role: 'evaluator', kind: 'evaluate', priority: 85 });

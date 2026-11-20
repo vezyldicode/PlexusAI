@@ -15,7 +15,7 @@ export function ProjectHeader({ s, detail, view, onView, trailing }: { s: Plexus
   const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`, { sessionId: s.sessionId }).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
   const running = detail.tasks.filter(t => t.status === 'running').length;
   const acc = detail.acceptance;
-  const passed = acc.filter(a => a.pass).length;
+  const passed = acc.filter(a => a.pass === true).length;
   return (
     <header className="phead">
       <div className="phead-row">
@@ -53,6 +53,7 @@ export function ProjectHeader({ s, detail, view, onView, trailing }: { s: Plexus
 // ---------------------------------------------------------------- tasks
 
 const COLUMNS: { title: string; statuses: Task['status'][] }[] = [
+  { title: 'Waiting for you', statuses: ['blocked'] },
   { title: 'Queued', statuses: ['pending', 'interrupted'] },
   { title: 'Running', statuses: ['running'] },
   { title: 'In review', statuses: ['in_review'] },
@@ -256,11 +257,11 @@ function TokenPanel({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: st
 
 export function StatusView({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: string) => void }) {
   const acc = detail.acceptance;
-  const passed = acc.filter(a => a.pass).length;
+  const passed = acc.filter(a => a.pass === true).length;
   const failed = acc.filter(a => a.pass === false).length;
   const c = detail.counts;
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const order = ['running', 'pending', 'interrupted', 'in_review', 'done', 'failed', 'cancelled'];
+  const order = ['running', 'blocked', 'pending', 'interrupted', 'in_review', 'done', 'failed', 'cancelled'];
   const u = detail.usage;
   return (
     <div className="status">
@@ -287,7 +288,7 @@ export function StatusView({ detail, onOpen }: { detail: ProjectDetail; onOpen: 
         <div className="panel-head"><span>Acceptance criteria</span><span className="num muted">{passed}/{acc.length}</span></div>
         {acc.map(a => (
           <div key={a.id} className="crit" title={a.evidence ?? ''}>
-            <Dot state={a.pass ? 'done' : a.pass === false ? 'failed' : 'pending'} />
+            <Dot state={a.pass === true ? 'done' : a.pass === false ? 'failed' : a.pass === 'blocked' ? 'blocked' : 'pending'} />
             <span className="crit-id mono">{a.id}</span><span>{a.criterion}</span>
           </div>
         ))}

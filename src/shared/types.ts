@@ -96,6 +96,8 @@ export interface ProjectSettings {
   qaPhase: boolean;
   /** Continue the author's CLI conversation (same account, same worktree) for fixes and retries instead of starting cold. */
   resumeSessions: boolean;
+  /** Compact an agent's conversation once its context passes this many tokens (Claude ≥ 100000; 0 = the CLI's default). */
+  autocompactTokens: number;
 }
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -116,6 +118,7 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   reviewMinLines: 300,
   qaPhase: false,
   resumeSessions: true,
+  autocompactTokens: 150_000,
 };
 
 export interface Project {
@@ -132,7 +135,8 @@ export interface Project {
 }
 
 export type TaskKind = 'ingest' | 'architect' | 'plan' | 'build' | 'fix' | 'review' | 'integrate' | 'qa' | 'evaluate' | 'compact' | 'solo' | 'custom';
-export type TaskStatus = 'pending' | 'running' | 'interrupted' | 'in_review' | 'done' | 'failed' | 'cancelled';
+/** `blocked`: the agent said it cannot go on without the user (an answer, a decision, a change of input); never retried by itself. */
+export type TaskStatus = 'pending' | 'running' | 'interrupted' | 'in_review' | 'done' | 'failed' | 'cancelled' | 'blocked';
 
 export interface Task {
   id: string;
@@ -171,6 +175,15 @@ export interface Task {
   /** Provider CLI conversation of the last attempt and the account it lives on (resumed for fixes and retries). */
   cliSessionId: string | null;
   cliAccountId: string | null;
+  /** Context size (tokens) of the last model call of that conversation, and when it ended: decides whether resuming it is cheaper than a fresh start. */
+  cliCtxTokens: number;
+  cliUsedAt: string | null;
+  /** Run only on this account while it can run; when it cannot (quota, login), another account takes over. */
+  pinnedAccountId: string | null;
+  /** The task whose agent this one continues (same worktree path and CLI conversation): a "lane" of one agent. */
+  laneFrom: string | null;
+  /** Messages for the agent (from the coordinator or the user), delivered at the start of its next run. */
+  inbox: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -192,6 +205,11 @@ export interface TokenUsage extends ModelTokens {
   byModel: Record<string, ModelTokens>;
   /** The run ended without the CLI's final report (killed, crashed): a lower bound. */
   partial?: boolean;
+  /** Model calls of the invocation and their context sizes (input + cache read + cache write of a call), when the stream shows them. */
+  calls?: number;
+  firstCtx?: number;
+  maxCtx?: number;
+  lastCtx?: number;
 }
 
 /** Token totals of a project (GET /api/projects/:id). */
@@ -318,6 +336,8 @@ export const AgentResultSchema = z.object({
   escalate: z.object({ reason: z.string().default('') }).nullable().optional(),
   // librarian: the compacted list that replaces the decisions it was given
   decisions_digest: z.array(DecisionSchema).optional(),
+  // analyst / solo / architect: a short map of the code (modules, responsibilities, entry points, how to test) for later agents
+  codemap: z.string().optional(),
   // planner
   tasks: z.array(FollowUpTaskSchema).optional(),
   // reviewer
@@ -325,7 +345,11 @@ export const AgentResultSchema = z.object({
   // evaluator
   evaluation: z.object({
     complete: z.boolean(),
-    criteria: z.array(z.object({ id: z.string(), pass: z.boolean(), evidence: z.string().default('') })).default([]),
+    // pass "blocked": cannot be checked here (missing environment, needs a person or a decision); never becomes a gap to fix.
+    criteria: z.array(z.object({
+      id: z.string(), pass: z.union([z.boolean(), z.literal('blocked')]), evidence: z.string().default(''),
+      needs: z.enum(['environment', 'human', 'decision']).optional(),
+    })).default([]),
     report: z.string().optional(),
   }).optional(),
 }).passthrough();
@@ -338,7 +362,8 @@ export const CoordinatorActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('resume') }),
   z.object({ type: z.literal('stop') }),
   z.object({ type: z.literal('add_task'), title: z.string(), description: z.string().default(''), role: z.string().default('implementer'), depends_on: z.array(z.string()).default([]), priority: z.number().optional() }),
-  z.object({ type: z.literal('solo_task'), title: z.string(), description: z.string().default('') }),
+  // `fresh`: start a new agent even when the last single agent could continue (its conversation is small and recent).
+  z.object({ type: z.literal('solo_task'), title: z.string(), description: z.string().default(''), account: z.string().optional(), fresh: z.boolean().optional() }),
   z.object({ type: z.literal('cancel_task'), task_id: z.string() }),
   z.object({ type: z.literal('retry_task'), task_id: z.string() }),
   z.object({ type: z.literal('reprioritize'), task_id: z.string(), priority: z.number() }),
@@ -347,6 +372,14 @@ export const CoordinatorActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('add_directive'), text: z.string() }),
   z.object({ type: z.literal('set_goal'), goal: z.string() }),
   z.object({ type: z.literal('replan'), reason: z.string() }),
+  // Run a task on one account (another takes over while it cannot run). "auto" clears the pin.
+  z.object({ type: z.literal('assign_account'), task_id: z.string(), account: z.string() }),
+  // Remove directives whose text contains `match` (case-insensitive).
+  z.object({ type: z.literal('remove_directive'), match: z.string() }),
+  // Give more work to the agent that did `task_id`, in its own conversation and worktree (no fresh context).
+  z.object({ type: z.literal('continue_task'), task_id: z.string(), title: z.string().default(''), instructions: z.string() }),
+  // A message for the agent of `task_id`: delivered at the start of its next run (a running task gets it when its turn ends).
+  z.object({ type: z.literal('send_message'), task_id: z.string(), text: z.string() }),
 ]);
 export type CoordinatorAction = z.infer<typeof CoordinatorActionSchema>;
 

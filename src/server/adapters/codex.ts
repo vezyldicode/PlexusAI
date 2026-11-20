@@ -2,6 +2,7 @@ import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
 import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.ts';
 import { invocationUsage } from '../usage.ts';
+import { codexMcpOverrides, withSystem } from './mcp-config.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 const UNKNOWN_RESET_BACKOFF_MS = 15 * 60 * 1000;
@@ -77,19 +78,25 @@ export const codexAdapter: ProviderAdapter = {
   async run(spec: RunSpec): Promise<RunOutcome> {
     const { cmd, prefixArgs } = resolveCli('codex');
     // --ignore-user-config: workers must not inherit per-machine config (custom endpoints, MCP servers...).
+    // --disable plugins: curated plugins in CODEX_HOME/plugins (e.g. Notion) start their MCP servers despite
+    // --ignore-user-config, adding tool schemas to every call (and failing on auth). Plexus's own MCP server is a config override.
     // `exec resume` has no -C/--sandbox: the working directory is the spawn cwd and read-only is a config override.
     const args = spec.resumeId
-      ? [...prefixArgs, 'exec', 'resume', '--json', '--ignore-user-config', '--skip-git-repo-check']
-      : [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--skip-git-repo-check', '-C', spec.cwd];
+      ? [...prefixArgs, 'exec', 'resume', '--json', '--ignore-user-config', '--disable', 'plugins', '--skip-git-repo-check']
+      : [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--disable', 'plugins', '--skip-git-repo-check', '-C', spec.cwd];
     if (spec.model) args.push('-m', spec.model);
     if (spec.effort) args.push('-c', `model_reasoning_effort="${spec.effort}"`);
+    // Note: on Windows the read-only sandbox refuses to start any process (even `Get-Location`), so a read-only Codex
+    // agent cannot even read files there. Only use it where that is acceptable.
     if (spec.readOnly) args.push(...(spec.resumeId ? ['-c', 'sandbox_mode="read-only"'] : ['--sandbox', 'read-only']));
     else args.push('--dangerously-bypass-approvals-and-sandbox');
+    args.push(...codexMcpOverrides(spec));
+    if (spec.autocompact && spec.autocompact > 0) args.push('-c', `model_auto_compact_token_limit=${Math.floor(spec.autocompact)}`);
     if (spec.resumeId) args.push(spec.resumeId);
     args.push('-');
     const since = Date.now();
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },

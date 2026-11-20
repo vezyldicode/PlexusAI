@@ -4,6 +4,7 @@ import { runStreaming } from '../util/proc.ts';
 import { classifyClaudeRun, claudeQuota } from './claude-limits.ts';
 import { claudeSessionId, describeClaudeEvent } from './claude.ts';
 import { invocationUsage } from '../usage.ts';
+import { withSystem, writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 const agentScript = join(import.meta.dirname, 'mock-agent.ts');
@@ -13,8 +14,10 @@ export const mockAdapter: ProviderAdapter = {
   accountEnv(account: Account) { return { MOCK_HOME: account.home }; },
 
   async run(spec: RunSpec): Promise<RunOutcome> {
+    const mcp = writeMcpConfig(spec);
     const r = await runStreaming({
-      cmd: process.execPath, args: [agentScript, ...(spec.resumeId ? ['--resume', spec.resumeId] : [])], cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
+      cmd: process.execPath, args: [agentScript, ...(spec.resumeId ? ['--resume', spec.resumeId] : []), ...(mcp ? ['--mcp-config', mcp] : [])],
+      cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { const d = describeClaudeEvent(line); if (d) spec.onEvent?.(d); },

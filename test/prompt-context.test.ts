@@ -58,7 +58,9 @@ test('a build task gets only its criteria and the decisions that concern it', ()
   assert.doesNotMatch(prompt, /Long brief paragraph/);
   assert.match(prompt, /^# RULES/);
   assert.match(prompt, /<!-- plexus-meta[\s\S]*-->$/); // task-specific meta last, shared parts first
-  assert.ok(prompt.indexOf('# PROJECT:') < prompt.indexOf('# YOUR ROLE'));
+  // Rules and role are the fixed part of a role's prompts (the CLI's cached system prompt), project context follows.
+  assert.ok(prompt.indexOf('# YOUR ROLE') < prompt.indexOf('# PROJECT:'));
+  assert.ok(prompt.indexOf('# PROJECT:') < prompt.indexOf('# TASK '));
 
   const planner = createTask(p.id, { title: 'Plan', role: 'planner', kind: 'plan' });
   const planPrompt = buildTaskPrompt(p, planner, getRole('planner'), account, '', []);

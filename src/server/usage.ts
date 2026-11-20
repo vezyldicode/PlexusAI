@@ -45,8 +45,22 @@ export function addUsage(a: TokenUsage | null | undefined, b: TokenUsage | null 
   if (!b) return a;
   const byModel: Record<string, ModelTokens> = { ...a.byModel };
   for (const [m, t] of Object.entries(b.byModel)) byModel[m] = byModel[m] ? addModel(byModel[m], t) : t;
-  return usageOf(byModel, !!(a.partial || b.partial));
+  const out = usageOf(byModel, !!(a.partial || b.partial));
+  // Call metrics of b following a (a failed resume, then a fresh start): calls add up, the last context is b's.
+  if (a.calls || b.calls) withCtx(out, [...ctxList(a), ...ctxList(b)]);
+  return out;
 }
+
+/** Context sizes to metrics: number of calls, first, largest and last context. */
+export function withCtx(u: TokenUsage, ctxs: number[]): TokenUsage {
+  const c = ctxs.filter(x => x > 0);
+  if (!c.length) return u;
+  u.calls = c.length; u.firstCtx = c[0]; u.maxCtx = Math.max(...c); u.lastCtx = c[c.length - 1];
+  return u;
+}
+/** Approximate list back from metrics (first, …, max, last), enough to combine two invocations. */
+const ctxList = (u: TokenUsage): number[] => !u.calls ? [] : u.calls === 1 ? [u.lastCtx ?? 0]
+  : [u.firstCtx ?? 0, ...Array(Math.max(0, u.calls - 2)).fill(u.maxCtx ?? 0), u.lastCtx ?? 0];
 
 export function sumUsage(list: (TokenUsage | null | undefined)[]): TokenUsage | null {
   return list.reduce<TokenUsage | null>((acc, u) => addUsage(acc, u), null);
@@ -72,6 +86,8 @@ export interface ParsedUsage {
   turn?: TokenUsage | null;
   /** Claude: summed from per-call stream events (exact input/cache, output undercounted), for runs with no result. */
   stream: TokenUsage | null;
+  /** Context size of each model call, in order (Claude stream events). */
+  ctxs?: number[];
 }
 
 const claudeTokens = (u: any, cost: number | null): ModelTokens => ({
@@ -96,6 +112,7 @@ export function claudeUsage(stdout: string): ParsedUsage {
   for (const { model } of calls.values()) counts.set(model, (counts.get(model) ?? 0) + 1);
   const main = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'claude';
 
+  const ctxs = [...calls.values()].map(({ u }) => n(u.input_tokens) + n(u.cache_read_input_tokens) + n(u.cache_creation_input_tokens));
   const turn = result?.usage ? usageOf({ [main]: claudeTokens(result.usage, null) }) : null;
   let reported: TokenUsage | null = null;
   const mu = result?.modelUsage;
@@ -111,7 +128,7 @@ export function claudeUsage(stdout: string): ParsedUsage {
   } else if (result?.usage) {
     reported = usageOf({ [main]: claudeTokens(result.usage, typeof result.total_cost_usd === 'number' ? result.total_cost_usd : null) });
   }
-  return { reported, turn, stream };
+  return { reported, turn, stream, ctxs };
 }
 
 /** Codex `exec --json` output (thread totals). The stream names no model, so the caller passes the one it asked for. */
@@ -152,13 +169,15 @@ export function codexRolloutUsage(rollout: string, since: number, until: number)
   // token_usage_record (per response, with its turn) when the CLI writes them; else the per-response token_count events.
   const rows = records.length ? records.map(r => ({ at: r.at, model: modelOfTurn.get(r.turn) ?? lastModel, u: r.u })) : counts;
   const byModel: Record<string, ModelTokens> = {};
+  const ctxs: number[] = [];
   let any = false;
   for (const r of rows) {
     if (!(r.at >= since && r.at <= until)) continue;
     byModel[r.model] = addModel(byModel[r.model] ?? zeroModel(), codexTokens(r.u));
+    ctxs.push(n(r.u.input_tokens)); // Codex input_tokens include the cached part: the whole context of that response
     any = true;
   }
-  return any ? usageOf(byModel) : null;
+  return any ? withCtx(usageOf(byModel), ctxs) : null;
 }
 
 const rolloutPaths = new Map<string, string>();
@@ -233,6 +252,7 @@ export function invocationUsage(provider: Provider, stdout: string, opts: Invoca
     if (out && !parsed.reported) out.partial = true; // killed before the turn completed: what the rollout has so far
   }
   out ??= resolveInvocation(provider, parsed, prev, !!opts.resumeId);
+  if (out && parsed.ctxs?.length && !out.calls) out = withCtx({ ...out }, parsed.ctxs);
   if (parsed.reported && key) saveReport(key, parsed.reported);
   return out;
 }

@@ -2,7 +2,8 @@
 // Speaks the same stream-json protocol as `claude -p --output-format stream-json`, so the
 // real Claude classifier is exercised. Behaviour is driven by <home>/mock.json:
 //   { "limitAfterRuns": 3, "delayMs": 200, "rejectReviewOnce": true }
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -71,10 +72,33 @@ const mockPlan = () => cfg.planWide
       { key: 'b', title: 'Create beta', description: 'FILE: beta.txt', role: 'implementer', depends_on: ['a'], acceptance: ['beta.txt exists'], paths: ['beta.txt'], ac_ids: ['AC2'] },
     ];
 
+/** Call one tool of the MCP server given with --mcp-config (as a real CLI would), returning its text. */
+async function mcpCall(tool: string, args: unknown): Promise<string> {
+  const i = process.argv.indexOf('--mcp-config');
+  if (i < 0) return '(no mcp config)';
+  const cfgFile = JSON.parse(readFileSync(process.argv[i + 1], 'utf8'));
+  const [name, server] = Object.entries<any>(cfgFile.mcpServers)[0];
+  const child = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const pending = new Map<number, (v: any) => void>();
+  createInterface({ input: child.stdout! }).on('line', l => { const m = JSON.parse(l); pending.get(m.id)?.(m); });
+  let n = 0;
+  const rpc = (method: string, params: unknown) => new Promise<any>(res => { const id = ++n; pending.set(id, res); child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
+  await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'mock', version: '0' } });
+  child.stdin!.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  const list = await rpc('tools/list', {});
+  const r = await rpc('tools/call', { name: tool, arguments: args });
+  child.kill();
+  return `[${name} tools: ${list.result.tools.length}] ${r.result?.content?.[0]?.text ?? JSON.stringify(r.error)}`;
+}
+
 switch (meta.kind) {
   case 'coordinator': {
     const msg = (prompt.match(/USER MESSAGE:\n([\s\S]*?)\n(?:---|$)/)?.[1] ?? '').trim();
     const actions: any[] = [];
+    // `action: {...}` lines become actions as they are; `mcp: tool {json args}` calls a plexus tool.
+    for (const m of msg.matchAll(/^action:\s*(\{.*\})\s*$/gm)) actions.push(JSON.parse(m[1]));
+    const toolCall = msg.match(/^mcp:\s*(\S+)\s*(\{.*\})?\s*$/m);
+    const toolOut = toolCall ? await mcpCall(toolCall[1], toolCall[2] ? JSON.parse(toolCall[2]) : {}) : '';
     if (/pause|dừng/i.test(msg)) actions.push({ type: 'pause' });
     if (/resume|tiếp tục/i.test(msg)) actions.push({ type: 'resume' });
     const solo = msg.match(/do:\s*(.+)/i);
@@ -83,7 +107,7 @@ switch (meta.kind) {
     if (add) actions.push({ type: 'add_task', title: add[1], description: `FILE: ${slug(add[1])}.txt`, role: 'implementer' });
     // A resumed turn carries only what is new; it says so, and which of the new notices it saw, so tests can check the delta.
     const news = prompt.match(/# NEW SINCE YOUR LAST REPLY\n([\s\S]*?)\n\n/)?.[1];
-    const reply = `Mock coordinator received: ${msg}${resumeId ? ` [resumed ${resumeId}${news ? `; news: ${news.replace(/\n/g, ' | ')}` : ''}]` : ''}${prompt.includes('# CHAT HISTORY') ? ' [full history]' : ''}`;
+    const reply = `Mock coordinator received: ${msg}${resumeId ? ` [resumed ${resumeId}${news ? `; news: ${news.replace(/\n/g, ' | ')}` : ''}]` : ''}${prompt.includes('# CHAT HISTORY') ? ' [full history]' : ''}${toolOut ? `\nTOOL: ${toolOut}` : ''}`;
     say(JSON.stringify({ reply, actions, proposal: null }));
     out({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify({ reply, actions, proposal: null }) });
     process.exit(0);
@@ -112,13 +136,15 @@ switch (meta.kind) {
     break;
   case 'solo': {
     // One agent does everything: the files named in the task (FILE: x), else the mock project's files.
+    // `soloFirstFiles`: what the first round writes; `soloNoProgress`: later rounds change nothing (a stalled agent).
+    const gapRound = /# TASK T\d+: Close the remaining gaps/.test(prompt);
     const named = [...new Set([...prompt.matchAll(/FILE:\s*(\S+)/g)].map(m => m[1]))];
-    const files = named.length ? named : ['alpha.txt', 'beta.txt'];
+    const files = gapRound && cfg.soloNoProgress ? [] : !gapRound && cfg.soloFirstFiles ? cfg.soloFirstFiles : named.length ? named : ['alpha.txt', 'beta.txt'];
     for (const f of files) {
       tool('Write', { file_path: f });
       writeFileSync(f, (existsSync(f) ? readFileSync(f, 'utf8') : '') + `written by mock (solo, ${meta.task_id})\n`);
     }
-    git('add', '-A'); git('commit', '-m', `solo: ${files.join(', ')} (mock)`);
+    if (files.length) { git('add', '-A'); git('commit', '-m', `solo: ${files.join(', ')} (mock)`); }
     if (cfg.soloEscalate && !existsSync(join(home, 'escalated'))) {
       writeFileSync(join(home, 'escalated'), '1');
       result.escalate = { reason: 'mock: the rest needs a team' };
@@ -162,6 +188,11 @@ switch (meta.kind) {
   case 'qa':
     break;
   default: { // build, fix, integrate, custom
+    // `blockKinds`: these kinds answer "blocked" until a message for them arrives (delivered in the prompt).
+    if ((cfg.blockKinds ?? []).includes(meta.kind) && !/## Messages for you/.test(prompt)) {
+      result = { status: 'blocked', summary: 'mock: need to know which file to write', questions: [{ question: 'Which file?', default_answer: '' }] };
+      break;
+    }
     const file = prompt.match(/FILE:\s*(\S+)/)?.[1] ?? `${slug(meta.task_id ?? 'out')}.txt`;
     tool('Write', { file_path: file });
     const prev = existsSync(file) ? readFileSync(file, 'utf8') : '';

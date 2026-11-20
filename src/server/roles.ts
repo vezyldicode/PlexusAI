@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Role } from '../shared/types.ts';
@@ -13,9 +14,27 @@ export function defaultRoles(): Role[] {
 
 export const BUILTIN_ROLES = new Set(defaultRoles().map(r => r.name));
 
-/** Seed missing default roles into the user's role directory (never overwrites edits). */
+const instructionsHash = (s: string) => createHash('sha256').update(s.trimEnd()).digest('hex').slice(0, 16);
+
+/** Hashes of earlier built-in instructions per role (defaults/roles-history.json). */
+function previousDefaults(): Record<string, string[]> {
+  const f = join(appRoot, 'defaults', 'roles-history.json');
+  try { return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {}; } catch { return {}; }
+}
+
+/**
+ * Seed missing default roles into the user's role directory, and upgrade the instructions of built-in roles the user
+ * never edited (they still match an earlier default). Edited instructions and the role settings (models, efforts...)
+ * are never overwritten.
+ */
 export function seedRoles(): void {
-  for (const r of defaultRoles()) if (!existsSync(join(paths.roles, `${r.name}.json`))) writeRole(r);
+  const old = previousDefaults();
+  for (const r of defaultRoles()) {
+    if (!existsSync(join(paths.roles, `${r.name}.json`))) { writeRole(r); continue; }
+    const md = join(paths.roles, `${r.name}.md`);
+    const cur = existsSync(md) ? readFileSync(md, 'utf8') : '';
+    if (cur.trimEnd() !== r.instructions.trimEnd() && (old[r.name] ?? []).includes(instructionsHash(cur))) writeFileSync(md, r.instructions.trimEnd() + '\n');
+  }
 }
 
 function writeRole(r: Role) {

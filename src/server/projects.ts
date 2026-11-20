@@ -81,7 +81,7 @@ export function plexusDir(p: Project): string {
   return dir;
 }
 export const memoryDir = (p: Project) => join(plexusDir(p), 'memory');
-export const MEMORY_FILES = ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'] as const;
+export const MEMORY_FILES = ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md', 'codemap.md', 'open-gaps.md'] as const;
 
 export function readMemory(p: Project, file: string): string {
   const f = join(memoryDir(p), file);
@@ -101,7 +101,10 @@ export function appendMemory(p: Project, file: string, content: string): void {
   bus.emitEvent('memory.updated', p.id, { file }, false);
 }
 
-export interface AcceptanceItem { id: string; criterion: string; verify: string; pass?: boolean | null; evidence?: string }
+/** `pass: 'blocked'`: cannot be checked in this environment (needs an install, a person or a decision). */
+export interface AcceptanceItem { id: string; criterion: string; verify: string; pass?: boolean | 'blocked' | null; evidence?: string; needs?: string }
+
+export const acMark = (a: Pick<AcceptanceItem, 'pass'>) => (a.pass === true ? 'x' : a.pass === 'blocked' ? '~' : ' ');
 
 export function readAcceptance(p: Project): AcceptanceItem[] {
   return json<AcceptanceItem[]>(readMemory(p, 'acceptance.json'), []);
@@ -110,7 +113,43 @@ export function readAcceptance(p: Project): AcceptanceItem[] {
 export function writeAcceptance(p: Project, items: AcceptanceItem[]): void {
   writeMemory(p, 'acceptance.json', JSON.stringify(items, null, 2));
   writeMemory(p, 'acceptance.md', '# Acceptance criteria\n\n' + items.map(a =>
-    `- [${a.pass ? 'x' : ' '}] **${a.id}** ${a.criterion}${a.verify ? ` — verify: ${a.verify}` : ''}${a.evidence ? `\n  - evidence: ${a.evidence}` : ''}`).join('\n'));
+    `- [${acMark(a)}] **${a.id}** ${a.criterion}${a.verify ? ` — verify: ${a.verify}` : ''}${a.pass === 'blocked' ? ` — blocked${a.needs ? ` (needs ${a.needs})` : ''}` : ''}${a.evidence ? `\n  - evidence: ${a.evidence}` : ''}`).join('\n'));
+}
+
+/** Add known issues, skipping ones already recorded (same text apart from the task tag and spacing). */
+export function appendIssues(p: Project, tag: string, issues: string[]): number {
+  const norm = (l: string) => l.replace(/^-\s*/, '').replace(/^\[T\d+\]\s*/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const seen = new Set(readMemory(p, 'known-issues.md').split('\n').map(norm).filter(Boolean));
+  const fresh = issues.map(i => i.trim()).filter(i => i && !seen.has(norm(i)) && (seen.add(norm(i)), true));
+  if (fresh.length) appendMemory(p, 'known-issues.md', fresh.map(i => `- ${tag ? `[${tag}] ` : ''}${i}`).join('\n'));
+  return fresh.length;
+}
+
+/** Remove the directives (lines of directives.md) whose text contains `match`, case-insensitive. Returns the removed lines. */
+export function removeDirectives(p: Project, match: string): string[] {
+  const m = match.trim().toLowerCase();
+  if (!m) return [];
+  const lines = readMemory(p, 'directives.md').split('\n');
+  const gone = lines.filter(l => l.trim().startsWith('-') && l.toLowerCase().includes(m));
+  if (gone.length) writeMemory(p, 'directives.md', lines.filter(l => !gone.includes(l)).join('\n').replace(/\n{3,}/g, '\n\n'));
+  return gone;
+}
+
+// ---------------- hand-off notes (kept after a task's worktree is gone) ----------------
+
+export const handoffDir = (p: Project) => join(memoryDir(p), 'handoff');
+
+/** Keep what an agent wrote in progress.md (and its result summary) beyond its worktree, for whoever continues. */
+export function writeHandoff(p: Project, taskShort: string, text: string): void {
+  if (!/^T\d+$/.test(taskShort) || !text.trim()) return;
+  mkdirSync(handoffDir(p), { recursive: true });
+  const body = text.length > 20_000 ? '…(earlier notes omitted)\n' + text.slice(-20_000) : text;
+  writeFileSync(join(handoffDir(p), `${taskShort}.md`), body);
+}
+
+export function readHandoff(p: Project, taskShort: string): string {
+  const f = join(handoffDir(p), `${taskShort}.md`);
+  return existsSync(f) ? readFileSync(f, 'utf8') : '';
 }
 
 export interface DecisionEntry extends Decision { by: string; at: string }

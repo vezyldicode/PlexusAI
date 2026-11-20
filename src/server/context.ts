@@ -3,10 +3,10 @@
 // Every agent turn re-reads the whole prompt, so the prompt carries only what the task needs: a short project summary,
 // the acceptance criteria and decisions that concern it, and one-line indexes of the rest. Full copies of the memory
 // are written to .plexus-task/context/ in the task's worktree for the agent to open when it needs more.
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Project, Task, TaskKind } from '../shared/types.ts';
-import { readAcceptance, readDecisions, readMemory, type AcceptanceItem, type DecisionEntry } from './projects.ts';
+import { acMark, handoffDir, readAcceptance, readDecisions, readHandoff, readMemory, type AcceptanceItem, type DecisionEntry } from './projects.ts';
 import { getTask, normAcIds, pathsOverlap, shortId } from './tasks.ts';
 
 export const CONTEXT_DIR = '.plexus-task/context';
@@ -17,29 +17,40 @@ export interface ContextProfile {
   acceptance: 'full' | 'task' | 'none';
   decisions: 'full' | 'relevant';
   issues: 'full' | 'task' | 'none';
+  /** The code map (modules, entry points, how to test) so the agent does not re-explore the code to find its way. */
+  codemap?: boolean;
 }
 
-const FULL: ContextProfile = { brief: 'full', acceptance: 'full', decisions: 'full', issues: 'full' };
-const WORKER: ContextProfile = { brief: 'summary', acceptance: 'task', decisions: 'relevant', issues: 'task' };
+const FULL: ContextProfile = { brief: 'full', acceptance: 'full', decisions: 'full', issues: 'full', codemap: true };
+const WORKER: ContextProfile = { brief: 'summary', acceptance: 'task', decisions: 'relevant', issues: 'task', codemap: true };
 
-export const PROFILES: Record<TaskKind | 'coordinator', ContextProfile> = {
+export const PROFILES: Record<TaskKind | 'coordinator' | 'gap', ContextProfile> = {
   ingest: { brief: 'none', acceptance: 'none', decisions: 'full', issues: 'none' },
-  architect: { brief: 'full', acceptance: 'full', decisions: 'full', issues: 'none' },
+  architect: { brief: 'full', acceptance: 'full', decisions: 'full', issues: 'none', codemap: true },
   plan: FULL,
   build: WORKER,
   fix: WORKER,
   custom: WORKER,
   integrate: { ...WORKER, issues: 'none' },
   review: { ...WORKER, issues: 'none' },
-  qa: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full' },
-  evaluate: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full' },
+  qa: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full', codemap: true },
+  evaluate: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full', codemap: true },
   compact: { brief: 'summary', acceptance: 'none', decisions: 'full', issues: 'none' },
   // A single agent building the whole project needs all of it (chat requests use the worker profile, see buildTaskPrompt).
   solo: FULL,
+  // A later round of a single-agent build: only the criteria still open (its acIds) and what concerns them.
+  gap: WORKER,
   coordinator: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full' },
 };
 
-const LIMITS = { brief: 12_000, summary: 1_800, acceptance: 8_000, decisionsFull: 8_000, decisionsRelevant: 4_000, indexTitles: 80, issues: 3_000, taskIssues: 1_500 };
+/** The profile of a task: chat requests and gap rounds (a solo task with the open criteria as acIds) get the worker profile. */
+export function profileFor(t: Task): ContextProfile {
+  if (t.kind === 'solo' && t.adhoc) return PROFILES.custom;
+  if (t.kind === 'solo' && t.acIds.length) return PROFILES.gap;
+  return PROFILES[t.kind] ?? PROFILES.custom;
+}
+
+const LIMITS = { brief: 12_000, summary: 1_800, acceptance: 8_000, decisionsFull: 8_000, decisionsRelevant: 4_000, indexTitles: 80, issues: 3_000, taskIssues: 1_500, codemap: 4_000 };
 
 const head = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '\n…(truncated)' : s);
 const tail = (s: string, n: number) => (s.length > n ? '…(earlier entries omitted)\n' + s.slice(-n) : s);
@@ -72,7 +83,8 @@ export function projectSummary(p: Project): string {
   return (para > LIMITS.summary / 2 ? cut.slice(0, para) : cut) + `\n…(full brief in ${file('brief.md')})`;
 }
 
-const acLine = (a: AcceptanceItem) => `- [${a.pass ? 'x' : ' '}] **${a.id}** ${a.criterion}${a.verify ? ` — verify: ${a.verify}` : ''}`;
+/** One criterion for a prompt: no evidence (that stays in acceptance.md; the agent re-checks anyway). */
+const acLine = (a: AcceptanceItem) => `- [${acMark(a)}] **${a.id}** ${a.criterion}${a.verify ? ` — verify: ${a.verify}` : ''}${a.pass === 'blocked' ? ' — blocked (needs environment/person)' : ''}`;
 
 function decisionText(d: DecisionEntry): string {
   return `### ${d.title}\n- Decision: ${d.decision}${d.rationale ? `\n- Rationale: ${d.rationale}` : ''}`;
@@ -102,8 +114,10 @@ function decisionsSection(p: Project, prof: ContextProfile, t: Task | null): str
 
 function acceptanceSection(p: Project, prof: ContextProfile, t: Task | null): string {
   if (prof.acceptance === 'none') return '';
-  if (prof.acceptance === 'full') return `## Acceptance criteria\n${orNone(head(readMemory(p, 'acceptance.md'), LIMITS.acceptance))}`;
   const all = readAcceptance(p);
+  if (prof.acceptance === 'full') {
+    return `## Acceptance criteria\n${all.length ? head(all.map(acLine).join('\n'), LIMITS.acceptance) : orNone(head(readMemory(p, 'acceptance.md'), LIMITS.acceptance))}`;
+  }
   if (!all.length) return `## Acceptance criteria\n${orNone(head(readMemory(p, 'acceptance.md'), LIMITS.acceptance))}`;
   const ids = new Set(t ? taskAcIds(t) : []);
   const mine = all.filter(a => ids.has(a.id.toUpperCase()));
@@ -116,6 +130,7 @@ function issuesSection(p: Project, prof: ContextProfile, t: Task | null): string
   const md = readMemory(p, 'known-issues.md');
   if (prof.issues === 'full' || !t) return `## Known issues\n${orNone(tail(md, LIMITS.issues))}`;
   const ids = chain(t).map(shortId);
+  if (t.laneFrom) ids.push(shortId({ seq: Number(t.laneFrom.split('-T').pop()) || 0 }));
   const re = new RegExp(`\\b(?:${ids.join('|')})\\b`);
   const lines = md.split('\n').filter(l => l.trim());
   const mine = lines.filter(l => re.test(l));
@@ -127,6 +142,21 @@ function briefSection(p: Project, prof: ContextProfile): string {
   if (prof.brief === 'none') return '';
   if (prof.brief === 'full') return `## Project brief\n${orNone(head(readMemory(p, 'brief.md'), LIMITS.brief), '(not written yet; read the documentation in the repository)')}`;
   return `## Project summary\n${orNone(projectSummary(p), '(not written yet; read the documentation in the repository)')}\nFull brief: ${file('brief.md')}.`;
+}
+
+function codemapSection(p: Project, prof: ContextProfile): string {
+  if (!prof.codemap) return '';
+  const m = readMemory(p, 'codemap.md').trim();
+  return m ? `## Code map (from earlier agents; check it against the code, update it in \`codemap\` if it is wrong)\n${head(m, LIMITS.codemap)}` : '';
+}
+
+/** What the agent this task continues left behind (its progress notes), for a fresh start in its place. */
+export function laneNotes(p: Project, t: Task): string {
+  if (!t.laneFrom) return '';
+  const prev = getTask(t.laneFrom);
+  if (!prev) return '';
+  const notes = readHandoff(p, shortId(prev)).trim();
+  return notes ? `## Notes left by the previous agent on this work (${shortId(prev)}: ${prev.title})\n${tail(notes, 4_000)}` : '';
 }
 
 /**
@@ -142,6 +172,7 @@ export function projectContext(p: Project, prof: ContextProfile, t: Task | null)
     prof.decisions === 'full' ? decisionsSection(p, prof, t) : '',
   ];
   const task = [
+    codemapSection(p, prof),
     acceptanceSection(p, prof, t),
     prof.decisions === 'relevant' ? decisionsSection(p, prof, t) : '',
     issuesSection(p, prof, t),
@@ -153,7 +184,14 @@ export function projectContext(p: Project, prof: ContextProfile, t: Task | null)
 export function writeContextFiles(p: Project, wt: string): void {
   const dir = join(wt, CONTEXT_DIR);
   mkdirSync(dir, { recursive: true });
-  for (const f of ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md']) {
+  for (const f of ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'codemap.md', 'open-gaps.md']) {
     writeFileSync(join(dir, f), readMemory(p, f) || '(empty)\n');
+  }
+  // Hand-off notes of earlier tasks (the newest few), so evidence written in one round is still there in the next.
+  const src = handoffDir(p);
+  if (existsSync(src)) {
+    const files = readdirSync(src).filter(f => /^T\d+\.md$/.test(f)).sort((a, b) => Number(b.slice(1, -3)) - Number(a.slice(1, -3))).slice(0, 8);
+    if (files.length) mkdirSync(join(dir, 'handoff'), { recursive: true });
+    for (const f of files) cpSync(join(src, f), join(dir, 'handoff', f));
   }
 }

@@ -767,3 +767,7 @@ select.effort.bad { border-color: var(--warn, #b7791f); }
 .tok-task:hover { background: var(--raised); }
 .tok-task:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tok-task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+/* message / follow-up box under an agent's stream */
+.agent-note { display: flex; gap: 8px; align-items: flex-end; margin: 12px 0 4px; }
+.agent-note textarea { flex: 1; resize: vertical; min-height: 44px; font: inherit; }

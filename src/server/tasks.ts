@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { AgentResult, Run, Task, TaskKind, TaskStatus, TokenUsage } from '../shared/types.ts';
 import { getDb, json, now } from './db.ts';
 import { bus } from './events.ts';
@@ -9,7 +10,9 @@ function rowToTask(r: any): Task {
     attempts: r.attempts, accountId: r.account_id, lastAccountId: r.last_account_id, authorAccountId: r.author_account_id,
     reviewCycles: r.review_cycles, acceptance: json(r.acceptance, []), acIds: json(r.ac_ids, []), result: json<AgentResult | null>(r.result, null), error: r.error,
     models: json(r.models, {}), efforts: json(r.efforts, {}), paths: json(r.paths, []), originSessionId: r.origin_session_id ?? null,
-    adhoc: !!r.adhoc, cliSessionId: r.cli_session_id ?? null, cliAccountId: r.cli_account_id ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
+    adhoc: !!r.adhoc, cliSessionId: r.cli_session_id ?? null, cliAccountId: r.cli_account_id ?? null,
+    cliCtxTokens: r.cli_ctx_tokens ?? 0, cliUsedAt: r.cli_used_at ?? null, pinnedAccountId: r.pinned_account_id ?? null,
+    laneFrom: r.lane_from ?? null, inbox: json(r.inbox, []), createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -54,6 +57,10 @@ export function createTask(projectId: string, t: {
   /** Chat session this work belongs to; defaults to the parent task's. */
   originSessionId?: string | null;
   adhoc?: boolean; lastAccountId?: string | null;
+  /** Continue this task's agent: same worktree path and CLI conversation (see `laneFields`). */
+  laneFrom?: Task | null;
+  pinnedAccountId?: string | null;
+  inbox?: string[];
 }): Task {
   const db = getDb();
   const seq = ((db.prepare('SELECT MAX(seq) AS m FROM tasks WHERE project_id = ?').get(projectId) as any)?.m ?? 0) + 1;
@@ -66,6 +73,10 @@ export function createTask(projectId: string, t: {
               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, projectId, seq, t.title, t.description ?? '', t.role, t.kind, JSON.stringify(t.deps ?? []), t.parentId ?? null, t.branch ?? null,
       t.worktree ?? null, t.priority ?? 50, JSON.stringify(t.acceptance ?? []), JSON.stringify(acIds), t.authorAccountId ?? null, t.reviewCycles ?? 0, JSON.stringify(normPaths(t.paths ?? [])), origin, t.adhoc ? 1 : 0, t.lastAccountId ?? null, now(), now());
+  const lane = t.laneFrom ? laneFields(t.laneFrom) : null;
+  if (lane || t.pinnedAccountId || t.inbox?.length) {
+    updateTask(id, { ...(lane ?? {}), ...(t.pinnedAccountId ? { pinnedAccountId: t.pinnedAccountId } : {}), ...(t.inbox?.length ? { inbox: t.inbox } : {}) }, true);
+  }
   const task = getTask(id)!;
   bus.emitEvent('task.created', projectId, { id, seq, title: task.title, role: task.role, kind: task.kind });
   return task;
@@ -75,8 +86,26 @@ const COLS: Record<string, string> = {
   title: 'title', description: 'description', role: 'role', status: 'status', deps: 'deps', branch: 'branch', worktree: 'worktree',
   priority: 'priority', attempts: 'attempts', accountId: 'account_id', lastAccountId: 'last_account_id', authorAccountId: 'author_account_id',
   reviewCycles: 'review_cycles', result: 'result', error: 'error', acceptance: 'acceptance', acIds: 'ac_ids', models: 'models', efforts: 'efforts', paths: 'paths',
-  cliSessionId: 'cli_session_id', cliAccountId: 'cli_account_id',
+  cliSessionId: 'cli_session_id', cliAccountId: 'cli_account_id', cliCtxTokens: 'cli_ctx_tokens', cliUsedAt: 'cli_used_at',
+  pinnedAccountId: 'pinned_account_id', laneFrom: 'lane_from', inbox: 'inbox',
 };
+
+/**
+ * What a task inherits from the task whose agent it continues: the worktree path (Claude finds a conversation by its
+ * working directory; the worktree is re-created there from the main branch) and the CLI conversation with its
+ * account. Nothing is inherited while another active task uses that worktree.
+ */
+export function laneFields(prev: Task): Partial<Task> | null {
+  if (!prev.worktree) return null;
+  const busy = listTasks(prev.projectId).some(x => x.id !== prev.id && ACTIVE.includes(x.status) && x.worktree === prev.worktree);
+  if (busy || ACTIVE.includes(prev.status)) return null;
+  // A worktree still on disk holds unmerged work on the previous branch (failed or stopped task): keep that branch too.
+  const keepBranch = existsSync(prev.worktree) && prev.branch ? { branch: prev.branch } : {};
+  return {
+    ...keepBranch, laneFrom: prev.id, worktree: prev.worktree, cliSessionId: prev.cliSessionId, cliAccountId: prev.cliAccountId,
+    cliCtxTokens: prev.cliCtxTokens, cliUsedAt: prev.cliUsedAt, lastAccountId: prev.cliAccountId ?? prev.lastAccountId,
+  };
+}
 
 export function updateTask(id: string, patch: Partial<Task>, quiet = false): Task {
   const sets: string[] = [], vals: any[] = [];

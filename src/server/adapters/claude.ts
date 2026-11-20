@@ -3,6 +3,7 @@ import { resolveCli, runStreaming } from '../util/proc.ts';
 import { classifyClaudeRun, claudeQuota, parseEvents } from './claude-limits.ts';
 import { readClaudeStatus } from './claude-control.ts';
 import { invocationUsage } from '../usage.ts';
+import { writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
@@ -51,6 +52,14 @@ export const claudeAdapter: ProviderAdapter = {
     if (spec.model) args.push('--model', spec.model);
     if (spec.effort) args.push('--effort', spec.effort);
     if (spec.readOnly) args.push('--tools', 'Read,Glob,Grep');
+    // Rules and role in the system prompt (identical across tasks of a role: cached), without the per-worktree sections
+    // (cwd, git status) that would make every worktree's system prompt different. A resume reuses the recorded one.
+    if (spec.system && !spec.resumeId) args.push('--append-system-prompt', spec.system, '--exclude-dynamic-system-prompt-sections');
+    // Only Plexus's own MCP server (if any): the user's MCP servers would add their tool schemas to every call.
+    const mcp = writeMcpConfig(spec);
+    if (mcp) args.push('--mcp-config', mcp);
+    args.push('--strict-mcp-config');
+    if (spec.autocompact && spec.autocompact >= 100_000) args.push('--autocompact', String(spec.autocompact));
     args.push('--dangerously-skip-permissions');
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,

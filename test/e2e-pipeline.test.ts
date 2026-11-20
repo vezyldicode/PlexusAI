@@ -73,7 +73,8 @@ test('adaptive pipeline: ask first, single agent by default, chat requests done 
     assert.ok((await call('GET', `/api/projects/${p2.id}/messages`)).some((m: any) => /Which files should be created\?/.test(m.text)));
     await call('POST', `/api/projects/${p2.id}/actions`, { actions: [{ type: 'add_directive', text: 'CLARIFIED: create alpha.txt and beta.txt' }, { type: 'resume' }] });
     const s2done = await completed(p2.id, 'clarified project');
-    assert.deepEqual(s2done.tasks.map((t: any) => t.kind), ['ingest', 'ingest', 'solo'], dump(s2done));
+    // The same analyst continues in its conversation after the answer (no second analyst re-reading the docs).
+    assert.deepEqual(s2done.tasks.map((t: any) => t.kind), ['ingest', 'solo'], dump(s2done));
 
     // 3. A chat request on a project that was never started: one agent does it, the pipeline stays off.
     cfg({});

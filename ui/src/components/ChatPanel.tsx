@@ -351,6 +351,15 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
 
   const follow = useFollow(data?.events.length);
   const act = (a: string) => api('POST', `/api/tasks/${task.id}/${a}`).then(reload).catch(e => onError(e.message));
+  const [note, setNote] = useState('');
+  // Done: give more work to this same agent (its conversation and worktree). Otherwise: a message for its next run.
+  const finished = ['done', 'failed', 'cancelled'].includes(task.status);
+  const sendNote = () => {
+    const text = note.trim();
+    if (!text) return;
+    const req = finished ? api('POST', `/api/tasks/${task.id}/continue`, { instructions: text }) : api('POST', `/api/tasks/${task.id}/message`, { text });
+    req.then(() => { setNote(''); reload(); }).catch(e => onError(e.message));
+  };
   const shown = runs.find(r => r.id === (run ?? data?.run?.id));
   const acct = accounts.find(a => a.id === (shown?.accountId ?? task.accountId ?? task.lastAccountId));
   const counted = runs.filter(r => r.usage).length;
@@ -376,14 +385,16 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
             </select>
           )}
           <span className="spacer" />
-          {['failed', 'cancelled', 'interrupted'].includes(task.status) && <button onClick={() => act('retry')}><Ic i={RotateCcw} />Retry</button>}
+          {['failed', 'cancelled', 'interrupted', 'blocked'].includes(task.status) && <button onClick={() => act('retry')}><Ic i={RotateCcw} />Retry</button>}
           {!['done', 'cancelled'].includes(task.status) && <button className="danger" onClick={() => act('cancel')}><Ic i={Square} />Cancel</button>}
         </div>
       </header>
 
       <div className="stream" ref={follow.ref} onScroll={follow.onScroll}>
         <details className="io">
-          <summary><Ic i={ChevronRight} size={14} />Input<span className="io-meta">{data?.prompt ? `${Math.round(data.prompt.length / 1000)}k chars sent to the agent` : 'task description'}</span></summary>
+          <summary><Ic i={ChevronRight} size={14} />Input<span className="io-meta">{data?.prompt
+            ? `${(data.prompt.length / 1000).toFixed(1)}k chars (≈${fmtTokens(Math.round(data.prompt.length / 3.5))} tokens) from Plexus${shown?.usage?.firstCtx ? ` · first call ${fmtTokens(shown.usage.firstCtx)} tokens with the CLI's own prompt · largest ${fmtTokens(shown.usage.maxCtx ?? 0)} · ${shown.usage.calls} calls` : ''}`
+            : 'task description'}</span></summary>
           {task.description && <pre className="pre">{task.description}</pre>}
           {data?.prompt && <><div className="io-label">Full prompt</div><pre className="pre">{data.prompt}</pre></>}
         </details>
@@ -397,6 +408,14 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
             : <div key={i} className={`evt k-${e.kind}`}><span className="evt-kind">{e.kind === 'tool' ? 'tool' : 'status'}</span><span className="evt-text">{e.text}</span></div>
         ))}
         {isRunning && data?.run && <div className="typing live"><span /><span /><span /></div>}
+        {task.status !== 'cancelled' && (
+          <div className="agent-note">
+            <textarea rows={2} value={note} onChange={e => setNote(e.target.value)}
+              placeholder={finished ? 'More work for this agent (continues its conversation and worktree)' : task.status === 'blocked' ? 'Answer the agent: it waits for this' : 'Message for this agent (delivered with its next run)'}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendNote(); } }} />
+            <button onClick={sendNote} disabled={!note.trim()}><Ic i={ArrowUp} />{finished ? 'Continue' : 'Send'}</button>
+          </div>
+        )}
 
         {task.result && (
           <div className="result">

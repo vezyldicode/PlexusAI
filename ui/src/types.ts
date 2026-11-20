@@ -3,4 +3,4 @@ export type {
   ModelCatalog, ModelCatalogEntry, ModelInfo, ModelTokens, ProjectUsage, TokenUsage,
 } from '../../src/shared/types.ts';
 
-export interface AcceptanceItemLike { id: string; criterion: string; verify: string; pass?: boolean | null; evidence?: string }
+export interface AcceptanceItemLike { id: string; criterion: string; verify: string; pass?: boolean | 'blocked' | null; evidence?: string; needs?: string }

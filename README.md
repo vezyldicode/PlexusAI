@@ -111,12 +111,13 @@ Các lệnh chính:
 npm test
 ```
 
-Có 52 test, gồm:
+Có 66 test, gồm:
 - Bộ phân loại trạng thái quota của Claude và Codex.
 - Chọn account.
 - Một project chạy trọn vòng đời bằng agent giả lập (provider `mock`, không tốn quota), có bàn giao khi hết quota và review → sửa → merge.
 - Dừng giữa chừng, khởi động lại daemon rồi chạy tiếp.
 - Pipeline thích ứng: hỏi trước khi thiếu docs, một agent cho project nhỏ và cho yêu cầu từ Chat, fix sau review tiếp tục phiên của người viết.
+- Tiết kiệm token: task `blocked` chờ thay vì retry, vòng gap tiếp tục phiên cũ và dừng hỏi khi không tiến triển, ghim account có fallback, Coordinator dùng tool `plexus` (MCP). Xem [docs/06-efficiency-and-coordinator-research.md](docs/06-efficiency-and-coordinator-research.md).
 
 ```bash
 npm run typecheck

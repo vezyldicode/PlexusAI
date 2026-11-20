@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
-import { applyActions, coordinatorTarget, handleChat, resolveProposal } from './coordinator.ts';
+import { applyActions, beginMainEdit, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
@@ -19,7 +19,8 @@ import {
 } from './projects.ts';
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
 import { createSkill, deleteSkill, installSkill, listSkills, removeTemp, setSkillEnabled, skillFiles } from './skills.ts';
-import { countByStatus, getTask, listRuns, listTasks, updateTask } from './tasks.ts';
+import { countByStatus, findTask, getTask, listRuns, listTasks, shortId, updateTask } from './tasks.ts';
+import type { Run } from '../shared/types.ts';
 import { projectUsage } from './usage.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
@@ -51,6 +52,16 @@ function tailFile(path: string, maxBytes = 200_000): string {
     readSync(fd, buf, 0, buf.length, start);
     return (start ? '…(truncated)\n' : '') + buf.toString('utf8');
   } finally { closeSync(fd); }
+}
+
+/** The agent stream of a run as readable lines (messages, tool calls, status). */
+function runEvents(run: Run): { kind: string; text: string }[] {
+  const log = tailFile(run.logPath);
+  const provider = getAccount(run.accountId)?.provider ?? (run.accountId.startsWith('codex') ? 'codex' : 'claude');
+  const describe = provider === 'codex' ? describeCodexEvent : describeClaudeEvent;
+  const marker = log.indexOf('\n# output\n');
+  const out = marker < 0 ? log : log.slice(marker + '\n# output\n'.length);
+  return out.split('\n').filter(Boolean).map(l => describe(l)).filter((e): e is NonNullable<typeof e> => !!e && e.kind !== 'raw');
 }
 
 export async function buildApi(token: string, hooks: { shutdown: () => Promise<void> } = { shutdown: async () => {} }): Promise<FastifyInstance> {
@@ -146,6 +157,39 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.post('/api/projects/:id/resume', async req => { await orchestrator.resume(id(req), body(req).sessionId); return mustProject(id(req)); });
   app.post('/api/projects/:id/stop', async req => { orchestrator.stop(id(req), body(req).sessionId); return mustProject(id(req)); });
   app.post('/api/projects/:id/actions', async req => ({ applied: applyActions(id(req), body(req).actions ?? [], 'user', body(req).sessionId) }));
+
+  // ---- coordinator tools (the plexus MCP server calls these)
+  app.get('/api/projects/:id/status-digest', async req => {
+    const p = mustProject(id(req));
+    const s = statusDigest(p.id);
+    return { text: `Project ${p.name} · status: ${p.status} · phase: ${p.phase} · main branch: ${p.mainBranch}\nTask counts: ${s.counts}\n\n## Tasks\n${s.tasks}\n\n## Accounts\n${s.accounts}\n\n## Recent events\n${s.events}` };
+  });
+  const taskRef = (req: FastifyRequest) => {
+    const t = findTask(id(req), String((req.params as any).ref));
+    if (!t) throw new Error(`unknown task ${(req.params as any).ref}`);
+    return t;
+  };
+  app.get('/api/projects/:id/tasks/:ref', async req => {
+    const t = taskRef(req);
+    const runs = listRuns(t.id).map(r => ({ id: r.id, account: r.accountId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome, tokens: r.usage?.total ?? null, maxCtx: r.usage?.maxCtx ?? null, log: r.logPath }));
+    const { result, ...rest } = t;
+    return { task: { ...rest, id: shortId(t), laneFrom: t.laneFrom ? `T${t.laneFrom.split('-T').pop()}` : null }, result, runs };
+  });
+  app.get('/api/projects/:id/tasks/:ref/events', async req => {
+    const t = taskRef(req);
+    const q = req.query as any;
+    const runs = listRuns(t.id);
+    const run = runs.find(r => r.id === Number(q.run ?? 0)) ?? runs.at(-1);
+    if (!run) return { header: `${shortId(t)} has not run yet.`, lines: [] };
+    const grep = String(q.grep ?? '').toLowerCase();
+    const lines = runEvents(run).map(e => `[${e.kind}] ${e.text.replace(/\s+/g, ' ').slice(0, 600)}`).filter(l => !grep || l.toLowerCase().includes(grep));
+    const tail = Math.max(1, Math.min(2000, Number(q.tail ?? 120) || 120));
+    return { header: `${shortId(t)} run ${run.id} on ${run.accountId} (${run.outcome ?? 'running'}), log: ${run.logPath}${lines.length > tail ? ` — last ${tail} of ${lines.length} lines` : ''}`, lines: lines.slice(-tail) };
+  });
+  app.post('/api/projects/:id/main/begin', async req => ({ text: await beginMainEdit(id(req)) }));
+  app.post('/api/projects/:id/main/commit', async req => ({ text: await commitMainEdit(id(req), String(body(req).message ?? '')) }));
+  app.post('/api/projects/:id/coordinator-workspace', async req => ({ text: await coordinatorWorkspace(id(req)) }));
+  app.post('/api/projects/:id/coordinator-workspace/merge', async req => ({ text: await mergeCoordinatorWorkspace(id(req), String(body(req).message ?? '')) }));
   app.get('/api/projects/:id/memory', async req => {
     const p = mustProject(id(req));
     return Object.fromEntries(MEMORY_FILES.map(f => [f, readMemory(p, f)]));
@@ -206,11 +250,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     const run = runs.find(r => r.id === runId) ?? runs.at(-1);
     if (!run) return { run: null, log: '', prompt: '', events: [] };
     const log = tailFile(run.logPath);
-    const provider = getAccount(run.accountId)?.provider ?? (run.accountId.startsWith('codex') ? 'codex' : 'claude');
-    const describe = provider === 'codex' ? describeCodexEvent : describeClaudeEvent;
-    const marker = log.indexOf('\n# output\n');
-    const out = marker < 0 ? log : log.slice(marker + '\n# output\n'.length);
-    const events = out.split('\n').filter(Boolean).map(l => describe(l)).filter((e): e is NonNullable<typeof e> => !!e && e.kind !== 'raw').slice(-1500);
+    const events = runEvents(run).slice(-1500);
     return { run, log, prompt: promptOf(run.logPath), events };
   });
   app.patch('/api/tasks/:id', async req => {
@@ -219,6 +259,8 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   });
   app.post('/api/tasks/:id/cancel', async req => { orchestrator.cancelTask(id(req)); return getTask(id(req)); });
   app.post('/api/tasks/:id/retry', async req => { orchestrator.retryTask(id(req)); return getTask(id(req)); });
+  app.post('/api/tasks/:id/message', async req => orchestrator.sendMessage(id(req), String(body(req).text ?? '')));
+  app.post('/api/tasks/:id/continue', async req => orchestrator.continueTask(id(req), String(body(req).instructions ?? ''), String(body(req).title ?? ''), body(req).sessionId));
 
   // ---- roles
   app.get('/api/roles', async () => listRoles());

@@ -8,6 +8,7 @@ import { orchestrator } from './orchestrator.ts';
 import { paths } from './paths.ts';
 import { seedRoles } from './roles.ts';
 import { backfillRunUsage } from './usage.ts';
+import { runtime } from './runtime.ts';
 
 export function loadToken(): string {
   if (existsSync(paths.token)) return readFileSync(paths.token, 'utf8').trim();
@@ -39,6 +40,8 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
   });
   const addr = app.server.address();
   const realPort = typeof addr === 'object' && addr ? addr.port : port;
+  runtime.port = realPort;
+  runtime.token = token;
   if (!opts.quiet) {
     console.log(`plexus daemon listening on http://${host}:${realPort}`);
     console.log(`data: ${paths.home}`);

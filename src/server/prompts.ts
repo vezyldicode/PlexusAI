@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Account, ChatMessage, Project, Role, Task } from '../shared/types.ts';
-import { appRoot } from './paths.ts';
-import { CONTEXT_DIR, PROFILES, projectContext } from './context.ts';
-import { readMemory } from './projects.ts';
+import { appRoot, paths } from './paths.ts';
+import { CONTEXT_DIR, laneNotes, profileFor, PROFILES, projectContext } from './context.ts';
+import { readDecisions, readMemory } from './projects.ts';
 import { getTask, shortId } from './tasks.ts';
 
 export const TASK_DIR = '.plexus-task';
@@ -22,27 +22,33 @@ const COMMON_FIELDS = `  "status": "done" | "partial" | "blocked" | "failed",
 
 const PLAN_TASKS = `  "tasks": [{ "key": "auth-api", "title": "...", "description": "...", "role": "implementer", "depends_on": ["db-schema"], "acceptance": ["..."], "paths": ["src/auth/", "test/auth.test.ts"], "ac_ids": ["AC3", "AC7"] }]
   (ac_ids: the acceptance criteria each task serves; the task's agent sees only those criteria)`;
-const EVALUATION = `  "evaluation": { "complete": false, "criteria": [{ "id": "AC1", "pass": true, "evidence": "..." }], "report": "markdown" }`;
+const EVALUATION = `  "evaluation": { "complete": false, "criteria": [{ "id": "AC1", "pass": true, "evidence": "..." }], "report": "markdown" }
+  (pass: true | false | "blocked". "blocked" = cannot be checked here: a dependency or tool that may not be installed, a
+   GUI/hardware/account a person must use, or a decision only the user can make; add "needs": "environment" | "human" |
+   "decision". Blocked criteria are never retried by agents; the user is asked. Use false only for what code can fix.)`;
+const CODEMAP = `  "codemap": "markdown, at most ~60 lines: modules and what they do, entry points, where tests live and how to run them; omit when the code map you were given is still right"`;
 
 const KIND_FIELDS: Partial<Record<Task['kind'], string>> = {
   ingest: `  "docs_check": { "sufficient": true, "questions": ["what to ask the user when the docs are not enough (then omit everything below)"] },
   "execution": { "mode": "single" | "team", "reason": "one sentence" },
   "project_brief": "markdown",
   "project_summary": "the brief in at most ~1200 characters: purpose, main features, stack constraints (most agents only read this)",
-  "acceptance_criteria": [{ "id": "AC1", "criterion": "...", "verify": "how to check" }]`,
+  "acceptance_criteria": [{ "id": "AC1", "criterion": "...", "verify": "how to check" }],
+${CODEMAP}`,
   plan: PLAN_TASKS,
-  architect: PLAN_TASKS,
+  architect: `${PLAN_TASKS},\n${CODEMAP}`,
   compact: `  "decisions_digest": [{ "title": "...", "decision": "...", "rationale": "...", "paths": ["..."], "ac_ids": ["..."] }]`,
   review: `  "review": { "verdict": "approve" | "changes_requested", "comments": ["file:line — what to change"] }`,
   evaluate: EVALUATION,
   solo: `${EVALUATION},
+${CODEMAP},
   "escalate": null | { "reason": "why the rest needs a team (only when the work splits into large independent parts)" }`,
 };
 
 function outputContract(kind: Task['kind']): string {
   const extra = KIND_FIELDS[kind];
   return `# OUTPUT CONTRACT
-When finished, write this JSON object to \`${RESULT_FILE}\` (create the folder if needed; it is git-ignored):
+When finished, write this JSON object to \`${RESULT_FILE}\` (create the folder if needed; it is git-ignored; UTF-8):
 {
 ${COMMON_FIELDS}${extra ? ',\n' + extra : ''}
 }
@@ -69,6 +75,11 @@ ${head(notes, 6_000)}`);
   return parts.join('\n\n');
 }
 
+/** Messages for the agent from the coordinator or the user (delivered once, at the start of the run). */
+function inboxSection(t: Task): string {
+  return t.inbox.length ? `## Messages for you from the coordinator / user (follow them; they override earlier instructions)\n${t.inbox.map(m => `- ${m}`).join('\n')}` : '';
+}
+
 function continuationSection(t: Task, account: Account, progress: string): string {
   if (t.attempts === 0 && !progress.trim()) return '';
   return `# CONTINUATION
@@ -83,79 +94,124 @@ ${head(progress, 6_000) || '(empty)'}`;
 
 const DECISION_SCOPE = `In \`decisions\`, give \`paths\` and/or \`ac_ids\` when a decision only concerns some files or criteria: agents see the full text of a decision only when it concerns their task.`;
 
+const metaBlock = (role: Role, t: Task) => `<!-- plexus-meta\nrole: ${role.name}\nkind: ${t.kind}\ntask_id: ${shortId(t)}\nresult_file: ${RESULT_FILE}\n-->`;
+
 /**
- * Order matters for cost: the parts that are the same for many tasks (rules, project context of this profile, role)
- * come first so providers that cache by prompt prefix can reuse them; task-specific parts and the meta block come last.
+ * A task prompt in two parts. `system` (rules and role) is the same for every task of a role, so it goes into the CLI's
+ * system prompt where it is cached across tasks (Claude: --append-system-prompt-file); providers without that get it
+ * at the head of the prompt. `prompt`: project context, then the task-specific parts, the meta block last.
  */
-export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Account, progress: string, skills: string[]): string {
-  const meta = `<!-- plexus-meta\nrole: ${role.name}\nkind: ${t.kind}\ntask_id: ${shortId(t)}\nresult_file: ${RESULT_FILE}\n-->`;
-  // A chat request done by one agent is usually small: it gets the worker profile, not the whole project memory.
-  const ctx = projectContext(p, t.kind === 'solo' && t.adhoc ? PROFILES.custom : PROFILES[t.kind] ?? PROFILES.custom, t);
-  return [
-    `# RULES\n${base()}`,
+export function buildTaskParts(p: Project, t: Task, role: Role, account: Account, progress: string, skills: string[]): { system: string; prompt: string } {
+  const ctx = projectContext(p, profileFor(t), t);
+  const system = `# RULES\n${base()}\n\n# YOUR ROLE: ${role.name}\n${role.instructions}`;
+  const prompt = [
     ctx.shared,
-    `# YOUR ROLE: ${role.name}\n${role.instructions}`,
     skills.length ? `# SKILLS\nThese skills are installed in this repository (.claude/skills or .agents/skills); use them when relevant: ${skills.join(', ')}` : '',
-    ctx.task ? `# PROJECT CONTEXT FOR THIS TASK\nFull copies of the project memory are in \`${CONTEXT_DIR}/\`.\n\n${ctx.task}` : '',
+    ctx.task ? `# PROJECT CONTEXT FOR THIS TASK\nFull copies of the project memory are in \`${CONTEXT_DIR}/\` (earlier agents' notes in \`${CONTEXT_DIR}/handoff/\`).\n\n${ctx.task}` : '',
+    laneNotes(p, t),
     taskSection(p, t),
+    inboxSection(t),
     continuationSection(t, account, progress),
     `${outputContract(t.kind)}\n${DECISION_SCOPE}`,
-    meta,
+    metaBlock(role, t),
   ].filter(Boolean).join('\n\n');
+  return { system, prompt };
+}
+
+/** The whole prompt as one text (system part first), for providers that take a single prompt and for tests. */
+export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Account, progress: string, skills: string[]): string {
+  const { system, prompt } = buildTaskParts(p, t, role, account, progress, skills);
+  return `${system}\n\n${prompt}`;
+}
+
+/** Decisions recorded after `since` (ISO time), the ones a resumed agent has not seen yet. */
+function newDecisions(p: Project, since: string | null): string {
+  if (!since) return '';
+  const fresh = readDecisions(p).filter(d => d.at && d.at > since);
+  if (!fresh.length) return '';
+  return `## Decisions recorded since your last step\n${head(fresh.map(d => `- ${d.title}: ${d.decision}`).join('\n'), 2_000)}`;
 }
 
 /**
- * Prompt for a run that continues the CLI conversation of an earlier attempt in the same worktree (same account):
- * rules, role and project context are already in that conversation, so only the new task, fresh directives and the
- * output contract are sent. This is what makes a fix after review or a retry cheap.
+ * Prompt for a run that continues the CLI conversation of an earlier attempt or task in the same worktree (same account):
+ * rules, role and project context are already in that conversation, so only the new task, what changed in the project
+ * memory, messages and the output contract are sent. This is what makes a fix after review, a retry, a gap round or a
+ * follow-up given to the same agent cheap.
  */
 export function buildResumePrompt(p: Project, t: Task, role: Role, progress: string): string {
-  const meta = `<!-- plexus-meta\nrole: ${role.name}\nkind: ${t.kind}\ntask_id: ${shortId(t)}\nresult_file: ${RESULT_FILE}\n-->`;
   const directives = readMemory(p, 'directives.md').trim();
   const again = t.attempts > 0 || !!t.error;
   const how = again
     ? `The previous attempt ended early (${t.error ?? 'interrupted'}): check \`git status\` and \`${PROGRESS_FILE}\`, then continue without redoing finished work.`
-    : 'Do only what this step asks.';
+    : t.laneFrom
+      ? 'This is new work in the same worktree (re-created from the main branch, which now contains your earlier merged work). Do only what this step asks.'
+      : 'Do only what this step asks.';
   return [
     `# NEXT STEP IN THIS CONVERSATION\nYou are continuing in the same worktree and conversation as before, now as the ${role.name}. The rules, project\ncontext and your earlier work above still apply. ${how}`,
+    t.kind === 'ingest' ? `## Goal (may have changed)\n${readMemory(p, 'goal.md') || p.goal || '(see documentation)'}` : '',
     directives ? `## Directives from the user (must be followed)\n${directives}` : '',
+    newDecisions(p, t.cliUsedAt),
     taskSection(p, t),
+    inboxSection(t),
     again && progress.trim() ? `## Current ${PROGRESS_FILE}\n${head(progress, 3_000)}` : '',
     `${outputContract(t.kind)}\n${DECISION_SCOPE}`,
-    meta,
+    metaBlock(role, t),
   ].filter(Boolean).join('\n\n');
 }
 
 export interface StatusDigest { tasks: string; accounts: string; events: string; counts: string }
 
 const COORDINATOR_META = `<!-- plexus-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
-const statusSection = (p: Project, status: StatusDigest) =>
-  `# STATUS\nProject status: ${p.status} · phase: ${p.phase}\nTask counts: ${status.counts}\n\n## Tasks\n${status.tasks}\n\n## Accounts\n${status.accounts}\n\n## Recent events\n${status.events}`;
+const statusSection = (p: Project, status: StatusDigest, title = 'STATUS') =>
+  `# ${title}\nProject status: ${p.status} · phase: ${p.phase}\nTask counts: ${status.counts}\n\n## Tasks\n${status.tasks}\n\n## Accounts\n${status.accounts}\n\n## Recent events\n${status.events}`;
 const fmtMsg = (m: ChatMessage) => `[${m.author}] ${head(m.text, 1500)}`;
 
+/** Where things are and how the coordinator acts: with the plexus tools when the CLI loaded them, else with JSON actions. */
+function coordinatorGuide(p: Project, tools: boolean): string {
+  const where = `- Project folder (main checkout, branch ${p.mainBranch}): ${p.path}
+- Task logs (prompt + agent stream, one file per run): ${join(paths.logs, p.id)}
+- Task worktrees: ${join(paths.worktrees, p.id)} · project memory: ${join(p.path, '.plexus', 'memory')} (hand-off notes in handoff/)`;
+  const how = tools
+    ? `You have full permissions in the project: read and edit files, run commands (git, tests), and the \`plexus\` tools:
+plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) · plexus_action(action) (any action listed under OUTPUT) ·
+plexus_main_begin / plexus_main_commit(message) · plexus_workspace / plexus_workspace_merge(message).
+- Look before you answer: read logs, results, files and git history yourself instead of guessing or asking the user to paste them.
+- Small change (one or two files, no long test run): do it yourself. Call plexus_main_begin first (it holds merges back so you
+  never edit the main checkout while a task merges), edit, then plexus_main_commit. Larger change: plexus_workspace gives you
+  your own worktree; work there and finish with plexus_workspace_merge. Never edit files that a running task lists in its paths.
+- Bigger work: one agent with solo_task; to give more work to an agent that already has the context, continue_task (same
+  conversation and worktree, no re-reading). Talk to an agent with send_message.`
+    : `The plexus tools are not available in this run: act through the JSON actions below. You may still read files and logs.`;
+  return `# HOW YOU WORK
+${where}
+${how}
+- Which account runs a task is Plexus's job: use assign_account. Never put account or provider names in directives or task
+  descriptions (agents would read them as limits on their work). Remove a wrong directive with remove_directive.`;
+}
+
 /**
- * A turn of a resumed CLI conversation: the role, project context and earlier chat are already in it, so send only the
- * fresh status, what happened in this chat since the last reply, and the new message.
+ * A turn of a resumed CLI conversation: the role, project context and earlier chat are already in it, so send only what
+ * changed since the last reply (status delta, new chat notices) and the new message.
  */
-export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, news: ChatMessage[], userText: string): string {
+export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, news: ChatMessage[], userText: string, tools = false): string {
   return [
     COORDINATOR_META,
-    statusSection(p, status),
+    statusSection(p, status, 'STATUS (changes since your last reply)'),
     news.length ? `# NEW SINCE YOUR LAST REPLY\n${news.slice(-20).map(fmtMsg).join('\n')}` : '',
     `USER MESSAGE:\n${userText}\n---`,
-    COORDINATOR_OUTPUT,
+    tools ? 'Use the plexus tools to look things up and act; answer with the OUTPUT JSON as before.' : COORDINATOR_OUTPUT,
   ].filter(Boolean).join('\n\n');
 }
 
-export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string): string {
+export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string, tools = false): string {
   const hist = history.slice(-20).map(fmtMsg).join('\n');
   const ctx = projectContext(p, PROFILES.coordinator, null);
   return [
     COORDINATOR_META,
     `# YOUR ROLE: coordinator\n${role.instructions}`,
+    coordinatorGuide(p, tools),
     ctx.shared,
     ctx.task,
-    'Full project memory (brief, decisions, acceptance criteria) is in .plexus/memory/ of the repository.',
     statusSection(p, status),
     `# CHAT HISTORY\n${hist || '(empty)'}`,
     `USER MESSAGE:\n${userText}\n---`,
@@ -164,23 +220,26 @@ export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDig
 }
 
 const COORDINATOR_OUTPUT = `# OUTPUT
-You may read files in the repository to answer, but do not modify anything.
-Respond with ONLY one JSON object (no prose before or after):
+End with ONLY one JSON object (no prose after it):
 { "reply": "your answer to the user",
   "actions": [ ... ],
   "proposal": null | { "summary": "what will change and why", "actions": [ ... ] } }
+"actions" are applied after your reply. Do not repeat here what you already did with the plexus tools.
 Action types:
 {"type":"pause"} {"type":"resume"} {"type":"stop"}
-{"type":"solo_task","title":"...","description":"everything the agent needs: what to change, where, how to verify"}
-  → you do the work yourself as ONE agent (your model, own worktree, tests, self-review, merge). Runs even when the
-    project is idle or finished. DEFAULT for anything the user asks to build, change or fix.
+{"type":"solo_task","title":"...","description":"everything the agent needs: what to change, where, how to verify","account":"optional account id"}
+  → ONE agent (your model, own worktree, tests, self-review, merge). Runs even when the project is idle, paused or finished.
+{"type":"continue_task","task_id":"T5","instructions":"what to do next"}
+  → more work for the agent that did T5, in its conversation and worktree: cheapest when it already knows the code.
+{"type":"send_message","task_id":"T5","text":"..."} → delivered to that agent at the start of its next run.
 {"type":"add_task","title":"...","description":"...","role":"implementer","depends_on":["T3"],"priority":50}
-  → a task for the team pipeline (implementer, review when large). Only for large work that splits into parallel parts.
+  → a task for the team pipeline. Only for large work that splits into parallel parts.
+{"type":"assign_account","task_id":"T5","account":"claude-01"} ("auto" clears it; another account takes over while it cannot run)
 {"type":"cancel_task","task_id":"T5"} {"type":"retry_task","task_id":"T5"} {"type":"reprioritize","task_id":"T5","priority":90}
 {"type":"update_task","task_id":"T5","description":"new description"}
 {"type":"record_decision","title":"...","decision":"...","rationale":"..."}
-{"type":"add_directive","text":"instruction all agents must follow from now on"}
+{"type":"add_directive","text":"instruction all agents must follow from now on"} {"type":"remove_directive","match":"text in it"}
 {"type":"set_goal","goal":"..."} {"type":"replan","reason":"..."}
-Use "actions" only for what the user clearly asked; put large changes in "proposal". Questions only need a reply.
-Prefer one solo_task over several add_task: every hand-off between agents re-reads the whole context and costs quota.
-Phase needs_input: the user is answering what to build; record it (set_goal / add_directive), then resume.`;
+Use "actions" only for what the user clearly asked; put large or destructive changes in "proposal".
+Prefer doing small things yourself, then continue_task, then one solo_task, over several add_task: every new agent re-reads the context.
+Phase needs_input / waiting: the user is answering; record it (set_goal / add_directive / send_message), then resume.`;

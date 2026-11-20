@@ -64,6 +64,13 @@ const MIGRATIONS: string[] = [
   // so a resumed turn that reports thread totals (Codex) is counted by its own share.
   `ALTER TABLE runs ADD COLUMN usage TEXT;
    CREATE TABLE IF NOT EXISTS cli_usage (session_id TEXT PRIMARY KEY, usage TEXT NOT NULL, updated_at TEXT NOT NULL);`,
+  // Lanes (a task continuing another task's agent), account pins, messages for an agent, and the context size of the
+  // last call of a task's CLI conversation (resume only while that is cheaper than starting fresh).
+  `ALTER TABLE tasks ADD COLUMN cli_ctx_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE tasks ADD COLUMN cli_used_at TEXT;
+   ALTER TABLE tasks ADD COLUMN pinned_account_id TEXT;
+   ALTER TABLE tasks ADD COLUMN lane_from TEXT;
+   ALTER TABLE tasks ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export function getDb(): DatabaseSync {
