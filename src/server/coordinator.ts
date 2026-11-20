@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
@@ -260,9 +260,14 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
   const attempt = (resumeId: string | undefined, tag: string) => {
     const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`);
+    const prompt = resumeId ? deltaPrompt() : fullPrompt();
+    // The prompt heads the log (the CLI's stream follows), and the user's message points to it: the chat shows it on demand.
+    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${prompt}\n\n# output\n`);
+    const um = getMessage(userMsgId);
+    if (um) updateMessageMeta(userMsgId, { ...(um.meta ?? {}), promptLog: logPath, promptChars: prompt.length, promptResumed: !!resumeId });
     // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
     return adapterFor(account.provider).run({
-      account, cwd: p.path, prompt: resumeId ? deltaPrompt() : fullPrompt(), resumeId, model, effort: eff.effort, readOnly: false,
+      account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
       mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: 5 * 60_000, logPath,
     });
   };

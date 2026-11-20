@@ -71,6 +71,9 @@ const MIGRATIONS: string[] = [
    ALTER TABLE tasks ADD COLUMN pinned_account_id TEXT;
    ALTER TABLE tasks ADD COLUMN lane_from TEXT;
    ALTER TABLE tasks ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';`,
+  // The model and effort a run was started with (what the UI shows as "in use").
+  `ALTER TABLE runs ADD COLUMN model TEXT;
+   ALTER TABLE runs ADD COLUMN effort TEXT;`,
 ];
 
 export function getDb(): DatabaseSync {

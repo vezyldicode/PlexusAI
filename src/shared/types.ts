@@ -231,6 +231,25 @@ export interface Run {
   logPath: string;
   exitCode: number | null;
   usage: TokenUsage | null;
+  /** Model and effort the run was started with (null: the CLI default). */
+  model?: string | null;
+  effort?: string | null;
+}
+
+/**
+ * The model and effort a task runs with on a provider, and where each comes from: the task's own override, the
+ * coordinator's settings (single-agent tasks), the role, or the CLI default.
+ */
+export interface TaskModelInfo {
+  provider: Provider;
+  model: string | null;
+  effort: string | null;
+  modelFrom: 'task' | 'coordinator' | 'role' | 'default';
+  effortFrom: 'task' | 'coordinator' | 'role' | 'default';
+  /** The last run: what it was started with, and the model id the CLI reported (the one that did most of the work). */
+  ran: { model: string | null; effort: string | null; reported: string | null; running: boolean } | null;
+  /** The choice can still change something: the task is not running (it applies from its next run, or to a continuation). */
+  editable: boolean;
 }
 
 export interface ChatMessage {

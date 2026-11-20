@@ -14,7 +14,7 @@ import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
 import {
-  createProject, deleteProject, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
+  createProject, deleteProject, getMessage, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
   updateProject, writeMemory,
 } from './projects.ts';
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
@@ -22,6 +22,8 @@ import { createSkill, deleteSkill, installSkill, listSkills, removeTemp, setSkil
 import { countByStatus, findTask, getTask, listRuns, listTasks, shortId, updateTask } from './tasks.ts';
 import type { Run } from '../shared/types.ts';
 import { projectUsage } from './usage.ts';
+import { readLogTurns, turnMessages } from './runlog.ts';
+import { taskModelInfo } from './worker.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
 import { cleanEfforts, modelCatalog } from './models.ts';
@@ -54,14 +56,19 @@ function tailFile(path: string, maxBytes = 200_000): string {
   } finally { closeSync(fd); }
 }
 
+const describerOf = (accountId: string) => ((getAccount(accountId)?.provider ?? (accountId.startsWith('codex') ? 'codex' : 'claude')) === 'codex' ? describeCodexEvent : describeClaudeEvent);
+
+/** A CLI stream as readable lines (messages, tool calls, status). */
+function streamEvents(accountId: string, out: string): { kind: string; text: string }[] {
+  const describe = describerOf(accountId);
+  return out.split('\n').filter(Boolean).map(l => describe(l)).filter((e): e is NonNullable<typeof e> => !!e && e.kind !== 'raw');
+}
+
 /** The agent stream of a run as readable lines (messages, tool calls, status). */
 function runEvents(run: Run): { kind: string; text: string }[] {
   const log = tailFile(run.logPath);
-  const provider = getAccount(run.accountId)?.provider ?? (run.accountId.startsWith('codex') ? 'codex' : 'claude');
-  const describe = provider === 'codex' ? describeCodexEvent : describeClaudeEvent;
   const marker = log.indexOf('\n# output\n');
-  const out = marker < 0 ? log : log.slice(marker + '\n# output\n'.length);
-  return out.split('\n').filter(Boolean).map(l => describe(l)).filter((e): e is NonNullable<typeof e> => !!e && e.kind !== 'raw');
+  return streamEvents(run.accountId, marker < 0 ? log : log.slice(marker + '\n# output\n'.length));
 }
 
 export async function buildApi(token: string, hooks: { shutdown: () => Promise<void> } = { shutdown: async () => {} }): Promise<FastifyInstance> {
@@ -129,7 +136,11 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   });
   app.get('/api/projects/:id', async req => {
     const p = mustProject(id(req));
-    return { project: p, tasks: listTasks(p.id), counts: countByStatus(p.id), acceptance: readAcceptance(p), waiting: orchestrator.waiting.get(p.id) ?? null, usage: projectUsage(p.id) };
+    const tasks = listTasks(p.id);
+    return {
+      project: p, tasks, counts: countByStatus(p.id), acceptance: readAcceptance(p), waiting: orchestrator.waiting.get(p.id) ?? null, usage: projectUsage(p.id),
+      models: Object.fromEntries(tasks.map(t => [t.id, taskModelInfo(p, t)])),
+    };
   });
   app.patch('/api/projects/:id', async req => {
     const b = body(req);
@@ -237,6 +248,12 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return reply.code(202).send({ ok: true });
   });
   app.post('/api/messages/:id/proposal', async req => ({ applied: resolveProposal(Number(id(req)), !!body(req).approve) }));
+  // The prompt Plexus sent to the coordinator for this chat message (the last attempt of that turn).
+  app.get('/api/messages/:id/prompt', async req => {
+    const m = getMessage(Number(id(req)));
+    const log = typeof m?.meta?.promptLog === 'string' ? m.meta.promptLog : '';
+    return { prompt: readLogTurns(log, 2 * 1024 * 1024)[0]?.prompt ?? '' };
+  });
 
   // ---- tasks
   app.get('/api/tasks/:id', async req => {
@@ -253,9 +270,37 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     const events = runEvents(run).slice(-1500);
     return { run, log, prompt: promptOf(run.logPath), events };
   });
+  // Every turn sent to the task's agent, run by run: what was asked (messages delivered with it), the size of the
+  // prompt (its text comes from /prompt when the user opens it) and what the agent did.
+  app.get('/api/tasks/:id/turns', async req => {
+    const t = getTask(id(req));
+    if (!t) throw new Error('no such task');
+    return {
+      runs: listRuns(t.id).map(r => ({
+        id: r.id, accountId: r.accountId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome, usage: r.usage, model: r.model ?? null, effort: r.effort ?? null,
+        reason: (r.classification as any)?.reason ?? null,
+        turns: readLogTurns(r.logPath).map(x => ({ resuming: x.resuming, at: x.at, promptChars: x.prompt.length, messages: turnMessages(x.prompt), events: streamEvents(r.accountId, x.output).slice(-800) })),
+      })),
+    };
+  });
+  app.get('/api/tasks/:id/prompt', async req => {
+    const q = req.query as any;
+    const run = listRuns(id(req)).find(r => r.id === Number(q.run));
+    if (!run) throw new Error('no such run');
+    return { prompt: readLogTurns(run.logPath)[Number(q.turn ?? 0)]?.prompt ?? '' };
+  });
   app.patch('/api/tasks/:id', async req => {
     const b = body(req);
-    return updateTask(id(req), { ...(b.priority !== undefined && { priority: Number(b.priority) }), ...(b.description !== undefined && { description: String(b.description) }), ...(b.title !== undefined && { title: String(b.title) }), ...(b.models && typeof b.models === 'object' && { models: cleanModels(b.models) }), ...(b.efforts && typeof b.efforts === 'object' && { efforts: cleanEfforts(b.efforts) }) });
+    const t = getTask(id(req));
+    if (!t) throw new Error('no such task');
+    // A running attempt keeps the model it started with: the CLI cannot switch it mid-run.
+    if (t.status === 'running' && (b.models || b.efforts)) throw new Error('the task is running; change its model or effort when it is not');
+    let pin: string | null | undefined;
+    if ('pinnedAccountId' in b) {
+      pin = b.pinnedAccountId ? String(b.pinnedAccountId) : null;
+      if (pin && !listAccounts().some(a => a.id === pin)) throw new Error(`unknown account ${pin}`);
+    }
+    return updateTask(t.id, { ...(b.priority !== undefined && { priority: Number(b.priority) }), ...(b.description !== undefined && { description: String(b.description) }), ...(b.title !== undefined && { title: String(b.title) }), ...(b.models && typeof b.models === 'object' && { models: cleanModels(b.models) }), ...(b.efforts && typeof b.efforts === 'object' && { efforts: cleanEfforts(b.efforts) }), ...(pin !== undefined && { pinnedAccountId: pin }) });
   });
   app.post('/api/tasks/:id/cancel', async req => { orchestrator.cancelTask(id(req)); return getTask(id(req)); });
   app.post('/api/tasks/:id/retry', async req => { orchestrator.retryTask(id(req)); return getTask(id(req)); });

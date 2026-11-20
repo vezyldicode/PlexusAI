@@ -146,6 +146,11 @@ export function startRun(taskId: string, accountId: string, logPath: string): nu
   return Number(r.lastInsertRowid);
 }
 
+/** Record the model and effort a run was started with. */
+export function setRunModel(id: number, model: string | null, effort: string | null): void {
+  getDb().prepare('UPDATE runs SET model = ?, effort = ? WHERE id = ?').run(model, effort, id);
+}
+
 export function finishRun(id: number, outcome: string, classification: unknown, exitCode: number | null, usage: TokenUsage | null = null): void {
   getDb().prepare('UPDATE runs SET ended_at = ?, outcome = ?, classification = ?, exit_code = ?, usage = ? WHERE id = ?')
     .run(now(), outcome, JSON.stringify(classification), exitCode, JSON.stringify(usage), id);
@@ -155,5 +160,6 @@ export function listRuns(taskId: string): Run[] {
   return (getDb().prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY id').all(taskId) as any[]).map(r => ({
     id: r.id, taskId: r.task_id, accountId: r.account_id, startedAt: r.started_at, endedAt: r.ended_at, outcome: r.outcome,
     classification: json(r.classification, null), logPath: r.log_path, exitCode: r.exit_code, usage: json<TokenUsage | null>(r.usage, null),
+    model: r.model ?? null, effort: r.effort ?? null,
   }));
 }

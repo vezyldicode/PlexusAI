@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AgentResultSchema, type Account, type AgentResult, type Project, type Task } from '../shared/types.ts';
-import { applyClassification, getAccount, runningByAccount } from './accounts.ts';
+import { AgentResultSchema, type Account, type AgentResult, type Project, type Provider, type Role, type Task, type TaskModelInfo } from '../shared/types.ts';
+import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor, type Classification } from './adapters/index.ts';
 import { getDb, now } from './db.ts';
 import { effortForRun } from './models.ts';
@@ -11,7 +11,7 @@ import { writeContextFiles } from './context.ts';
 import { buildResumePrompt, buildTaskParts, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { materializeSkills } from './skills.ts';
-import { finishRun, getTask, listRuns, shortId, startRun, updateTask } from './tasks.ts';
+import { finishRun, getTask, listRuns, setRunModel, shortId, startRun, updateTask } from './tasks.ts';
 import { addUsage } from './usage.ts';
 import { addWorktree, commitAll, diffStat, ensureRepo, git } from './util/git.ts';
 import { postMessage, updateProject, writeHandoff } from './projects.ts';
@@ -24,6 +24,35 @@ import { postMessage, updateProject, writeHandoff } from './projects.ts';
 export const LANE_CTX_MAX = 120_000;
 export const LANE_IDLE_MAX_MS = 55 * 60_000;
 const LANE_COLD_CTX_MAX = 40_000;
+
+type From = TaskModelInfo['modelFrom'];
+
+/** Model and effort a task runs with on a provider: its own override, the coordinator's (single-agent work), the role's. */
+export function taskModelChoice(p: Project, t: Task, role: Role, prov: Provider): { model: string | undefined; effort: string | undefined; modelFrom: From; effortFrom: From } {
+  const solo = t.kind === 'solo';
+  const pick = (own: string | undefined, coord: string | undefined, fromRole: string | undefined): [string | undefined, From] =>
+    own ? [own, 'task'] : solo && coord ? [coord, 'coordinator'] : fromRole ? [fromRole, 'role'] : [undefined, 'default'];
+  const [model, modelFrom] = pick(t.models?.[prov], p.settings.coordinatorModels?.[prov], role.models[prov]);
+  const [effort, effortFrom] = pick(t.efforts?.[prov], p.settings.coordinatorEfforts?.[prov], role.efforts?.[prov]);
+  return { model, effort, modelFrom, effortFrom };
+}
+
+/** What the UI shows for a task's model: the provider it runs (or would run) on, the choice and the last run. */
+export function taskModelInfo(p: Project, t: Task): TaskModelInfo {
+  const role = getRole(t.role);
+  const accounts = listAccounts();
+  const acct = accounts.find(a => a.id === (t.accountId ?? t.lastAccountId ?? t.pinnedAccountId ?? t.cliAccountId));
+  const usable = new Set(accounts.filter(a => a.enabled).map(a => a.provider));
+  const provider: Provider = acct?.provider ?? role.providers.find(x => usable.has(x)) ?? accounts.find(a => a.enabled)?.provider ?? role.providers[0] ?? 'claude';
+  const c = taskModelChoice(p, t, role, provider);
+  const last = listRuns(t.id).at(-1);
+  const reported = last?.usage ? Object.entries(last.usage.byModel).sort((a, b) => (b[1].input + b[1].cacheRead + b[1].output) - (a[1].input + a[1].cacheRead + a[1].output))[0]?.[0] ?? null : null;
+  return {
+    provider, model: c.model ?? null, effort: c.effort ?? null, modelFrom: c.modelFrom, effortFrom: c.effortFrom,
+    ran: last ? { model: last.model ?? null, effort: last.effort ?? null, reported, running: !last.endedAt } : null,
+    editable: t.status !== 'running',
+  };
+}
 
 export function resumeWorthIt(ctx: number, usedAt: string | null): boolean {
   if (ctx > LANE_CTX_MAX) return false;
@@ -129,8 +158,10 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
     rmSync(join(wt, RESULT_FILE), { force: true });
     const prov = account.provider;
     // A single-agent task runs on the coordinator's model/effort (a strong model) unless the task overrides it.
-    const model = task.models?.[prov] || (task.kind === 'solo' ? p.settings.coordinatorModels?.[prov] : undefined) || role.models[prov];
-    const eff = await effortForRun(account, model, task.efforts?.[prov] || (task.kind === 'solo' ? p.settings.coordinatorEfforts?.[prov] : undefined) || role.efforts?.[prov]);
+    const choice = taskModelChoice(p, task, role, prov);
+    const model = choice.model;
+    const eff = await effortForRun(account, model, choice.effort);
+    setRunModel(runId, model ?? null, eff.effort ?? null);
     if (eff.warning) bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: 'status', text: eff.warning }, false);
 
     const run = (prompt: string, resumeId: string | undefined, note: string, system?: string) => {

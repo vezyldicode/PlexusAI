@@ -5,7 +5,8 @@ import type { LogLine, ProjectDetail } from '../store.ts';
 import type { Account, Provider, Role, Task } from '../types.ts';
 import { Dot, Ic, label, Tokens } from '../ui.tsx';
 import { COORD_H, COORD_W, COORDINATOR, layout, NODE_H, NODE_W, type NodeBox } from './layout.ts';
-import { EffortSelect, ModelDatalist, useModels } from '../models.tsx';
+import { EffortSelect, ModelDatalist, shownModel, useModels } from '../models.tsx';
+import { modelLabel } from '../settings.tsx';
 
 interface Props {
   detail: ProjectDetail;
@@ -34,9 +35,10 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
     const usable = new Set(accounts.filter(x => x.enabled).map(x => x.provider));
     return roleOf(t)?.providers.find(p => usable.has(p)) ?? accounts.find(x => x.enabled)?.provider ?? roleOf(t)?.providers[0] ?? 'claude';
   };
-  const modelOf = (t: Task) => { const p = providerOf(t); return t.models?.[p] || roleOf(t)?.models[p] || ''; };
-  const effortOf = (t: Task) => { const p = providerOf(t); return t.efforts?.[p] || roleOf(t)?.efforts?.[p] || ''; };
   const catalog = useModels();
+  // What the daemon says the task runs with (its override, the coordinator's for single-agent work, the role's, or what the CLI reported).
+  const modelOf = (t: Task) => { const info = detail.models?.[t.id]; const m = shownModel(info).model; return m ? modelLabel(catalog, info!.provider, m) : ''; };
+  const effortOf = (t: Task) => shownModel(detail.models?.[t.id]).effort ?? '';
 
   // ---- pan & zoom
   const box = useRef<HTMLDivElement>(null);

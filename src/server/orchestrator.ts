@@ -236,6 +236,8 @@ export class Orchestrator {
       role: 'solo', kind: 'solo', priority: 80, adhoc: true, originSessionId: sessionId ?? prev.originSessionId, laneFrom: prev,
       paths: prev.paths, pinnedAccountId: prev.pinnedAccountId,
     });
+    // The model and effort chosen for that agent carry over to its continuation.
+    if (Object.keys(prev.models).length || Object.keys(prev.efforts).length) updateTask(t.id, { models: prev.models, efforts: prev.efforts }, true);
     void this.tick();
     return t;
   }

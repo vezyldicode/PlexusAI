@@ -74,9 +74,9 @@ export default function App() {
     });
   }, []);
 
-  // The collapse button is the focus switch: rail on the left, chat out of the way on the right.
-  const collapse = () => { if (tiny) { setTinyOpen(false); return; } setCollapsed(true); setPinned(false); setPeek(false); };
-  const expand = () => { if (tiny) { setTinyOpen(true); return; } setCollapsed(false); setPinned(true); setPeek(false); };
+  // The sidebar button only folds the sidebar; the chat panel keeps its own pin (its own button).
+  const collapse = () => { if (tiny) { setTinyOpen(false); return; } setCollapsed(true); };
+  const expand = () => { if (tiny) { setTinyOpen(true); return; } setCollapsed(false); };
 
   // A hover peek ends a moment after the pointer leaves the panel, so a slip off the edge doesn't close it.
   const leaveTimer = useRef<number>(undefined);
