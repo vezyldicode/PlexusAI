@@ -30,6 +30,7 @@ import { cleanEfforts, modelCatalog } from './models.ts';
 import { appConfig, configOverrides, projectDefaults, updateConfig, updateProjectDefaults } from './config.ts';
 import { DEFAULT_APP_CONFIG, CONFIG_BOUNDS } from '../shared/config.ts';
 import { DEFAULT_PROJECT_SETTINGS } from '../shared/types.ts';
+import { chooseFolder } from './folder-picker.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
 function promptOf(path: string, maxBytes = 400_000): string {
@@ -74,7 +75,7 @@ function runEvents(run: Run): { kind: string; text: string }[] {
   return streamEvents(run.accountId, marker < 0 ? log : log.slice(marker + '\n# output\n'.length));
 }
 
-export async function buildApi(token: string, hooks: { shutdown: () => Promise<void> } = { shutdown: async () => {} }): Promise<FastifyInstance> {
+export async function buildApi(token: string, hooks: { shutdown: () => Promise<void>; chooseFolder?: () => Promise<string | null> } = { shutdown: async () => {} }): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 50 * 1024 * 1024 });
   await app.register(websocket);
   // Accept empty JSON bodies (POST /start etc. are sent with a JSON content type and no body).
@@ -129,6 +130,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.get('/api/models', async req => modelCatalog(listAccounts(), ['1', 'true'].includes(String((req.query as any)?.refresh ?? ''))));
 
   // ---- projects
+  app.post('/api/folder-picker', async () => ({ path: await (hooks.chooseFolder ?? chooseFolder)() }));
   app.get('/api/projects', async () => listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })));
   app.post('/api/projects', async req => {
     const b = body(req);

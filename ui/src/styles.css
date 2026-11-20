@@ -88,6 +88,10 @@ input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); m
 label { display: block; margin: 12px 0; font-size: 13px; color: var(--text-2); }
 label > input, label > textarea, label > select { margin-top: 4px; }
 .field-note { margin-left: 8px; font-size: 12px; color: var(--muted); }
+.folder-label { margin-bottom: 4px; }
+.folder-field { display: flex; gap: 8px; }
+.folder-field input { min-width: 0; }
+.folder-field button { flex: none; }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--text); margin: 8px 0; }
 input.inline { width: 160px; margin-left: auto; }
 .num-input { width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
