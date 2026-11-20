@@ -466,8 +466,8 @@ body.resizing .net { pointer-events: none; }
 }
 .card:hover { background: var(--raised); border-color: var(--line-strong); }
 .card.sel { border-color: var(--accent); }
-.card-top { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.card-role { color: var(--muted); margin-left: auto; }
+.card-top { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.card-role { color: var(--muted); margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-title { font-size: 13px; line-height: 18px; }
 .card-meta { font-size: 12px; color: var(--muted); }
 .card-err { font-size: 12px; line-height: 16px; color: var(--bad-text); }
@@ -506,7 +506,8 @@ body.resizing .net { pointer-events: none; }
 .pre.prose { font-family: var(--sans); font-size: 14px; line-height: 22px; color: var(--text); max-height: none; max-width: 88ch; padding: 24px; background: var(--card); }
 
 .status { padding: 24px; overflow: auto; height: 100%; display: flex; flex-direction: column; gap: 16px; max-width: 1040px; }
-.stat-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.status > * { flex: none; } /* panels keep their height; the page scrolls */
+.stat-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat { padding: 20px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
 .stat-label { font-size: 13px; color: var(--text-2); }
 .stat-fig { font-size: 28px; line-height: 36px; font-weight: 500; margin-top: 8px; }
@@ -722,3 +723,47 @@ select.effort.bad { border-color: var(--warn, #b7791f); }
   .settings-close { position: fixed; top: 8px; right: 8px; }
   .settings-body { padding: 16px; }
 }
+
+/* ---------------------------------------------------------------- tokens
+   Figures are quiet mono text. The split bar runs in neutral steps: output brightest, cache reads faintest,
+   because cache reads are most of every total and the cheapest part of it. */
+
+.tok { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.card-tok { flex: none; }
+.node-tok { margin-left: auto; flex: none; }
+.node-tok + .node-att { margin-left: 0; }
+.msg-meta .tok, .agent-meta .tok { font-size: inherit; color: inherit; }
+
+.usage { display: flex; flex-direction: column; gap: 8px; }
+.usage-bar { display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; }
+.usage-seg { display: block; height: 100%; min-width: 2px; }
+.u-output { background: rgba(237, 237, 237, 0.72); }
+.u-input { background: rgba(237, 237, 237, 0.44); }
+.u-cacheWrite { background: rgba(237, 237, 237, 0.24); }
+.u-cacheRead { background: rgba(237, 237, 237, 0.1); }
+.usage-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--text-2); }
+.usage-legend > span { display: inline-flex; align-items: center; gap: 8px; }
+.usage-legend .num { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.usage-key { width: 8px; height: 8px; border-radius: 2px; }
+.usage-key.u-cacheRead { background: rgba(237, 237, 237, 0.16); }
+.usage-models { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.usage-model { display: grid; grid-template-columns: minmax(0, 1fr) 64px 64px; gap: 12px; align-items: center; height: 28px; font-size: 12px; color: var(--text-2); border-bottom: 1px solid var(--line); }
+.usage-model .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-model .num { text-align: right; font-family: var(--mono); font-size: 11px; }
+.usage-note { font-size: 12px; line-height: 16px; color: var(--muted); }
+
+.panel > .usage { padding: 16px; }
+.tok-group { padding: 16px 16px 4px; font-size: 12px; font-weight: 500; color: var(--muted); border-top: 1px solid var(--line); }
+.tok-row { display: grid; grid-template-columns: 136px minmax(0, 1fr) 56px; gap: 12px; align-items: center; height: 32px; padding: 0 16px; font-size: 13px; }
+.tok-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tok-track { height: 4px; border-radius: 2px; background: rgba(237, 237, 237, 0.06); overflow: hidden; }
+.tok-fill { display: block; height: 100%; background: rgba(237, 237, 237, 0.44); transform-origin: left; transition: transform var(--menu) var(--ease); }
+.tok-fig { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.tok-task {
+  display: grid; grid-template-columns: 8px 40px minmax(0, 1fr) 56px; gap: 12px; align-items: center; width: 100%; height: 32px; padding: 0 16px;
+  font-weight: 400; text-align: left; color: var(--text); background: none; border: none; border-radius: 0; box-shadow: none; transition: background-color var(--fast) var(--ease);
+}
+.tok-task:last-child { margin-bottom: 8px; }
+.tok-task:hover { background: var(--raised); }
+.tok-task:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tok-task-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }

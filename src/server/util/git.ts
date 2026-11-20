@@ -76,6 +76,15 @@ export async function diffStat(cwd: string, base: string): Promise<string> {
   return r.stdout.trim();
 }
 
+/** Lines added + deleted on `branch` since it left `base` (binary files count as 0). */
+export async function changedLines(repo: string, base: string, branch: string): Promise<number> {
+  const r = await git(repo, 'diff', '--numstat', `${base}...${branch}`);
+  return r.stdout.split('\n').reduce((n, l) => {
+    const [a, d] = l.split('\t');
+    return n + (Number(a) || 0) + (Number(d) || 0);
+  }, 0);
+}
+
 export async function hasCommitsAhead(repo: string, branch: string, base: string): Promise<boolean> {
   const r = await git(repo, 'rev-list', '--count', `${base}..${branch}`);
   return Number(r.stdout.trim()) > 0;

@@ -1,4 +1,4 @@
-import type { Account, ModelInfo, Provider, QuotaSnapshot } from '../../shared/types.ts';
+import type { Account, ModelInfo, Provider, QuotaSnapshot, TokenUsage } from '../../shared/types.ts';
 
 export type RunState = 'ok' | 'warning' | 'limited' | 'transient' | 'needs_login' | 'blocked' | 'task_error';
 
@@ -35,7 +35,8 @@ export interface RunOutcome {
   classification: Classification;
   quota: QuotaSnapshot | null;
   killedReason: 'timeout' | 'idle' | 'aborted' | null;
-  usage?: Record<string, number>;
+  /** Tokens this invocation spent (null when the CLI reported none). */
+  usage: TokenUsage | null;
   /** Provider CLI conversation id of this run (claude session_id / codex thread_id), for a later resume. */
   sessionId?: string;
 }

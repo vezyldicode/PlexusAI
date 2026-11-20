@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X } from 'lucide-react';
 import { api, clock, timeAgo } from '../api.ts';
 import type { ProjectDetail, Plexus } from '../store.ts';
-import type { Account, ChatMessage, ChatSession, Project, Provider, Role, Task } from '../types.ts';
-import { ContextMenu, Dot, Ic, label } from '../ui.tsx';
+import type { Account, ChatMessage, ChatSession, Project, Provider, Role, Task, TokenUsage } from '../types.ts';
+import { ContextMenu, Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens } from '../ui.tsx';
 import { useStored } from '../layout.tsx';
 import { COORDINATOR } from '../network/layout.ts';
 import { effortsFor, useModels } from '../models.tsx';
@@ -288,7 +288,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onE
           const level = (m.meta?.level as string) ?? '';
           return (
             <div key={m.id} className={`msg m-${m.author} ${level}`}>
-              <div className="msg-head"><span className="msg-who">{AUTHOR[m.author]}</span><span className="msg-meta num">{clock(m.createdAt)}{m.meta?.account ? ` · ${m.meta.account}` : ''}{m.meta?.model ? ` · ${m.meta.model}` : ''}</span></div>
+              <div className="msg-head"><span className="msg-who">{AUTHOR[m.author]}</span><span className="msg-meta num">{clock(m.createdAt)}{m.meta?.account ? ` · ${m.meta.account}` : ''}{m.meta?.model ? ` · ${m.meta.model}` : ''}{m.meta?.tokens ? <> · <Tokens u={m.meta.tokens as TokenUsage} unit /></> : null}</span></div>
               <div className="msg-text">{m.text}</div>
               {Array.isArray(m.meta?.applied) && (m.meta!.applied as string[]).length > 0 && <div className="msg-applied">Applied: {(m.meta!.applied as string[]).join(', ')}</div>}
               {prop && (
@@ -327,7 +327,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onE
 
 // ---------------------------------------------------------------- sub-agent
 
-interface RunRow { id: number; accountId: string; startedAt: string; endedAt: string | null; outcome: string | null; classification?: { reason?: string } }
+interface RunRow { id: number; accountId: string; startedAt: string; endedAt: string | null; outcome: string | null; classification?: { reason?: string }; usage?: TokenUsage | null }
 interface LogData { run: RunRow | null; prompt: string; events: { kind: string; text: string }[] }
 
 function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; accounts: Account[]; logTick: number; onError: (e: string) => void; reload: () => void }) {
@@ -353,6 +353,8 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
   const act = (a: string) => api('POST', `/api/tasks/${task.id}/${a}`).then(reload).catch(e => onError(e.message));
   const shown = runs.find(r => r.id === (run ?? data?.run?.id));
   const acct = accounts.find(a => a.id === (shown?.accountId ?? task.accountId ?? task.lastAccountId));
+  const counted = runs.filter(r => r.usage).length;
+  const total = sumUsage(runs.map(r => r.usage));
 
   return (
     <div className="chat agent">
@@ -362,6 +364,7 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
           <span>{task.role}</span><span>{label(task.status)}</span>
           {acct && <span>{acct.label}</span>}
           {task.attempts > 0 && <span className="num">attempt {task.attempts}</span>}
+          {total && <Tokens u={total} unit />}
           {task.branch && <span className="mono">{task.branch}</span>}
         </div>
         {task.paths.length > 0 && <div className="agent-paths mono" title="Files this task expects to change">{task.paths.join('  ')}</div>}
@@ -369,7 +372,7 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
           {runs.length > 1 && (
             <select value={run ?? ''} onChange={e => setRun(e.target.value ? Number(e.target.value) : null)} title="Run">
               <option value="">Latest run</option>
-              {runs.map((r, i) => <option key={r.id} value={r.id}>Run {i + 1} · {r.accountId} · {r.outcome ?? 'running'}</option>)}
+              {runs.map((r, i) => <option key={r.id} value={r.id}>Run {i + 1} · {r.accountId} · {r.outcome ?? 'running'}{r.usage ? ` · ${r.usage.partial ? '≥' : ''}${fmtTokens(r.usage.total)}` : ''}</option>)}
             </select>
           )}
           <span className="spacer" />
@@ -402,10 +405,36 @@ function AgentChat({ task, accounts, logTick, onError, reload }: { task: Task; a
             {task.result.review && <div className="review"><b>Review: {task.result.review.verdict.replace('_', ' ')}</b>{task.result.review.comments.map((c, i) => <div key={i}>{c}</div>)}</div>}
           </div>
         )}
+        {total && (
+          <div className="result">
+            <div className="io-label">Tokens · {counted === 1 ? '1 run' : `${counted} runs`}</div>
+            <UsageBreakdown u={total} />
+          </div>
+        )}
         {task.error && task.status !== 'done' && <div className="result err"><div className="io-label">Last error</div><pre className="pre">{task.error}</pre></div>}
         {shown?.classification?.reason && <div className="evt k-status"><span className="evt-kind">run</span><span className="evt-text">{shown.classification.reason}</span></div>}
       </div>
       <div className="agent-foot">Read only · steer Plexus from the Coordinator tab</div>
     </div>
   );
+}
+
+/** Sum of run totals, done here so the panel needs nothing beyond its runs. */
+function sumUsage(list: (TokenUsage | null | undefined)[]): TokenUsage | null {
+  const xs = list.filter((u): u is TokenUsage => !!u);
+  if (!xs.length) return null;
+  const add = (k: 'input' | 'cacheRead' | 'cacheWrite' | 'output' | 'reasoning' | 'total') => xs.reduce((a, u) => a + u[k], 0);
+  const costs = xs.map(u => u.costUsd).filter((v): v is number => v != null);
+  const byModel: TokenUsage['byModel'] = {};
+  for (const u of xs) for (const [m, t] of Object.entries(u.byModel)) {
+    const p = byModel[m];
+    byModel[m] = p ? {
+      input: p.input + t.input, cacheRead: p.cacheRead + t.cacheRead, cacheWrite: p.cacheWrite + t.cacheWrite, output: p.output + t.output, reasoning: p.reasoning + t.reasoning,
+      costUsd: p.costUsd == null && t.costUsd == null ? null : (p.costUsd ?? 0) + (t.costUsd ?? 0),
+    } : t;
+  }
+  return {
+    input: add('input'), cacheRead: add('cacheRead'), cacheWrite: add('cacheWrite'), output: add('output'), reasoning: add('reasoning'), total: add('total'),
+    costUsd: costs.length ? costs.reduce((a, b) => a + b, 0) : null, byModel, ...(xs.some(u => u.partial) ? { partial: true } : {}),
+  };
 }

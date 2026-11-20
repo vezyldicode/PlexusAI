@@ -3,7 +3,7 @@ import { Pause, Play, Square } from 'lucide-react';
 import { api, clock, timeAgo } from './api.ts';
 import type { LogLine, ProjectDetail, Plexus } from './store.ts';
 import type { Project, Role, Task } from './types.ts';
-import { Dot, Ic, label } from './ui.tsx';
+import { Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens, usageTitle } from './ui.tsx';
 
 export type View = 'network' | 'tasks' | 'activity' | 'memory' | 'report' | 'status';
 export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report', 'status'];
@@ -71,7 +71,7 @@ export function TasksView({ detail, active, onOpen }: { detail: ProjectDetail; a
             <div className="col-title">{c.title}<span className="num">{list.length}</span></div>
             {list.map(t => (
               <button key={t.id} className={`card s-${t.status} ${active === t.id ? 'sel' : ''}`} onClick={() => onOpen(t.id)}>
-                <div className="card-top"><Dot state={t.status} /><span className="num">T{t.seq}</span><span className="card-role">{t.role}</span></div>
+                <div className="card-top"><Dot state={t.status} /><span className="num">T{t.seq}</span><span className="card-role">{t.role}</span><Tokens u={detail.usage.tasks[t.id]} className="card-tok" /></div>
                 <div className="card-title">{t.title}</div>
                 <div className="card-meta">
                   {t.accountId ? t.accountId : t.lastAccountId ? `last ${t.lastAccountId}` : ''}
@@ -153,7 +153,7 @@ export function ActivityView({ logs, activity, detail, onOpen }: { logs: LogLine
 
 // ---------------------------------------------------------------- memory
 
-const MEMORY_FILES = ['goal.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'];
+const MEMORY_FILES = ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'];
 
 export function MemoryView({ project, onError }: { project: Project; onError: (e: string) => void }) {
   const [files, setFiles] = useState<Record<string, string>>({});
@@ -225,21 +225,57 @@ function RoleLoad({ detail }: { detail: ProjectDetail }) {
   );
 }
 
-export function StatusView({ detail }: { detail: ProjectDetail }) {
+/** Where the project's tokens went: the split by kind, then by role, then the tasks that used the most. */
+function TokenPanel({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: string) => void }) {
+  const u = detail.usage;
+  const roles = Object.entries(u.byRole).sort((a, b) => b[1].total - a[1].total);
+  if (u.coordinator) roles.push(['coordinator chat', u.coordinator]);
+  const max = Math.max(1, ...roles.map(([, r]) => r.total));
+  const top = detail.tasks.filter(t => u.tasks[t.id]).sort((a, b) => u.tasks[b.id].total - u.tasks[a.id].total).slice(0, 5);
+  return (
+    <section className="panel">
+      <div className="panel-head"><span>Tokens</span><span className="num muted">{fmtTokens(u.total!.total)} in all</span></div>
+      <UsageBreakdown u={u.total!} />
+      <div className="tok-group">By role</div>
+      {roles.map(([name, r]) => (
+        <div key={name} className="tok-row" title={usageTitle(r)}>
+          <span className="tok-name">{name}</span>
+          <span className="tok-track"><span className="tok-fill" style={{ transform: `scaleX(${r.total / max})` }} /></span>
+          <span className="tok-fig num">{fmtTokens(r.total)}</span>
+        </div>
+      ))}
+      <div className="tok-group">Most tokens</div>
+      {top.map(t => (
+        <button key={t.id} className="tok-task" onClick={() => onOpen(t.id)} title={usageTitle(u.tasks[t.id])}>
+          <Dot state={t.status} /><span className="num muted">T{t.seq}</span><span className="tok-task-title">{t.title}</span><span className="tok-fig num">{fmtTokens(u.tasks[t.id].total)}</span>
+        </button>
+      ))}
+    </section>
+  );
+}
+
+export function StatusView({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: string) => void }) {
   const acc = detail.acceptance;
   const passed = acc.filter(a => a.pass).length;
   const failed = acc.filter(a => a.pass === false).length;
   const c = detail.counts;
   const total = Object.values(c).reduce((a, b) => a + b, 0);
   const order = ['running', 'pending', 'interrupted', 'in_review', 'done', 'failed', 'cancelled'];
+  const u = detail.usage;
   return (
     <div className="status">
       <section className="stat-row">
         <div className="stat"><div className="stat-label">Acceptance criteria</div><div className="stat-fig num">{passed}<span>/{acc.length}</span></div><div className="stat-sub">{failed ? `${failed} failing` : acc.length ? 'none failing' : 'set after analysis'}</div></div>
         <div className="stat"><div className="stat-label">Tasks</div><div className="stat-fig num">{total}</div><div className="stat-sub num">{c.done ?? 0} done · {c.running ?? 0} running</div></div>
         <div className="stat"><div className="stat-label">Evaluation rounds</div><div className="stat-fig num">{detail.project.evalRounds}<span>/{detail.project.settings.maxEvalRounds}</span></div><div className="stat-sub">phase {detail.project.phase}</div></div>
+        <div className="stat" title={u.total ? usageTitle(u.total) : undefined}>
+          <div className="stat-label">Tokens</div>
+          <div className="stat-fig num">{u.total ? fmtTokens(u.total.total) : '–'}</div>
+          <div className="stat-sub num">{u.total ? `${fmtTokens(u.total.output)} output${u.coordinator ? ` · coordinator ${fmtTokens(u.coordinator.total)}` : ''}` : 'counted as agents finish'}</div>
+        </div>
       </section>
       <RoleLoad detail={detail} />
+      {u.total && <TokenPanel detail={detail} onOpen={onOpen} />}
       <section className="panel">
         <div className="panel-head"><span>Tasks by status</span></div>
         <div className="share">

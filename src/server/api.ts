@@ -20,6 +20,7 @@ import {
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
 import { createSkill, deleteSkill, installSkill, listSkills, removeTemp, setSkillEnabled, skillFiles } from './skills.ts';
 import { countByStatus, getTask, listRuns, listTasks, updateTask } from './tasks.ts';
+import { projectUsage } from './usage.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
 import { cleanEfforts, modelCatalog } from './models.ts';
@@ -117,7 +118,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   });
   app.get('/api/projects/:id', async req => {
     const p = mustProject(id(req));
-    return { project: p, tasks: listTasks(p.id), counts: countByStatus(p.id), acceptance: readAcceptance(p), waiting: orchestrator.waiting.get(p.id) ?? null };
+    return { project: p, tasks: listTasks(p.id), counts: countByStatus(p.id), acceptance: readAcceptance(p), waiting: orchestrator.waiting.get(p.id) ?? null, usage: projectUsage(p.id) };
   });
   app.patch('/api/projects/:id', async req => {
     const b = body(req);

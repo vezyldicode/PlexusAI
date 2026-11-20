@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
+import { addUsage } from './usage.ts';
 import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
 import { now } from './db.ts';
 import { effortForRun } from './models.ts';
@@ -60,6 +61,14 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps, priority: a.priority ?? 70, originSessionId: sessionId });
           done.push(`added ${shortId(t)} "${t.title}"`);
           if (mustProject(projectId).status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
+          break;
+        }
+        case 'solo_task': {
+          // The coordinator does it itself: one agent on the coordinator's model, outside the project pipeline.
+          const t = createTask(projectId, { title: a.title, description: a.description, role: 'solo', kind: 'solo', priority: 75, originSessionId: sessionId, adhoc: true });
+          const st = mustProject(projectId).status;
+          done.push(`${shortId(t)} "${t.title}" started (single agent)${st === 'paused' || st === 'stopped' ? `; it waits until the project is resumed` : ''}`);
+          void orchestrator.tick();
           break;
         }
         case 'cancel_task': { const t = task(a.task_id); orchestrator.cancelTask(t.id); done.push(`cancelled ${shortId(t)}`); break; }
@@ -149,14 +158,14 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     let out = await attempt(resumeId, resumeId ? '-resume' : '');
     // The CLI no longer knows the conversation (purged, other machine...): start over from this session's history.
     const lostCli = !!resumeId && out.classification.state === 'task_error';
-    if (lostCli) out = await attempt(undefined, '');
+    if (lostCli) { const failed = out.usage; out = await attempt(undefined, ''); out.usage = addUsage(failed, out.usage); }
     applyClassification(account.id, out.classification, out.quota);
     const usable = ['ok', 'warning'].includes(out.classification.state);
     if (usable && out.sessionId) setCliSession(sessionId, { sessionId: out.sessionId, accountId: account.id, syncedMessageId: userMsgId });
     else if (lostCli) setCliSession(sessionId, null);
 
     const parsed = parseCoordinatorOutput(out.finalText);
-    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli };
+    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, tokens: out.usage, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli };
     if (!parsed) {
       const why = !usable ? ` (${account.id}: ${out.classification.state})` : '';
       say('coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, meta);

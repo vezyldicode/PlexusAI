@@ -1,6 +1,7 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
 import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.ts';
+import { invocationUsage } from '../usage.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 const UNKNOWN_RESET_BACKOFF_MS = 15 * 60 * 1000;
@@ -86,6 +87,7 @@ export const codexAdapter: ProviderAdapter = {
     else args.push('--dangerously-bypass-approvals-and-sandbox');
     if (spec.resumeId) args.push(spec.resumeId);
     args.push('-');
+    const since = Date.now();
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
@@ -104,7 +106,9 @@ export const codexAdapter: ProviderAdapter = {
       classification.reason = 'quota_exhausted';
       if (exhausted.length) classification.cooldownUntil = classification.resetsAt = exhausted.sort().at(-1)!;
     }
-    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, classification, quota: rl?.quota ?? null, sessionId: codexThreadId(r.stdout) };
+    const sessionId = codexThreadId(r.stdout) ?? spec.resumeId;
+    const usage = invocationUsage('codex', r.stdout, { model: spec.model, resumeId: spec.resumeId, sessionId, codexHome: spec.account.home, since, until: Date.now() });
+    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage, classification, quota: rl?.quota ?? null, sessionId };
   },
 
   async probe(account: Account) {

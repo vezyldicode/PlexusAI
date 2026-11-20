@@ -117,7 +117,7 @@ export default function App() {
               {view === 'activity' && <ActivityView logs={s.logs} activity={s.activity} detail={d} onOpen={open} />}
               {view === 'memory' && <MemoryView project={d.project} onError={s.setError} />}
               {view === 'report' && <ReportView project={d.project} />}
-              {view === 'status' && <StatusView detail={d} />}
+              {view === 'status' && <StatusView detail={d} onOpen={open} />}
             </div>
           </div>
         ) : (

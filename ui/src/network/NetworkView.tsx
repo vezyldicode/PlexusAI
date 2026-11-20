@@ -3,7 +3,7 @@ import { Eye, EyeOff, Maximize2, Minus, Plus } from 'lucide-react';
 import { api, timeAgo } from '../api.ts';
 import type { LogLine, ProjectDetail } from '../store.ts';
 import type { Account, Provider, Role, Task } from '../types.ts';
-import { Dot, Ic, label } from '../ui.tsx';
+import { Dot, Ic, label, Tokens } from '../ui.tsx';
 import { COORD_H, COORD_W, COORDINATOR, layout, NODE_H, NODE_W, type NodeBox } from './layout.ts';
 import { EffortSelect, ModelDatalist, useModels } from '../models.tsx';
 
@@ -149,6 +149,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
                 <Dot state={t.status} />
                 <span className="node-id num">T{t.seq}</span>
                 <span className="node-role">{t.role}</span>
+                <Tokens u={detail.usage.tasks[t.id]} className="node-tok" />
                 {t.attempts > 1 && <span className="node-att num" title="Attempts">×{t.attempts}</span>}
               </div>
               <div className="node-title">{t.title}</div>

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Account, AcceptanceItemLike, ChatMessage, ChatSession, Project, Task } from './types.ts';
+import type { Account, AcceptanceItemLike, ChatMessage, ChatSession, Project, ProjectUsage, Task } from './types.ts';
 import { api, connectEvents, type PlexusEvent } from './api.ts';
 
 export interface LogLine { at: string; taskSeq: number; taskId: string; account: string; kind: string; text: string }
 
 /** Set while work is ready but no account can take it (issue #5). */
 export interface Waiting { since: string; nextReset: string | null; tasks: number }
-export interface ProjectDetail { project: Project; tasks: Task[]; counts: Record<string, number>; acceptance: AcceptanceItemLike[]; waiting: Waiting | null }
+export interface ProjectDetail { project: Project; tasks: Task[]; counts: Record<string, number>; acceptance: AcceptanceItemLike[]; waiting: Waiting | null; usage: ProjectUsage }
 
 export function usePlexus(selectedId: string | null) {
   const [projects, setProjects] = useState<(Project & { counts: Record<string, number> })[]>([]);
@@ -46,6 +46,7 @@ export function usePlexus(selectedId: string | null) {
       // Tolerate a daemon from before these fields existed.
       d.tasks = d.tasks.map(t => ({ ...t, paths: t.paths ?? [], models: t.models ?? {} }));
       d.waiting ??= null;
+      d.usage ??= { total: null, tasks: {}, byRole: {}, coordinator: null };
       if (sel.current === id) setDetail(d);
     }).catch(e => { if (!/no such project/.test(e.message)) setError(e.message); setDetail(null); });
   }, []);

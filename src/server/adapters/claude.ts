@@ -2,6 +2,7 @@ import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
 import { classifyClaudeRun, claudeQuota, parseEvents } from './claude-limits.ts';
 import { readClaudeStatus } from './claude-control.ts';
+import { invocationUsage } from '../usage.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 
 export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
@@ -58,8 +59,10 @@ export const claudeAdapter: ProviderAdapter = {
       onLine: line => { const d = describeClaudeEvent(line); if (d) spec.onEvent?.(d); },
     });
     const a = classifyClaudeRun({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
+    const sessionId = claudeSessionId(r.stdout);
     return {
-      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, sessionId: claudeSessionId(r.stdout),
+      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, sessionId,
+      usage: invocationUsage('claude', r.stdout, { resumeId: spec.resumeId, sessionId }),
       classification: { state: a.state, reason: a.reason, limitedWindow: a.limitedWindow, resetsAt: a.resetsAt, cooldownUntil: a.cooldownUntil, evidence: a.evidence },
       quota: claudeQuota(a.windows, 'cli-event'),
     };

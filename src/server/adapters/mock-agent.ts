@@ -58,6 +58,18 @@ for (let i = 0; i < steps; i++) { say(`[mock ${meta.role}] working step ${i + 1}
 
 let result: any = { status: 'done', summary: `mock ${meta.kind} done` };
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'file';
+const mockPlan = () => cfg.planWide
+  // Independent tasks for the parallel-scheduling demo; the two alpha tasks touch the same file.
+  ? [
+      { key: 'a', title: 'Create alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: ['alpha.txt exists'], paths: ['alpha.txt'], ac_ids: ['AC1'] },
+      { key: 'b', title: 'Create beta', description: 'FILE: beta.txt', role: 'implementer', acceptance: ['beta.txt exists'], paths: ['beta.txt'], ac_ids: ['AC2'] },
+      { key: 'g', title: 'Create gamma', description: 'FILE: gamma.txt', role: 'implementer', acceptance: [], paths: ['gamma.txt'] },
+      { key: 'a2', title: 'Extend alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: [], paths: ['alpha.txt'] },
+    ]
+  : [
+      { key: 'a', title: 'Create alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: ['alpha.txt exists'], paths: ['alpha.txt'], ac_ids: ['AC1'] },
+      { key: 'b', title: 'Create beta', description: 'FILE: beta.txt', role: 'implementer', depends_on: ['a'], acceptance: ['beta.txt exists'], paths: ['beta.txt'], ac_ids: ['AC2'] },
+    ];
 
 switch (meta.kind) {
   case 'coordinator': {
@@ -65,6 +77,8 @@ switch (meta.kind) {
     const actions: any[] = [];
     if (/pause|dừng/i.test(msg)) actions.push({ type: 'pause' });
     if (/resume|tiếp tục/i.test(msg)) actions.push({ type: 'resume' });
+    const solo = msg.match(/do:\s*(.+)/i);
+    if (solo) actions.push({ type: 'solo_task', title: solo[1], description: `FILE: ${slug(solo[1])}.txt` });
     const add = msg.match(/add task:?\s*(.+)/i);
     if (add) actions.push({ type: 'add_task', title: add[1], description: `FILE: ${slug(add[1])}.txt`, role: 'implementer' });
     // A resumed turn carries only what is new; it says so, and which of the new notices it saw, so tests can check the delta.
@@ -75,28 +89,50 @@ switch (meta.kind) {
     process.exit(0);
   }
   case 'ingest':
+    // `unclearDocs`: the docs are not enough until the user's answer (containing CLARIFIED) is in the goal/directives.
+    if (cfg.unclearDocs && !prompt.includes('CLARIFIED')) {
+      result.docs_check = { sufficient: false, questions: ['Which files should be created?'] };
+      break;
+    }
+    result.docs_check = { sufficient: true, questions: [] };
+    result.execution = { mode: cfg.mode ?? 'team', reason: 'mock' };
     result.project_brief = '# Brief\nMock project: create the files listed in the goal.';
+    result.project_summary = 'Mock project: create alpha.txt and beta.txt.';
     result.acceptance_criteria = [{ id: 'AC1', criterion: 'alpha.txt exists', verify: 'ls alpha.txt' }, { id: 'AC2', criterion: 'beta.txt exists', verify: 'ls beta.txt' }];
     result.decisions = [{ title: 'Use plain text files', decision: 'Files are plain text', rationale: 'mock' }];
     break;
   case 'architect':
     writeFileSync('ARCHITECTURE.md', '# Architecture\nMock: one text file per feature.\n');
     git('add', '-A'); git('commit', '-m', 'docs: architecture (mock)');
+    // The architect plans in the same session; `architectNoPlan` mimics an older architect role (a planner runs after it).
+    if (!cfg.architectNoPlan) result.tasks = mockPlan();
     break;
   case 'plan':
-    result.tasks = cfg.planWide
-      // Independent tasks for the parallel-scheduling demo; the two alpha tasks touch the same file.
-      ? [
-          { key: 'a', title: 'Create alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: ['alpha.txt exists'], paths: ['alpha.txt'] },
-          { key: 'b', title: 'Create beta', description: 'FILE: beta.txt', role: 'implementer', acceptance: ['beta.txt exists'], paths: ['beta.txt'] },
-          { key: 'g', title: 'Create gamma', description: 'FILE: gamma.txt', role: 'implementer', acceptance: [], paths: ['gamma.txt'] },
-          { key: 'a2', title: 'Extend alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: [], paths: ['alpha.txt'] },
-        ]
-      : [
-          { key: 'a', title: 'Create alpha', description: 'FILE: alpha.txt', role: 'implementer', acceptance: ['alpha.txt exists'], paths: ['alpha.txt'] },
-          { key: 'b', title: 'Create beta', description: 'FILE: beta.txt', role: 'implementer', depends_on: ['a'], acceptance: ['beta.txt exists'], paths: ['beta.txt'] },
-        ];
+    result.tasks = mockPlan();
     break;
+  case 'solo': {
+    // One agent does everything: the files named in the task (FILE: x), else the mock project's files.
+    const named = [...new Set([...prompt.matchAll(/FILE:\s*(\S+)/g)].map(m => m[1]))];
+    const files = named.length ? named : ['alpha.txt', 'beta.txt'];
+    for (const f of files) {
+      tool('Write', { file_path: f });
+      writeFileSync(f, (existsSync(f) ? readFileSync(f, 'utf8') : '') + `written by mock (solo, ${meta.task_id})\n`);
+    }
+    git('add', '-A'); git('commit', '-m', `solo: ${files.join(', ')} (mock)`);
+    if (cfg.soloEscalate && !existsSync(join(home, 'escalated'))) {
+      writeFileSync(join(home, 'escalated'), '1');
+      result.escalate = { reason: 'mock: the rest needs a team' };
+      break;
+    }
+    const missing = ['alpha.txt', 'beta.txt', ...(cfg.extraFiles ?? [])].filter(f => !existsSync(f));
+    result.evaluation = {
+      complete: missing.length === 0,
+      criteria: [{ id: 'AC1', pass: existsSync('alpha.txt'), evidence: 'ls' }, { id: 'AC2', pass: existsSync('beta.txt'), evidence: 'ls' }],
+      report: `# Report\nMock solo build. Missing: ${missing.join(', ') || 'none'}`,
+    };
+    if (missing.length) result.follow_up_tasks = missing.map(f => ({ title: `Create ${f}`, description: `FILE: ${f}`, role: 'implementer' }));
+    break;
+  }
   case 'review': {
     const rejectedFile = join(home, `rejected-${meta.task_id}`);
     if (cfg.rejectReviewOnce && !existsSync(rejectedFile) && !/review_cycle: [1-9]/.test(prompt)) {
@@ -113,6 +149,14 @@ switch (meta.kind) {
       report: `# Report\nMock evaluation. Missing: ${missing.join(', ') || 'none'}`,
     };
     if (missing.length) result.follow_up_tasks = missing.map(f => ({ title: `Create ${f}`, description: `FILE: ${f}`, role: 'implementer' }));
+    break;
+  }
+  case 'compact': {
+    // Librarian: one entry per distinct title of the snapshot it was given.
+    const snapFile = '.plexus-task/context/decisions.md';
+    const snap = existsSync(snapFile) ? readFileSync(snapFile, 'utf8') : '';
+    const titles = [...new Set([...snap.matchAll(/^## (.+)$/gm)].map(m => m[1].trim()))];
+    result.decisions_digest = titles.map(title => ({ title, decision: `digest of ${title}`, rationale: '' }));
     break;
   }
   case 'qa':

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Project, type ProjectSettings, type ProjectStatus } from '../shared/types.ts';
+import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Decision, type Project, type ProjectSettings, type ProjectStatus } from '../shared/types.ts';
 import { getDb, json, now } from './db.ts';
 import { deleteProjectSessions, touchSession, routeSession } from './chat.ts';
 import { bus } from './events.ts';
@@ -81,7 +81,7 @@ export function plexusDir(p: Project): string {
   return dir;
 }
 export const memoryDir = (p: Project) => join(plexusDir(p), 'memory');
-export const MEMORY_FILES = ['goal.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'] as const;
+export const MEMORY_FILES = ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'] as const;
 
 export function readMemory(p: Project, file: string): string {
   const f = join(memoryDir(p), file);
@@ -113,8 +113,57 @@ export function writeAcceptance(p: Project, items: AcceptanceItem[]): void {
     `- [${a.pass ? 'x' : ' '}] **${a.id}** ${a.criterion}${a.verify ? ` — verify: ${a.verify}` : ''}${a.evidence ? `\n  - evidence: ${a.evidence}` : ''}`).join('\n'));
 }
 
-export function recordDecision(p: Project, d: { title: string; decision: string; rationale?: string }, by: string): void {
-  appendMemory(p, 'decisions.md', `\n## ${d.title}\n- Decision: ${d.decision}\n${d.rationale ? `- Rationale: ${d.rationale}\n` : ''}- By: ${by} · ${now()}\n`);
+export interface DecisionEntry extends Decision { by: string; at: string }
+
+function decisionMd(d: Decision & { by?: string; at?: string }): string {
+  const scope = [d.paths?.length ? `paths: ${d.paths.join(', ')}` : '', d.ac_ids?.length ? `ACs: ${d.ac_ids.join(', ')}` : ''].filter(Boolean).join(' · ');
+  const lines = [`## ${d.title}`, `- Decision: ${d.decision}`];
+  if (d.rationale) lines.push(`- Rationale: ${d.rationale}`);
+  if (scope) lines.push(`- Scope: ${scope}`);
+  if (d.by || d.at) lines.push(`- By: ${[d.by, d.at].filter(Boolean).join(' · ')}`);
+  return '\n' + lines.join('\n') + '\n';
+}
+
+export function recordDecision(p: Project, d: { title: string; decision: string; rationale?: string; paths?: string[]; ac_ids?: string[] }, by: string): void {
+  appendMemory(p, 'decisions.md', decisionMd({ rationale: '', paths: [], ac_ids: [], ...d, by, at: now() }));
+}
+
+/** Parse decisions.md back into entries (the format written by recordDecision; unknown lines are kept in the decision text). */
+export function parseDecisions(md: string): DecisionEntry[] {
+  const out: DecisionEntry[] = [];
+  for (const block of ('\n' + md).split(/\n## /).slice(1)) {
+    const [title, ...lines] = block.split('\n');
+    const e: DecisionEntry = { title: title.trim(), decision: '', rationale: '', paths: [], ac_ids: [], by: '', at: '' };
+    const extra: string[] = [];
+    for (const l of lines) {
+      const m = l.match(/^- (Decision|Rationale|Scope|By): (.*)$/);
+      if (!m) { if (l.trim()) extra.push(l.trim()); continue; }
+      if (m[1] === 'Decision') e.decision = m[2];
+      else if (m[1] === 'Rationale') e.rationale = m[2];
+      else if (m[1] === 'By') { const [by, at] = m[2].split(' · '); e.by = by ?? ''; e.at = at ?? ''; }
+      else for (const part of m[2].split(' · ')) {
+        const i = part.indexOf(':');
+        const k = part.slice(0, i).trim(), vals = part.slice(i + 1).split(',').map(x => x.trim()).filter(Boolean);
+        if (k === 'paths') e.paths = vals; else if (k === 'ACs') e.ac_ids = vals;
+      }
+    }
+    if (extra.length) e.decision = [e.decision, ...extra].filter(Boolean).join(' ');
+    if (e.title) out.push(e);
+  }
+  return out;
+}
+
+export function readDecisions(p: Project): DecisionEntry[] { return parseDecisions(readMemory(p, 'decisions.md')); }
+
+/**
+ * Replace the first `covered` decisions with a compacted digest (librarian result); decisions recorded after the
+ * librarian's snapshot are kept after it. The replaced text is appended to decisions-archive.md.
+ */
+export function replaceDecisions(p: Project, digest: Decision[], covered: number, by: string): void {
+  const all = readDecisions(p);
+  appendMemory(p, 'decisions-archive.md', `\n# Archived ${now()} (compacted by ${by})\n${readMemory(p, 'decisions.md')}`);
+  const body = [...digest.map(d => decisionMd({ ...d, by: `digest by ${by}` })), ...all.slice(covered).map(d => decisionMd(d))].join('');
+  writeMemory(p, 'decisions.md', body.replace(/^\n/, ''));
 }
 
 // ---------------- chat ----------------

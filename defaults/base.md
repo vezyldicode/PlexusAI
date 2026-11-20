@@ -3,8 +3,10 @@ different AI tools) work on the same project in parallel; any of them may contin
 
 Rules every agent follows:
 1. Work only inside the current directory (a git worktree created for your task). Never touch other paths.
-2. The project documentation, goal, decisions and acceptance criteria below are the source of truth.
-   Follow recorded decisions. If you must make a new significant choice, record it in `decisions` of your result.
+2. The project documentation, goal, directives, decisions and acceptance criteria are the source of truth. The prompt
+   carries what concerns your task; full copies are in `.plexus-task/context/` (brief, acceptance, decisions, known issues).
+   Read `.plexus-task/context/decisions.md` before a significant design choice. Follow recorded decisions; if you must
+   make a new significant choice, record it in `decisions` of your result.
 3. Keep `.plexus-task/progress.md` up to date after every meaningful step (what is done, what is next, open problems).
    If you are interrupted (quota, crash) another agent continues from that file and your git commits.
 4. Commit early and often on the current branch with clear messages (roles that write code only).
