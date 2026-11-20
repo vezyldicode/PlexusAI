@@ -3,7 +3,7 @@
 // while one account hits its quota limit mid-run and its task is handed off to another account.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -66,8 +66,12 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
     for (const k of ['ingest', 'architect', 'plan', 'build', 'review', 'fix', 'qa', 'evaluate']) assert.ok(kinds.includes(k), `has ${k} task`);
     assert.ok(final.tasks.every((t: any) => ['done', 'cancelled'].includes(t.status)), 'all tasks done: ' + JSON.stringify(final.tasks.map((t: any) => [t.seq, t.kind, t.status, t.error])));
 
-    // product merged into main
-    const files = execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: proj, encoding: 'utf8' });
+    // the product is in the folder, uncommitted: Plexus made no commit on any branch of the user's
+    const files = readdirSync(proj).sort().join('\n');
+    const userBranches = execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/heads'], { cwd: proj, encoding: 'utf8' })
+      .split('\n').filter(r => r && !r.startsWith('refs/heads/plexus/'));
+    assert.deepEqual(userBranches, [], 'no commit on the user\'s branches');
+    assert.match(execFileSync('git', ['status', '--porcelain'], { cwd: proj, encoding: 'utf8' }), /\?\? alpha\.txt/);
     assert.match(files, /alpha\.txt/);
     assert.match(files, /beta\.txt/);
     assert.match(files, /ARCHITECTURE\.md/);

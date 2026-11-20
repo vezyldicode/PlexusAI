@@ -21,6 +21,7 @@ import { orchestrator, pickAccount } from './orchestrator.ts';
 import { addWorktree, commitAll, git, hasCommitsAhead } from './util/git.ts';
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
 import { appConfig } from './config.ts';
+import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
 
 /**
  * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
@@ -177,14 +178,24 @@ export async function beginMainEdit(projectId: string): Promise<string> {
   const p = mustProject(projectId);
   await orchestrator.holdMain(p.id);
   const st = (await git(p.path, 'status', '--short')).stdout.trim();
-  return `Merges into ${p.mainBranch} are held until plexus_main_commit (10 min at most). You may edit ${p.path} now.` +
-    (st ? `\nAlready uncommitted there (possibly the user's own work: leave it alone):\n${st}` : '');
+  return `Merges are held until plexus_main_commit (10 min at most). You may edit ${p.path} now.` +
+    (autoCommit() ? '' : ' Do not run git commit there: your edits stay uncommitted for the user to review and commit.') +
+    (st ? `
+Already uncommitted there (the user's own work or earlier Plexus changes: leave it alone):
+${st}` : '');
 }
 
-/** Commit the coordinator's edits in the main checkout and let merges continue. */
+/**
+ * The coordinator finished editing the main checkout: let merges continue. Without auto-commit nothing is committed; the
+ * folder (with the edits) becomes the base later tasks start from. With auto-commit the edits are committed on the branch.
+ */
 export async function commitMainEdit(projectId: string, message: string): Promise<string> {
   const p = mustProject(projectId);
   try {
+    if (!autoCommit()) {
+      const notice = await absorbCheckout(p);
+      return notice || 'Done. Your edits are left uncommitted in the project folder (the user commits them); tasks started from now on see them.';
+    }
     const ok = await commitAll(p.path, message.trim() || 'chore: coordinator edit');
     return ok ? `Committed on ${p.mainBranch}: ${(await git(p.path, 'log', '--oneline', '-1')).stdout.trim()}` : 'Nothing to commit.';
   } finally { orchestrator.releaseMain(p.id); }
@@ -193,27 +204,32 @@ export async function commitMainEdit(projectId: string, message: string): Promis
 const COORD_BRANCH = 'plexus/coordinator';
 const coordWorktree = (p: Project) => join(ensure(join(paths.worktrees, p.id)), 'coordinator');
 
-/** The coordinator's own worktree for larger edits, on its branch, fresh from the main branch when nothing is pending. */
+/** The coordinator's own worktree for larger edits, on its branch, fresh from the base when nothing is pending. */
 export async function coordinatorWorkspace(projectId: string): Promise<string> {
   const p = mustProject(projectId);
+  await ensureBase(p);
+  const base = baseRef(p);
   const wt = coordWorktree(p);
-  if (!existsSync(wt)) await addWorktree(p.path, wt, { branch: COORD_BRANCH, newBranchFrom: p.mainBranch });
-  else if (!(await hasCommitsAhead(p.path, COORD_BRANCH, p.mainBranch)) && !(await git(wt, 'status', '--porcelain')).stdout.trim()) {
-    await git(wt, 'reset', '--hard', p.mainBranch);
+  if (!existsSync(wt)) await addWorktree(p.path, wt, { branch: COORD_BRANCH, newBranchFrom: base });
+  else if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base)) && !(await git(wt, 'status', '--porcelain')).stdout.trim()) {
+    await git(wt, 'reset', '--hard', base);
   }
-  return `Your worktree: ${wt} (branch ${COORD_BRANCH}). Edit and test there, then call plexus_workspace_merge.`;
+  return `Your worktree: ${wt} (branch ${COORD_BRANCH}, Plexus-internal). Edit and test there, then call plexus_workspace_merge.` +
+    (autoCommit() ? '' : ' The result reaches the project folder as uncommitted changes; the user commits them.');
 }
 
-/** Commit the coordinator's worktree and merge it into the main branch through the merge queue. */
+/** Merge the coordinator's worktree into the base through the merge queue (its branch is internal to Plexus). */
 export async function mergeCoordinatorWorkspace(projectId: string, message: string): Promise<string> {
   const p = mustProject(projectId);
   const wt = coordWorktree(p);
   if (!existsSync(wt)) return 'No coordinator worktree: call plexus_workspace first.';
+  const base = baseRef(p);
   await commitAll(wt, message.trim() || 'chore: coordinator change');
-  if (!(await hasCommitsAhead(p.path, COORD_BRANCH, p.mainBranch))) return 'Nothing to merge.';
+  if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base))) return 'Nothing to merge.';
   const r = await orchestrator.mergeCoordinatorBranch(p, COORD_BRANCH, `merge coordinator: ${message.trim() || 'change'}`);
-  if (r.ok) await git(wt, 'reset', '--hard', p.mainBranch);
-  return r.ok ? `Merged into ${p.mainBranch}.` : `Not merged (${r.detail.slice(0, 800)}). Resolve it in your worktree (git merge ${p.mainBranch}) and try again.`;
+  if (r.ok) await git(wt, 'reset', '--hard', base);
+  const done = autoCommit() ? `Merged into ${p.mainBranch}.` : 'Merged; the changes are in the project folder, uncommitted (the user commits them).';
+  return r.ok ? done : `Not merged (${r.detail.slice(0, 800)}). Resolve it in your worktree (git merge ${base}) and try again.`;
 }
 
 // ---------------- chat ----------------

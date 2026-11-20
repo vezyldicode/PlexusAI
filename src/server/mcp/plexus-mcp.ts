@@ -52,17 +52,17 @@ const tools: Tool[] = [
     inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/main/begin`, {})).text,
   },
   {
-    name: 'plexus_main_commit', description: 'Commit your edits in the main checkout and let merges continue.',
-    inputSchema: obj({ message: str('commit message') }, ['message']),
+    name: 'plexus_main_commit', description: 'Finish your edits in the main checkout and let merges continue. The edits stay uncommitted for the user to review (Plexus commits them only when auto-commit is on in Settings).',
+    inputSchema: obj({ message: str('what you changed (used as the commit message only with auto-commit on)') }, ['message']),
     call: async a => (await api('POST', `/api/projects/${P}/main/commit`, { message: a.message })).text,
   },
   {
-    name: 'plexus_workspace', description: 'Your own git worktree (branch plexus/coordinator) for larger changes; returns its path.',
+    name: 'plexus_workspace', description: 'Your own git worktree (internal branch plexus/coordinator) for larger changes; returns its path.',
     inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/coordinator-workspace`, {})).text,
   },
   {
-    name: 'plexus_workspace_merge', description: 'Commit your worktree and merge it into the main branch (through the merge queue).',
-    inputSchema: obj({ message: str('commit / merge message') }, ['message']),
+    name: 'plexus_workspace_merge', description: 'Merge your worktree through the merge queue; the result reaches the project folder as uncommitted changes (committed on the branch only with auto-commit on).',
+    inputSchema: obj({ message: str('what the change does') }, ['message']),
     call: async a => (await api('POST', `/api/projects/${P}/coordinator-workspace/merge`, { message: a.message })).text,
   },
 ];

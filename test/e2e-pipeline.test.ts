@@ -61,7 +61,7 @@ test('adaptive pipeline: ask first, single agent by default, chat requests done 
     await orchestrator.idle();
     assert.equal(s1.project.phase, 'done', dump(s1));
     assert.deepEqual(s1.tasks.map((t: any) => t.kind), ['ingest', 'solo'], 'analyst, then one agent: ' + dump(s1));
-    assert.match(execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: s1.project.path, encoding: 'utf8' }), /alpha\.txt[\s\S]*beta\.txt/);
+    assert.match(readdirSync(s1.project.path).sort().join('\n'), /alpha\.txt[\s\S]*beta\.txt/);
 
     // 2. Docs exist but do not say what to build: the analyst asks and nothing else runs; the answer unblocks it.
     cfg({ mode: 'single', unclearDocs: true });
@@ -86,7 +86,7 @@ test('adaptive pipeline: ask first, single agent by default, chat requests done 
     assert.equal(s3.tasks[0].kind, 'solo');
     assert.equal(s3.tasks[0].adhoc, true);
     assert.equal(s3.project.status, 'idle', 'the project pipeline was not started');
-    assert.match(execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: s3.project.path, encoding: 'utf8' }), /hello-world\.txt/);
+    assert.match(readdirSync(s3.project.path).sort().join('\n'), /hello-world\.txt/);
     assert.ok((await call('GET', `/api/projects/${p3.id}/messages`)).some((m: any) => m.author === 'agent' && /finished/.test(m.text)));
 
     // 4. Team build: the architect plans (no planner step), no QA step by default, and the fix after review continues

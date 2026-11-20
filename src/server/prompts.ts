@@ -6,6 +6,7 @@ import { CONTEXT_DIR, laneNotes, profileFor, PROFILES, projectContext } from './
 import { readDecisions, readMemory } from './projects.ts';
 import { getTask, isUserFollowUp, shortId } from './tasks.ts';
 import { appConfig } from './config.ts';
+import { autoCommit, baseRef } from './checkout.ts';
 
 export const TASK_DIR = '.plexus-task';
 export const RESULT_FILE = `${TASK_DIR}/result.json`;
@@ -57,7 +58,7 @@ Omit empty arrays if you like. After writing the file, end your reply with the s
 }
 
 function taskSection(p: Project, t: Task): string {
-  const parts = [`# TASK ${shortId(t)}: ${t.title}`, `- kind: ${t.kind}\n- role: ${t.role}\n- main branch: ${p.mainBranch}${t.branch ? `\n- your branch: ${t.branch}` : ''}`];
+  const parts = [`# TASK ${shortId(t)}: ${t.title}`, `- kind: ${t.kind}\n- role: ${t.role}\n- main branch: ${baseRef(p)}${t.branch ? `\n- your branch: ${t.branch}` : ''}`];
   if (t.description) parts.push(`## Description\n${t.description}`);
   if (t.acceptance.length) parts.push(`## Done when\n${t.acceptance.map(a => `- ${a}`).join('\n')}`);
   const parent = t.parentId ? getTask(t.parentId) : null;
@@ -177,7 +178,7 @@ export function buildForkPrompt(p: Project, t: Task, role: Role, system: string)
     `# YOU ARE NOW THE AGENT DOING THE WORK
 The conversation above was the coordinator's chat with the user. You continue it as a separate agent: you are no longer
 the coordinator, you have no plexus tools, and your reply is not shown in the chat. You work in a new git worktree (the
-current directory, branch ${t.branch ?? '(see TASK)'}, created from ${p.mainBranch}); the project folder you saw above is
+current directory, branch ${t.branch ?? '(see TASK)'}, created from ${baseRef(p)}); the project folder you saw above is
 not yours to edit. Use what you already learned above (files, causes, decisions) instead of searching again.`,
     system,
     directives ? `## Directives from the user (must be followed)\n${directives}` : '',
@@ -212,13 +213,16 @@ const fmtMsg = (m: ChatMessage) => `[${m.author}] ${head(m.text, appConfig().cha
 
 /** Where things are and how the coordinator acts: with the plexus tools when the CLI loaded them, else with JSON actions. */
 function coordinatorGuide(p: Project, tools: boolean): string {
-  const where = `- Project folder (main checkout, branch ${p.mainBranch}): ${p.path}
+  const where = `- Project folder (main checkout, branch ${p.mainBranch}): ${p.path}${autoCommit() ? '' : `
+- Plexus never commits on the user's branches: finished work is merged on Plexus's internal base (${baseRef(p)}) and
+  written into the project folder as uncommitted changes, which the user reviews and commits. In the project folder never
+  run git commit, merge, rebase, reset, checkout, stash or push, unless the user asks you to in this chat.`}
 - Task logs (prompt + agent stream, one file per run): ${join(paths.logs, p.id)}
 - Task worktrees: ${join(paths.worktrees, p.id)} · project memory: ${join(p.path, '.plexus', 'memory')} (hand-off notes in handoff/)`;
   const how = tools
     ? `You have full permissions in the project: read and edit files, run commands (git, tests), and the \`plexus\` tools:
 plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) · plexus_action(action) (any action listed under OUTPUT) ·
-plexus_main_begin / plexus_main_commit(message) · plexus_workspace / plexus_workspace_merge(message).
+plexus_main_begin / plexus_main_commit(message: what you changed) · plexus_workspace / plexus_workspace_merge(message).
 - Look before you answer: read logs, results, files and git history yourself instead of guessing or asking the user to paste them.
 - Small change (one or two files, no long test run): do it yourself. Call plexus_main_begin first (it holds merges back so you
   never edit the main checkout while a task merges), edit, then plexus_main_commit. Larger change: plexus_workspace gives you

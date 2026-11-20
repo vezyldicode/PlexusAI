@@ -13,7 +13,8 @@ import { getRole } from './roles.ts';
 import { materializeSkills } from './skills.ts';
 import { finishRun, getTask, listRuns, setRunModel, shortId, startRun, updateTask } from './tasks.ts';
 import { addUsage } from './usage.ts';
-import { addWorktree, commitAll, diffStat, ensureRepo, git } from './util/git.ts';
+import { addWorktree, commitAll, diffStat, git } from './util/git.ts';
+import { baseRef, ensureBase, prepareProjectRepo } from './checkout.ts';
 import { postMessage, updateProject, writeHandoff } from './projects.ts';
 import { appConfig } from './config.ts';
 import { addTiming } from './adapters/timing.ts';
@@ -108,26 +109,27 @@ export function writesCode(t: Task): boolean {
   return false;
 }
 
-/** What startProject does to the project folder (own repository, snapshot of uncommitted work), for chat requests. */
+/** What startProject does to the project folder (own repository, base taken from the folder as it is), for chat requests. */
 async function prepareRepo(p: Project): Promise<Project> {
-  const main = await ensureRepo(p.path);
-  if (await commitAll(p.path, 'chore: snapshot before Plexus run')) postMessage(p.id, 'system', 'Committed uncommitted changes in the project before starting.');
-  return updateProject(p.id, { mainBranch: main });
+  const repo = await prepareProjectRepo(p);
+  if (repo.notice) postMessage(p.id, 'system', repo.notice, { level: 'attention' });
+  return updateProject(p.id, { mainBranch: repo.mainBranch });
 }
 
 /** Create (or reuse) the task's worktree. Returns its path. */
 export async function prepareWorktree(p: Project, t: Task): Promise<string> {
+  await ensureBase(p);
   const dir = ensure(join(paths.worktrees, p.id));
   let wt = t.worktree;
   if (writesCode(t)) {
     const branch = t.branch ?? `plexus/${shortId(t)}-${slug(t.title)}`;
     wt = wt ?? join(dir, shortId(t));
-    await addWorktree(p.path, wt, { branch, newBranchFrom: p.mainBranch });
+    await addWorktree(p.path, wt, { branch, newBranchFrom: baseRef(p) });
     if (!t.branch || !t.worktree) updateTask(t.id, { branch, worktree: wt }, true);
   } else {
     wt = wt ?? join(dir, shortId(t));
     const parent = t.parentId ? getTask(t.parentId) : null;
-    const at = t.kind === 'review' && parent?.branch ? parent.branch : p.mainBranch;
+    const at = t.kind === 'review' && parent?.branch ? parent.branch : baseRef(p);
     await addWorktree(p.path, wt, { detachAt: at });
     if (!t.worktree) updateTask(t.id, { worktree: wt }, true);
   }
@@ -319,7 +321,7 @@ async function preserveWork(p: Project, t: Task, wt: string, account: Account, r
   let stat = '';
   if (writesCode(t)) {
     await commitAll(wt, `wip(${shortId(t)}): interrupted on ${account.id} — ${reason.slice(0, 80)}`);
-    stat = await diffStat(wt, p.mainBranch);
+    stat = await diffStat(wt, baseRef(p));
   }
   const status = (await git(wt, 'status', '--short')).stdout.trim();
   appendFileSync(join(wt, PROGRESS_FILE), `\n\n---\n[plexus ${now()}] Attempt by ${account.id} (${account.provider}) ended: ${reason}\n` +

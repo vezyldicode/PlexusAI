@@ -91,6 +91,11 @@ export interface AppConfig {
   gitName: string;
   /** Author email of the commits Plexus makes. */
   gitEmail: string;
+  /**
+   * Off (default): Plexus never commits on the user's branches; finished work lands in the project folder as uncommitted
+   * changes and the user commits it. On: the old behaviour (snapshot commit before a run, merges committed on the branch).
+   */
+  autoCommit: boolean;
 }
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
@@ -143,6 +148,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   codexBin: '',
   gitName: 'Plexus',
   gitEmail: 'plexus@localhost',
+  autoCommit: false,
 };
 
 /** Allowed range of each number (inclusive). Values outside are clamped on save. */
@@ -206,7 +212,8 @@ export function cleanConfigPatch(patch: Record<string, unknown>): Partial<Record
       if (!Number.isFinite(n)) continue;
       const [lo, hi] = CONFIG_BOUNDS[key] ?? [-Infinity, Infinity];
       out[key] = Math.min(hi, Math.max(lo, Math.round(n)));
-    } else if (typeof v === 'string') out[key] = v.trim().slice(0, 500);
+    } else if (typeof def === 'boolean') { if (typeof v === 'boolean') out[key] = v; }
+    else if (typeof v === 'string') out[key] = v.trim().slice(0, 500);
   }
   return out;
 }

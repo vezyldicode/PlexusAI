@@ -91,7 +91,7 @@ test('blocked waits, gap rounds resume and converge, pins fall back, coordinator
     await orchestrator.idle();
     assert.equal(done2.project.phase, 'done', dump(done2));
     assert.equal(done2.tasks.at(-1).laneFrom, round2.id);
-    assert.match(execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: done2.project.path, encoding: 'utf8' }), /beta\.txt/);
+    assert.match(readdirSync(done2.project.path).sort().join('\n'), /beta\.txt/);
 
     // 3. A pinned account runs the task when it can; while it cannot, another one takes over (with a notice).
     cfg({});

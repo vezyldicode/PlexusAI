@@ -124,7 +124,7 @@ export const ENGINE_GROUPS: Record<EngineTab, { lead: string; groups: Group<CK>[
     ],
   },
   advanced: {
-    lead: 'Where the command line tools are, and how Plexus signs its commits.',
+    lead: 'Where the command line tools are, whether Plexus commits on your branches, and how it signs its commits.',
     groups: [
       { title: 'Command line tools', fields: [
         { key: 'claudeBin', label: 'Claude CLI path', kind: 'text', placeholder: 'Found on PATH', tip: 'Full path of the claude executable. Empty uses PLEXUS_CLAUDE_BIN, then the PATH' },
@@ -133,7 +133,8 @@ export const ENGINE_GROUPS: Record<EngineTab, { lead: string; groups: Group<CK>[
         { key: 'modelCacheHours', label: 'Model list cache', kind: 'slider', unit: 'h', max: 72, tip: 'How long the list of models and efforts of an account is kept before it is read again' },
       ] },
       { title: 'Git', fields: [
-        { key: 'gitName', label: 'Commit author name', kind: 'text', placeholder: 'Plexus', tip: 'Name on the commits Plexus makes (snapshots, merges, work in progress)' },
+        { key: 'autoCommit', label: 'Commit to my branches', kind: 'toggle', tip: 'Off: Plexus never commits on your branches. Finished work appears in the project folder as uncommitted changes and you commit it yourself. On: Plexus commits a snapshot of your uncommitted work before a run and commits every merge on the checked-out branch' },
+        { key: 'gitName', label: 'Commit author name', kind: 'text', placeholder: 'Plexus', tip: 'Name on the commits Plexus makes (its internal merges, and on your branch when "Commit to my branches" is on)' },
         { key: 'gitEmail', label: 'Commit author email', kind: 'text', placeholder: 'plexus@localhost', tip: 'Email on the commits Plexus makes' },
       ] },
     ],

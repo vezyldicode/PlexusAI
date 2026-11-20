@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { childEnv } from './proc.ts';
 import { appConfig } from '../config.ts';
 
@@ -26,19 +26,22 @@ const identity = () => {
   return ['-c', `user.name=${c.gitName || 'Plexus'}`, '-c', `user.email=${c.gitEmail || 'plexus@localhost'}`];
 };
 
-/** Make sure `dir` is a git repo with at least one commit; returns the main branch name. */
+/**
+ * Make sure `dir` is the root of a git repo; returns the checked-out branch name. With auto-commit on (Settings →
+ * Advanced) a repo without commits also gets an initial commit; otherwise Plexus never commits there.
+ */
 export async function ensureRepo(dir: string): Promise<string> {
   // The project folder must be the root of its own repo. If it merely sits inside another repo
   // (e.g. a folder inside some other checkout), give it its own repository instead of committing to the parent.
   const top = await git(dir, 'rev-parse', '--show-toplevel');
   const norm = (s: string) => resolve(s.trim()).toLowerCase().replace(/[\\/]+$/, '');
   if (top.code !== 0 || norm(top.stdout) !== norm(dir)) await gitOk(dir, 'init', '-b', 'main');
-  if ((await git(dir, 'rev-parse', '--verify', 'HEAD')).code !== 0) {
+  addExcludes(dir, ['.plexus/', '.plexus-task/', '.claude/skills/', '.agents/skills/']);
+  if (appConfig().autoCommit && (await git(dir, 'rev-parse', '--verify', 'HEAD')).code !== 0) {
     await gitOk(dir, 'add', '-A');
     await gitOk(dir, ...identity(), 'commit', '--allow-empty', '-m', 'chore: initial commit (plexus)');
   }
-  addExcludes(dir, ['.plexus/', '.plexus-task/', '.claude/skills/', '.agents/skills/']);
-  return gitOk(dir, 'rev-parse', '--abbrev-ref', 'HEAD');
+  return currentBranch(dir);
 }
 
 /** Ignore plexus-internal paths in every worktree without touching the project's .gitignore. */
@@ -106,5 +109,111 @@ export async function mergeBranch(repo: string, mainBranch: string, branch: stri
   if (r.code === 0) return { ok: true, conflict: false, detail: r.stdout };
   const conflict = /CONFLICT|Automatic merge failed/i.test(r.stdout + r.stderr);
   await git(repo, 'merge', '--abort');
+  return { ok: false, conflict, detail: (r.stdout + r.stderr).slice(0, 2000) };
+}
+
+// ---------------- working without commits on the user's branches ----------------
+// Plexus integrates on a hidden ref (refs/plexus/<project>/base): task branches start from it and merge into it, in a
+// worktree of its own. The user's checkout only ever receives the resulting changes as uncommitted edits.
+
+function gitBuf(cwd: string, args: string[], env?: Record<string, string>): Promise<{ code: number; stdout: Buffer; stderr: string }> {
+  return new Promise(resolve => {
+    execFile('git', args, { cwd, maxBuffer: 256 * 1024 * 1024, windowsHide: true, encoding: 'buffer', env: childEnv('git', { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env }) }, (err, stdout, stderr) => {
+      resolve({ code: err ? (typeof (err as any).code === 'number' ? (err as any).code : 1) : 0, stdout: stdout as Buffer, stderr: String(stderr) });
+    });
+  });
+}
+
+/** Commit id of `rev`, or null when it does not exist. */
+export async function revParse(repo: string, rev: string): Promise<string | null> {
+  const r = await git(repo, 'rev-parse', '--verify', '--quiet', `${rev}^{commit}`);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+/** Name of the checked-out branch (also on a branch with no commits yet); 'HEAD' when detached. */
+export async function currentBranch(repo: string): Promise<string> {
+  const r = await git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD');
+  return r.code === 0 ? r.stdout.trim() : 'HEAD';
+}
+
+/**
+ * A commit object of the checkout exactly as it is on disk (tracked and untracked files, minus ignored ones), made with a
+ * temporary index: HEAD, the real index and every branch stay as they are. Reachable only from the ref the caller sets.
+ */
+export async function snapshotCommit(repo: string, parent: string | null, message: string): Promise<string> {
+  const idx = resolve(repo, (await gitOk(repo, 'rev-parse', '--git-path', `plexus-index-${process.pid}`)));
+  const env = { GIT_INDEX_FILE: idx };
+  try {
+    if (parent) await gitBuf(repo, ['read-tree', parent], env); // only speeds up hashing of unchanged files
+    const add = await gitBuf(repo, ['add', '-A', '--', '.'], env);
+    if (add.code !== 0) throw new Error(`git add (snapshot) failed: ${add.stderr}`);
+    const tree = await gitBuf(repo, ['write-tree'], env);
+    if (tree.code !== 0) throw new Error(`git write-tree failed: ${tree.stderr}`);
+    return gitOk(repo, ...identity(), 'commit-tree', tree.stdout.toString().trim(), ...(parent ? ['-p', parent] : []), '-m', message);
+  } finally { rmSync(idx, { force: true }); }
+}
+
+export const sameTree = async (repo: string, a: string, b: string) =>
+  (await git(repo, 'rev-parse', `${a}^{tree}`)).stdout.trim() === (await git(repo, 'rev-parse', `${b}^{tree}`)).stdout.trim();
+
+/** Blob id of `path` in commit `rev`, or null when the file is not there. */
+async function blobAt(repo: string, rev: string, path: string): Promise<string | null> {
+  const r = await git(repo, 'rev-parse', '--verify', '--quiet', `${rev}:${path}`);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+/** Blob id the file on disk would get (clean filters and line-ending conversion applied), or null when it is missing. */
+async function blobOnDisk(repo: string, path: string): Promise<string | null> {
+  if (!existsSync(join(repo, path))) return null;
+  const r = await git(repo, 'hash-object', '--path', path, '--', path);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+/**
+ * Bring the changes `from..to` into the files of the checkout, without touching HEAD, the index or any branch.
+ * A file is written only when it is still exactly as in `from` on disk (or already as in `to`); if the user changed any of
+ * them, nothing is written at all and the files are returned, so their edits are never overwritten.
+ */
+export async function applyToCheckout(repo: string, from: string, to: string): Promise<{ ok: boolean; files: string[]; conflicts: string[] }> {
+  const r = await gitBuf(repo, ['diff', '--name-only', '--no-renames', '-z', from, to]);
+  if (r.code !== 0) throw new Error(`git diff failed: ${r.stderr}`);
+  const files = r.stdout.toString('utf8').split('\0').filter(Boolean);
+  const writes: { path: string; blob: string | null }[] = [];
+  const conflicts: string[] = [];
+  for (const path of files) {
+    const [before, after, disk] = await Promise.all([blobAt(repo, from, path), blobAt(repo, to, path), blobOnDisk(repo, path)]);
+    if (disk === after) continue;
+    if (disk === before) writes.push({ path, blob: after });
+    else conflicts.push(path);
+  }
+  if (conflicts.length) return { ok: false, files, conflicts };
+  for (const w of writes) {
+    const abs = join(repo, w.path);
+    if (w.blob === null) { rmSync(abs, { force: true }); continue; }
+    // As it would be checked out: smudge filters and the repository's line endings applied.
+    const c = await gitBuf(repo, ['cat-file', '--filters', `${to}:${w.path}`]);
+    if (c.code !== 0) throw new Error(`git cat-file ${w.path} failed: ${c.stderr}`);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, c.stdout);
+  }
+  return { ok: true, files, conflicts };
+}
+
+/**
+ * Merge `branch` into the commit `base` inside Plexus's own integration worktree (detached HEAD), never in the user's
+ * checkout. Returns the merge commit; the caller moves its hidden ref there.
+ */
+export async function mergeDetached(repo: string, wt: string, base: string, branch: string, message: string): Promise<{ ok: boolean; conflict: boolean; detail: string; head?: string }> {
+  if (!existsSync(wt)) await addWorktree(repo, wt, { detachAt: base });
+  else {
+    await git(wt, 'merge', '--abort');
+    const co = await git(wt, 'checkout', '--force', '--detach', base);
+    if (co.code !== 0) return { ok: false, conflict: false, detail: `cannot prepare the integration worktree: ${co.stderr}` };
+    await git(wt, 'clean', '-fdq');
+  }
+  const r = await git(wt, ...identity(), 'merge', '--no-ff', '--no-edit', '-m', message, branch);
+  if (r.code === 0) return { ok: true, conflict: false, detail: r.stdout, head: await gitOk(wt, 'rev-parse', 'HEAD') };
+  const conflict = /CONFLICT|Automatic merge failed/i.test(r.stdout + r.stderr);
+  await git(wt, 'merge', '--abort');
   return { ok: false, conflict, detail: (r.stdout + r.stderr).slice(0, 2000) };
 }

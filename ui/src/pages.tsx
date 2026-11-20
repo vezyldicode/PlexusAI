@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { FolderOpen, X } from 'lucide-react';
 import { api } from './api.ts';
 import type { Project } from './types.ts';
 import { Ic } from './ui.tsx';
@@ -28,7 +28,7 @@ export function NewProjectDialog({ onClose, onCreated, onError }: { onClose: () 
       <div className="dialog" role="dialog" aria-label="New project" onClick={e => e.stopPropagation()}>
         <div className="dialog-head"><h2>New project</h2><button className="icon-btn" onClick={onClose} title="Close"><Ic i={X} /></button></div>
         <label className="folder-label" htmlFor="project-folder">Project folder<span className="field-note">Absolute path, created if missing</span></label>
-        <div className="folder-field"><input id="project-folder" value={path} onChange={e => setPath(e.target.value)} placeholder="G:\work\my-app" autoFocus /><button type="button" disabled={browsing} onClick={browse}>Browse</button></div>
+        <div className="folder-field"><input id="project-folder" value={path} onChange={e => setPath(e.target.value)} placeholder="G:\work\my-app" autoFocus /><button className="icon-btn" type="button" title="Browse project folder" aria-label="Browse project folder" disabled={browsing} onClick={browse}><Ic i={FolderOpen} /></button></div>
         <label>Name<span className="field-note">Optional</span><input value={name} onChange={e => setName(e.target.value)} /></label>
         <label>Goal<span className="field-note">Optional when the folder has GOAL.md or docs</span><textarea value={goal} onChange={e => setGoal(e.target.value)} rows={5} placeholder="What should the finished product do" /></label>
         <label>How to build<span className="field-note">Auto: the analyst picks one agent or a team from the docs</span>

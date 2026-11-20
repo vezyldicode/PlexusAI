@@ -11,7 +11,8 @@ import {
 } from './projects.ts';
 import { getRole } from './roles.ts';
 import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask, USER_FOLLOW_UP } from './tasks.ts';
-import { ensureRepo, changedLines, commitAll, git, hasCommitsAhead, mergeBranch, removeWorktree } from './util/git.ts';
+import { changedLines, git, hasCommitsAhead, removeWorktree } from './util/git.ts';
+import { baseRef, commitsSince, conflictNotice, mergeIntoBase, prepareProjectRepo, type MergeOutcome } from './checkout.ts';
 import { CONTEXT_DIR } from './context.ts';
 import { running, runAttempt, writesCode, type AttemptOutcome } from './worker.ts';
 import { appConfig } from './config.ts';
@@ -91,6 +92,8 @@ export function pickAccount(p: Project, t: Task, accounts: Account[] = listAccou
     || a.id.localeCompare(b.id))[0];
 }
 
+const autoCommitHint = (p: Project) => appConfig().autoCommit ? `Make sure the project's main checkout is clean and on ${p.mainBranch}.` : "Check the task branch and Plexus's integration worktree.";
+
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
@@ -137,9 +140,9 @@ export class Orchestrator {
   async startProject(id: string, sessionId?: string | null): Promise<Project> {
     setControlSession(id, sessionId);
     let p = mustProject(id);
-    const main = await ensureRepo(p.path);
-    if (await commitAll(p.path, 'chore: snapshot before Plexus run')) postMessage(id, 'system', 'Committed uncommitted changes in the project before starting.');
-    p = updateProject(id, { mainBranch: main });
+    const repo = await prepareProjectRepo(p);
+    if (repo.notice) postMessage(id, 'system', repo.notice, { level: 'attention' });
+    p = updateProject(id, { mainBranch: repo.mainBranch });
     const pipeline = listTasks(id).filter(t => !t.adhoc);
     if ((!pipeline.length || p.phase === 'new' || p.phase === 'needs_input') && !pipeline.some(t => t.kind === 'ingest' && ACTIVE.includes(t.status) && t.status !== 'blocked')) {
       // Look before spending quota: with no goal and no documentation there is nothing to analyse yet.
@@ -284,11 +287,17 @@ export class Orchestrator {
     return true;
   }
 
+  /** A merge landed on the base but could not be written into the project folder (the user edits those files). */
+  private reportSync(p: Project, r: MergeOutcome) {
+    if (r.ok && r.sync && !r.sync.ok) postMessage(p.id, 'system', conflictNotice(r.sync), { level: 'attention' });
+  }
+
   /** Merge a branch the coordinator worked on (its own worktree) through the same queue as task merges. */
   mergeCoordinatorBranch(p: Project, branch: string, message: string): Promise<{ ok: boolean; detail: string }> {
     const prev = this.mergeLocks.get(p.id) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(async () => {
-      const r = await mergeBranch(p.path, p.mainBranch, branch, message);
+      const r = await mergeIntoBase(p, branch, message);
+      this.reportSync(p, r);
       return { ok: r.ok, detail: r.ok ? 'merged' : `${r.conflict ? 'conflict' : 'failed'}: ${r.detail}` };
     });
     this.mergeLocks.set(p.id, next.catch(() => {}));
@@ -611,7 +620,7 @@ export class Orchestrator {
    * project's single-agent build is complete, continues with the gaps, or hands the rest to a team when it escalated.
    */
   private async onSolo(p: Project, t: Task, r: AgentResult) {
-    const changedCode = !!t.branch && await hasCommitsAhead(p.path, t.branch, p.mainBranch);
+    const changedCode = !!t.branch && await hasCommitsAhead(p.path, t.branch, baseRef(p));
     if (r.codemap?.trim()) writeMemory(p, 'codemap.md', r.codemap);
     await this.integrate(p, t);
     if (t.adhoc) {
@@ -662,7 +671,7 @@ export class Orchestrator {
 
   /** Code task finished: send to review or merge. */
   private async integrate(p: Project, t: Task) {
-    const hasCommits = t.branch ? await hasCommitsAhead(p.path, t.branch, p.mainBranch) : false;
+    const hasCommits = t.branch ? await hasCommitsAhead(p.path, t.branch, baseRef(p)) : false;
     if (!hasCommits) {
       setStatus(t.id, 'done');
       if (t.worktree) await removeWorktree(p.path, t.worktree).catch(() => {});
@@ -690,7 +699,7 @@ export class Orchestrator {
     if (t.kind === 'fix') return false;
     const r = getTask(t.id)!.result;
     if (r && (r.status === 'partial' || r.issues.length)) return true;
-    return !!t.branch && await changedLines(p.path, p.mainBranch, t.branch) >= p.settings.reviewMinLines;
+    return !!t.branch && await changedLines(p.path, baseRef(p), t.branch) >= p.settings.reviewMinLines;
   }
 
   private async onReview(p: Project, review: Task, r: AgentResult) {
@@ -726,7 +735,8 @@ export class Orchestrator {
 
   private async doMerge(p: Project, t: Task) {
     if (!t.branch) { setStatus(t.id, 'done'); this.markChainDone(t); return; }
-    const r = await mergeBranch(p.path, p.mainBranch, t.branch, `merge ${shortId(t)}: ${t.title}`);
+    const r = await mergeIntoBase(p, t.branch, `merge ${shortId(t)}: ${t.title}`);
+    this.reportSync(p, r);
     if (r.ok) {
       setStatus(t.id, 'done');
       this.markChainDone(t);
@@ -737,7 +747,7 @@ export class Orchestrator {
     }
     if (!r.conflict) {
       setStatus(t.id, 'failed', { error: `merge failed: ${r.detail}` });
-      postMessage(p.id, 'system', `Merging ${shortId(t)} failed (not a conflict): ${r.detail.slice(0, 500)}. Make sure the project's main checkout is clean and on ${p.mainBranch}.`, { level: 'attention' });
+      postMessage(p.id, 'system', `Merging ${shortId(t)} failed (not a conflict): ${r.detail.slice(0, 500)}. ${autoCommitHint(p)}`, { level: 'attention' });
       this.pause(p.id);
       return;
     }
@@ -751,7 +761,7 @@ export class Orchestrator {
     createTask(p.id, {
       title: `Resolve merge conflicts for ${shortId(t)}`, role: 'integrator', kind: 'integrate', parentId: t.id,
       branch: t.branch, worktree: t.worktree, priority: 98, paths: t.paths,
-      description: `Branch ${t.branch} conflicts with ${p.mainBranch}:\n${r.detail.slice(0, 1500)}`,
+      description: `Branch ${t.branch} conflicts with ${baseRef(p)}:\n${r.detail.slice(0, 1500)}`,
       lastAccountId: t.authorAccountId, // the author's conversation knows this branch best
     });
   }
@@ -840,7 +850,7 @@ export class Orchestrator {
     // Rounds since the last evaluation that changed nothing, or did not reduce the failing criteria: ask, do not loop.
     const prevEv = this.previousEvaluation(p, t);
     const since = listTasks(p.id).filter(x => !x.adhoc && x.seq < t.seq && ['solo', 'evaluate'].includes(x.kind) && x.result?.evaluation).at(-1)?.updatedAt;
-    const changed = !since || Number((await git(p.path, 'rev-list', '--count', `--since=${since}`, p.mainBranch)).stdout.trim()) > 0;
+    const changed = !since || await commitsSince(p, since) > 0;
     const why = this.stalled(ev, prevEv, changed);
     if (why) return this.waitForUser(mustProject(p.id), t, ev, this.gapList(ev, fus), why);
     // A few gaps go to one agent (one hand-off, no review); many go back to the team as separate tasks.
