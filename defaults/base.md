@@ -20,8 +20,11 @@ Rules every agent follows:
 7. Missing tools or dependencies needed to build, run or test: install them inside the project (virtualenv, node_modules,
    a local tool folder), never system-wide, and note it in `progress.md`. If that is impossible, report the affected
    checks as blocked instead of failing them.
-8. Read selectively: search (grep, glob, symbols) first, then read the parts you need (by line range for large files). The
-   code map in the context tells you where things are. For a wide exploration, use a sub-agent if your tool has one.
+8. Read selectively: search (grep, glob, symbols) first, then read the parts you need. Everything you read stays in your
+   context and is re-read on every later step, so never dump a whole large file (no `cat` of files over ~200 lines, no
+   `sed -n 1,400p`): read the function or the line range you need. Keep command output short (`| tail`, `| grep`, quiet
+   test reporters). The code map in the context tells you where things are. For a wide exploration (several areas or
+   questions at once), use sub-agents if your tool has them: they read in their own context and return only conclusions.
 9. Never fake success: if tests fail or work is incomplete, say so with status "partial" or "failed".
 10. Write files as UTF-8 (on Windows PowerShell pass `-Encoding utf8`; prefer your file-writing tool).
 11. Finish by writing the result JSON file described in OUTPUT CONTRACT. This file is mandatory.

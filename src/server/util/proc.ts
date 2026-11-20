@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { appConfig } from '../config.ts';
 
 export interface ResolvedCommand { cmd: string; prefixArgs: string[] }
 
@@ -11,9 +12,10 @@ const cache = new Map<string, ResolvedCommand>();
  * npm on Windows installs .cmd shims; we look behind them for the real exe / JS entry.
  */
 export function resolveCli(name: 'claude' | 'codex'): ResolvedCommand {
-  const hit = cache.get(name);
+  // Settings → Advanced first, then the environment variable, then the PATH. The cache is per override value.
+  const override = (name === 'claude' ? appConfig().claudeBin : appConfig().codexBin) || process.env[`PLEXUS_${name.toUpperCase()}_BIN`] || '';
+  const hit = cache.get(`${name}|${override}`);
   if (hit) return hit;
-  const override = process.env[`PLEXUS_${name.toUpperCase()}_BIN`];
   let out: ResolvedCommand | null = override ? { cmd: override, prefixArgs: [] } : null;
   if (!out) {
     const found = which(name);
@@ -30,7 +32,7 @@ export function resolveCli(name: 'claude' | 'codex'): ResolvedCommand {
     }
   }
   if (!out) throw new Error(`${name} CLI not found on PATH (set PLEXUS_${name.toUpperCase()}_BIN)`);
-  cache.set(name, out);
+  cache.set(`${name}|${override}`, out);
   return out;
 }
 
@@ -68,13 +70,15 @@ export interface StreamRunOptions {
   idleTimeoutMs?: number;
   signal?: AbortSignal;
   onLine?: (line: string) => void;
+  /** Checked after every stdout line (and its onLine): returning true stops the run with killedReason `budget`. */
+  stopWhen?: () => boolean;
 }
 
 export interface StreamRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
-  killedReason: 'timeout' | 'idle' | 'aborted' | null;
+  killedReason: 'timeout' | 'idle' | 'aborted' | 'budget' | null;
 }
 
 /**
@@ -117,6 +121,7 @@ export function runStreaming(o: StreamRunOptions): Promise<StreamRunResult> {
         const line = partial.slice(0, i).replace(/\r$/, '');
         partial = partial.slice(i + 1);
         if (line.trim()) try { o.onLine?.(line); } catch { /* listener errors must not kill the run */ }
+        if (o.stopWhen?.()) kill('budget');
       }
     });
     child.stderr!.on('data', (d: string) => { lastActivity = Date.now(); stderr += d; log?.write(`[stderr] ${d}`); });

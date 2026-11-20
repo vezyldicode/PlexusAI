@@ -19,7 +19,8 @@ import { runtime } from './runtime.ts';
 import { countByStatus, createTask, findTask, listTasks, shortId, updateTask } from './tasks.ts';
 import { orchestrator, pickAccount } from './orchestrator.ts';
 import { addWorktree, commitAll, git, hasCommitsAhead } from './util/git.ts';
-import { LANE_CTX_MAX, resumeWorthIt } from './worker.ts';
+import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
+import { appConfig } from './config.ts';
 
 /**
  * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
@@ -32,10 +33,11 @@ export function statusDigest(projectId: string, since?: string | null): StatusDi
     `${t.deps.length ? ` deps:${t.deps.map(d => d.split('-').pop()).join(',')}` : ''}${t.paths.length ? ` paths:${t.paths.slice(0, 4).join(',')}` : ''}${t.error ? ` — ${t.error.slice(0, 150)}` : ''}`;
   const accounts = listAccounts().map(a => `${a.id} (${a.provider}) ${a.enabled ? a.state : 'disabled'}${a.cooldownUntil ? ` until ${a.cooldownUntil}` : ''}` +
     `${a.quota?.primary ? ` 5h:${a.quota.primary.usedPercent ?? '?'}%` : ''}${a.quota?.secondary ? ` week:${a.quota.secondary.usedPercent ?? '?'}%` : ''} running:${a.running ?? 0}`).join('\n');
-  const evs = recentEvents(projectId, 30).filter(e => !since || e.createdAt > since);
+  const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !since || e.createdAt > since);
   const events = evs.map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
   const finished = tasks.filter(t => ['done', 'cancelled'].includes(t.status) && (!since || t.updatedAt > since));
-  const done = since ? finished : finished.filter(t => t.status === 'done').slice(-15);
+  const nDone = appConfig().digestDone;
+  const done = since ? finished : nDone ? finished.filter(t => t.status === 'done').slice(-nDone) : [];
   const doneLine = done.length ? `(${since ? 'finished since' : 'recently done'}) ${done.map(t => `${shortId(t)} [${t.status}] ${t.title}${t.result?.summary ? ` — ${t.result.summary.slice(0, 200)}` : ''}`).join('; ')}` : '';
   return {
     tasks: [...active.map(fmt), doneLine].filter(Boolean).join('\n') || '(no tasks yet)',
@@ -66,6 +68,27 @@ function soloLane(projectId: string): Task | null {
   return last && resumeWorthIt(last.cliCtxTokens, last.cliUsedAt) ? last : null;
 }
 
+/**
+ * The coordinator conversation a new single agent can fork (Claude only: Codex cannot copy a thread): the agent then
+ * starts with everything the coordinator read and discussed instead of re-reading the code. Only while that conversation
+ * is still cheap to continue. `turn` is the turn that just ended (its reply is not posted yet when its actions run).
+ */
+function coordinatorFork(projectId: string, sessionId: string | null | undefined, turn?: { ctx: number; at: string }): Partial<Task> | null {
+  if (!sessionId) return null;
+  const p = mustProject(projectId);
+  if (!p.settings.resumeSessions) return null;
+  let s; try { s = mustSession(sessionId); } catch { return null; }
+  if (!s.cliSessionId || !s.cliAccountId) return null;
+  const acct = getAccount(s.cliAccountId);
+  if (!acct || acct.provider !== 'claude') return null;
+  const last = turn ?? (() => {
+    const m = listMessages(projectId, 60, sessionId).filter(x => x.author === 'coordinator' && x.meta?.cli).at(-1);
+    return m ? { ctx: Number((m.meta?.tokens as any)?.lastCtx ?? 0), at: m.createdAt } : null;
+  })();
+  if (!last || !resumeWorthIt(last.ctx, last.at)) return null;
+  return { cliSessionId: s.cliSessionId, cliAccountId: acct.id, cliCtxTokens: last.ctx, cliUsedAt: last.at, cliForkCwd: p.path, lastAccountId: acct.id };
+}
+
 const accountRef = (ref: string) => {
   if (!ref || ref === 'auto') return null;
   const a = getAccount(ref) ?? listAccounts().find(x => x.label === ref);
@@ -74,7 +97,7 @@ const accountRef = (ref: string) => {
 };
 
 /** Apply coordinator / user actions. Returns human-readable summaries. */
-export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null): string[] {
+export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null, turn?: { ctx: number; at: string }): string[] {
   const p = mustProject(projectId);
   const done: string[] = [];
   const task = (ref: string) => { const t = findTask(projectId, ref); if (!t) throw new Error(`unknown task ${ref}`); return t; };
@@ -92,12 +115,16 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           break;
         }
         case 'solo_task': {
-          // One agent on the coordinator's model, outside the project pipeline. It continues the last single agent when
-          // that one is still cheap to resume (it knows the code already), unless asked for a fresh one.
-          const lane = a.fresh ? null : soloLane(projectId);
+          // One agent on the coordinator's model, outside the project pipeline. It forks the coordinator's conversation when
+          // it can (it knows what was just investigated and agreed); otherwise it continues the last single agent when that
+          // one is still cheap to resume (it knows the code already), unless asked for a fresh one.
           const pin = a.account ? accountRef(a.account) : null;
+          const fork = a.fresh ? null : coordinatorFork(projectId, sessionId, turn);
+          const forkOk = fork && (!pin || pin === fork.cliAccountId);
+          const lane = a.fresh || forkOk ? null : soloLane(projectId);
           const t = createTask(projectId, { title: a.title, description: a.description, role: 'solo', kind: 'solo', priority: 75, originSessionId: sessionId, adhoc: true, laneFrom: lane, pinnedAccountId: pin });
-          done.push(`${shortId(t)} "${t.title}" started (single agent${t.laneFrom && lane ? `, continuing ${shortId(lane)}'s conversation` : ''})`);
+          if (forkOk) updateTask(t.id, fork!, true);
+          done.push(`${shortId(t)} "${t.title}" started (single agent${forkOk ? ', continuing from this conversation' : t.laneFrom && lane ? `, continuing ${shortId(lane)}'s conversation` : ''})`);
           void orchestrator.tick();
           break;
         }
@@ -217,7 +244,7 @@ export function coordinatorTarget(p: Project) {
   const pinned = pinnedId ? pickAccount(p, fake, accounts.filter(a => a.id === pinnedId)) : null;
   const account = pinned ?? pickAccount(p, fake, accounts);
   const model = account ? p.settings.coordinatorModels?.[account.provider] || role.models[account.provider] : undefined;
-  const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] : undefined;
+  const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] || ROLE_EFFORT.coordinator : undefined;
   return { role, accounts, pinnedId, pinned, account, model, effort };
 }
 
@@ -253,9 +280,9 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const session = mustSession(sessionId);
   const mcp = coordinatorMcp(projectId, sessionId);
   const tools = !!mcp;
-  const lastReply = listMessages(projectId, 40, sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);
+  const lastReply = listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);
   const lastCtx = Number((lastReply?.meta?.tokens as any)?.lastCtx ?? 0);
-  const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, 40, sessionId).filter(m => m.id < userMsgId), text, tools);
+  const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text, tools);
   const deltaPrompt = () => buildCoordinatorTurnPrompt(p, statusDigest(projectId, lastReply?.createdAt ?? null),
     messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
   const attempt = (resumeId: string | undefined, tag: string) => {
@@ -268,7 +295,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
     return adapterFor(account.provider).run({
       account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
-      mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: 5 * 60_000, logPath,
+      mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: appConfig().chatIdleTimeoutMin * 60_000, logPath,
     });
   };
 
@@ -276,7 +303,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: true, sessionId }, false);
   try {
     const sameCli = session.cliSessionId && session.cliAccountId === account.id;
-    const tooBig = lastCtx > LANE_CTX_MAX;
+    const tooBig = lastCtx > appConfig().chatCtxMaxK * 1000;
     const resumeId = sameCli && !tooBig ? session.cliSessionId! : undefined;
     let out = await attempt(resumeId, resumeId ? '-resume' : '');
     // The CLI no longer knows the conversation (purged, other machine...): start over from this session's history.
@@ -294,7 +321,8 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
       say('coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, meta);
       return;
     }
-    const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId);
+    const turn = usable && out.sessionId ? { ctx: out.usage?.lastCtx ?? 0, at: now() } : undefined;
+    const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId, turn);
     meta.applied = applied;
     if (parsed.proposal?.actions.length) meta.proposal = { ...parsed.proposal, status: 'pending' };
     say('coordinator', parsed.reply, meta);

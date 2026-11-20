@@ -1,4 +1,4 @@
-import type { Account, ModelInfo, Provider, QuotaSnapshot, TokenUsage } from '../../shared/types.ts';
+import type { Account, ModelInfo, Provider, QuotaSnapshot, RunTiming, TokenUsage } from '../../shared/types.ts';
 
 export type RunState = 'ok' | 'warning' | 'limited' | 'transient' | 'needs_login' | 'blocked' | 'task_error';
 
@@ -27,6 +27,10 @@ export interface RunSpec {
   autocompact?: number;
   /** Continue this provider CLI conversation instead of starting one (the prompt then only carries what is new). */
   resumeId?: string;
+  /** With resumeId: continue a copy of that conversation under a new id (Claude --fork-session); the original stays as it was. */
+  forkSession?: boolean;
+  /** Stop the run (killedReason `budget`) once the CLI compacted the context this many times (0/undefined: no limit). */
+  maxCompactions?: number;
   timeoutMs: number;
   idleTimeoutMs: number;
   logPath: string;
@@ -40,7 +44,9 @@ export interface RunOutcome {
   finalText: string;
   classification: Classification;
   quota: QuotaSnapshot | null;
-  killedReason: 'timeout' | 'idle' | 'aborted' | null;
+  killedReason: 'timeout' | 'idle' | 'aborted' | 'budget' | null;
+  /** Where the run's time went (waitMs is filled in by the caller). */
+  timing?: RunTiming | null;
   /** Tokens this invocation spent (null when the CLI reported none). */
   usage: TokenUsage | null;
   /** Provider CLI conversation id of this run (claude session_id / codex thread_id), for a later resume. */

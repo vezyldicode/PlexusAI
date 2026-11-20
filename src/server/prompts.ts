@@ -4,7 +4,8 @@ import type { Account, ChatMessage, Project, Role, Task } from '../shared/types.
 import { appRoot, paths } from './paths.ts';
 import { CONTEXT_DIR, laneNotes, profileFor, PROFILES, projectContext } from './context.ts';
 import { readDecisions, readMemory } from './projects.ts';
-import { getTask, shortId } from './tasks.ts';
+import { getTask, isUserFollowUp, shortId } from './tasks.ts';
+import { appConfig } from './config.ts';
 
 export const TASK_DIR = '.plexus-task';
 export const RESULT_FILE = `${TASK_DIR}/result.json`;
@@ -146,8 +147,14 @@ export function buildResumePrompt(p: Project, t: Task, role: Role, progress: str
     : t.laneFrom
       ? 'This is new work in the same worktree (re-created from the main branch, which now contains your earlier merged work). Do only what this step asks.'
       : 'Do only what this step asks.';
+  // A message the user typed to a finished agent may be a question ("why so slow?"), not more work.
+  const fromUser = isUserFollowUp(t)
+    ? `\nThe user wrote the step below directly to you. If it is a question or a remark (about your work, its speed, a result)
+rather than a request for more work, answer it in \`summary\` with status "done" and change nothing; do not pick up
+unfinished earlier work unless the message asks for it.`
+    : '';
   return [
-    `# NEXT STEP IN THIS CONVERSATION\nYou are continuing in the same worktree and conversation as before, now as the ${role.name}. The rules, project\ncontext and your earlier work above still apply. ${how}`,
+    `# NEXT STEP IN THIS CONVERSATION\nYou are continuing in the same worktree and conversation as before, now as the ${role.name}. The rules, project\ncontext and your earlier work above still apply. ${how}${fromUser}`,
     t.kind === 'ingest' ? `## Goal (may have changed)\n${readMemory(p, 'goal.md') || p.goal || '(see documentation)'}` : '',
     directives ? `## Directives from the user (must be followed)\n${directives}` : '',
     newDecisions(p, t.cliUsedAt),
@@ -159,12 +166,49 @@ export function buildResumePrompt(p: Project, t: Task, role: Role, progress: str
   ].filter(Boolean).join('\n\n');
 }
 
+/**
+ * First prompt of a task that forks the coordinator's conversation: the coordinator already read the code and discussed
+ * the request with the user, so the agent starts with that knowledge. Its rules and role were not in that conversation
+ * (the coordinator has its own), so they come here, with the task and the output contract; the project context does not.
+ */
+export function buildForkPrompt(p: Project, t: Task, role: Role, system: string): string {
+  const directives = readMemory(p, 'directives.md').trim();
+  return [
+    `# YOU ARE NOW THE AGENT DOING THE WORK
+The conversation above was the coordinator's chat with the user. You continue it as a separate agent: you are no longer
+the coordinator, you have no plexus tools, and your reply is not shown in the chat. You work in a new git worktree (the
+current directory, branch ${t.branch ?? '(see TASK)'}, created from ${p.mainBranch}); the project folder you saw above is
+not yours to edit. Use what you already learned above (files, causes, decisions) instead of searching again.`,
+    system,
+    directives ? `## Directives from the user (must be followed)\n${directives}` : '',
+    taskSection(p, t),
+    inboxSection(t),
+    `${outputContract(t.kind)}\n${DECISION_SCOPE}`,
+    metaBlock(role, t),
+  ].filter(Boolean).join('\n\n');
+}
+
+/** The turn Plexus sends after stopping a run whose context was compacted too often: checkpoint, report, stop. */
+export function buildCheckpointPrompt(t: Task, role: Role, compactions: number): string {
+  const rest = t.kind === 'solo' ? ', or `escalate` when the rest splits into independent parts' : '';
+  return `# STOP: CONTEXT BUDGET SPENT
+Plexus stopped you: your context was compacted ${compactions} times in this run, so this work is larger than one session.
+Do not start anything new. Now, in a few steps:
+1. Make sure what you have is committed (finish or revert a half-done edit so the branch builds; run only the quick tests
+   that cover what you changed).
+2. Update \`${PROGRESS_FILE}\`: what is done, what is left, where you stopped.
+3. Write \`${RESULT_FILE}\` with status "partial" (or "done" if it is in fact done): what you did, and the remaining work
+   as \`follow_up_tasks\` (each a coherent slice with its files)${rest}. End your reply with the same JSON.
+
+${metaBlock(role, t)}`;
+}
+
 export interface StatusDigest { tasks: string; accounts: string; events: string; counts: string }
 
 const COORDINATOR_META = `<!-- plexus-meta\nrole: coordinator\nkind: coordinator\ntask_id: chat\nresult_file: none\n-->`;
 const statusSection = (p: Project, status: StatusDigest, title = 'STATUS') =>
   `# ${title}\nProject status: ${p.status} · phase: ${p.phase}\nTask counts: ${status.counts}\n\n## Tasks\n${status.tasks}\n\n## Accounts\n${status.accounts}\n\n## Recent events\n${status.events}`;
-const fmtMsg = (m: ChatMessage) => `[${m.author}] ${head(m.text, 1500)}`;
+const fmtMsg = (m: ChatMessage) => `[${m.author}] ${head(m.text, appConfig().chatMessageChars)}`;
 
 /** Where things are and how the coordinator acts: with the plexus tools when the CLI loaded them, else with JSON actions. */
 function coordinatorGuide(p: Project, tools: boolean): string {
@@ -180,7 +224,9 @@ plexus_main_begin / plexus_main_commit(message) · plexus_workspace / plexus_wor
   never edit the main checkout while a task merges), edit, then plexus_main_commit. Larger change: plexus_workspace gives you
   your own worktree; work there and finish with plexus_workspace_merge. Never edit files that a running task lists in its paths.
 - Bigger work: one agent with solo_task; to give more work to an agent that already has the context, continue_task (same
-  conversation and worktree, no re-reading). Talk to an agent with send_message.`
+  conversation and worktree, no re-reading). Talk to an agent with send_message. A solo_task on your own Claude account
+  continues a copy of this conversation, so what you read here is not read again: look at the relevant code before you
+  hand the work over, and keep the description short.`
     : `The plexus tools are not available in this run: act through the JSON actions below. You may still read files and logs.`;
   return `# HOW YOU WORK
 ${where}
@@ -197,14 +243,14 @@ export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, new
   return [
     COORDINATOR_META,
     statusSection(p, status, 'STATUS (changes since your last reply)'),
-    news.length ? `# NEW SINCE YOUR LAST REPLY\n${news.slice(-20).map(fmtMsg).join('\n')}` : '',
+    news.length ? `# NEW SINCE YOUR LAST REPLY\n${news.slice(-appConfig().chatHistoryMessages).map(fmtMsg).join('\n')}` : '',
     `USER MESSAGE:\n${userText}\n---`,
     tools ? 'Use the plexus tools to look things up and act; answer with the OUTPUT JSON as before.' : COORDINATOR_OUTPUT,
   ].filter(Boolean).join('\n\n');
 }
 
 export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string, tools = false): string {
-  const hist = history.slice(-20).map(fmtMsg).join('\n');
+  const hist = history.slice(-appConfig().chatHistoryMessages).map(fmtMsg).join('\n');
   const ctx = projectContext(p, PROFILES.coordinator, null);
   return [
     COORDINATOR_META,
@@ -227,8 +273,12 @@ End with ONLY one JSON object (no prose after it):
 "actions" are applied after your reply. Do not repeat here what you already did with the plexus tools.
 Action types:
 {"type":"pause"} {"type":"resume"} {"type":"stop"}
-{"type":"solo_task","title":"...","description":"everything the agent needs: what to change, where, how to verify","account":"optional account id"}
+{"type":"solo_task","title":"...","description":"what to change, where (files, functions, the cause you found), and 2-5 checks that say it is done","account":"optional account id"}
   → ONE agent (your model, own worktree, tests, self-review, merge). Runs even when the project is idle, paused or finished.
+  Scope = exactly what the user asked. Never add features, platforms, formats or verification steps the user did not ask
+  for (they multiply the time and quota of the run); offer them in "reply" as optional follow-ups instead. A broad or
+  ambiguous request ("remove all limits", "make it better"): say how you read it and put the narrow reading in "proposal".
+  When the work is clearly larger than one session, start a first slice and name the rest.
 {"type":"continue_task","task_id":"T5","instructions":"what to do next"}
   → more work for the agent that did T5, in its conversation and worktree: cheapest when it already knows the code.
 {"type":"send_message","task_id":"T5","text":"..."} → delivered to that agent at the start of its next run.

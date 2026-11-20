@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api, clock, timeAgo } from '../api.ts';
 import type { ProjectDetail, Plexus } from '../store.ts';
-import type { Account, ChatMessage, ChatSession, Project, Provider, Role, Task, TaskModelInfo, TokenUsage } from '../types.ts';
+import type { Account, ChatMessage, ChatSession, Project, Provider, Role, RunTiming, Task, TaskModelInfo, TokenUsage } from '../types.ts';
 import { ContextMenu, Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens } from '../ui.tsx';
 import { useStored } from '../layout.tsx';
 import { COORDINATOR } from '../network/layout.ts';
@@ -359,7 +359,7 @@ function TokenStat({ total, runs, run }: { total: TokenUsage; runs: number; run?
   );
 }
 
-const FROM: Record<TaskModelInfo['modelFrom'], string> = { task: 'set for this task', coordinator: 'coordinator setting', role: 'role default', default: 'CLI default' };
+const FROM: Record<TaskModelInfo['modelFrom'], string> = { task: 'set for this task', coordinator: 'coordinator setting', role: 'role default', plexus: 'Plexus default for the role', default: 'CLI default' };
 
 /** Account, model and effort for one task: what its next run (or its continuation) uses. Disabled while it runs. */
 function AgentPicker({ task, info, accounts, catalog, onError, reload, onClose }: {
@@ -428,11 +428,12 @@ function PromptToggle({ url, chars, note }: { url: string; chars: number; note?:
   );
 }
 
-interface TurnRow { resuming: string | null; at: string | null; promptChars: number; messages: string[]; events: { kind: string; text: string }[] }
-interface RunTurns { id: number; accountId: string; startedAt: string; endedAt: string | null; outcome: string | null; usage?: TokenUsage | null; model: string | null; effort: string | null; reason: string | null; turns: TurnRow[] }
+interface TurnRow { kind?: 'checkpoint' | 'fork' | null; resuming: string | null; at: string | null; promptChars: number; messages: string[]; events: { kind: string; text: string }[] }
+interface RunTurns { id: number; accountId: string; startedAt: string; endedAt: string | null; outcome: string | null; usage?: TokenUsage | null; model: string | null; effort: string | null; reason: string | null; timing?: RunTiming | null; turns: TurnRow[] }
 
 /** What a turn asked the agent, in words: the task, the messages delivered with it, or why it ran again. */
 function askOf(task: Task, run: RunTurns, ri: number, x: TurnRow, ti: number): string {
+  if (x.kind === 'checkpoint') return 'Context budget spent (compacted too often): commit, note what is left and report';
   if (ri === 0 && ti === 0) return task.description || task.title;
   if (x.messages.length) return x.messages.join('\n');
   if (ti > 0) return 'The earlier conversation could not be resumed: starting a new one';
@@ -521,7 +522,7 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
                 <div className="ask">
                   <div className="msg m-user"><div className="msg-text">{askOf(task, run, ri, x, ti)}</div></div>
                   {x.promptChars > 0 && <PromptToggle url={`/api/tasks/${task.id}/prompt?run=${run.id}&turn=${ti}`} chars={x.promptChars}
-                    note={x.resuming ? 'resumed' : 'new conversation'} />}
+                    note={x.kind === 'fork' ? "continues the coordinator's conversation" : x.resuming ? 'resumed' : 'new conversation'} />}
                 </div>
                 {x.events.map((e, i) => {
                   if (e.kind !== 'text') return <div key={i} className={`evt k-${e.kind}`}><span className="evt-kind">{e.kind === 'tool' ? 'tool' : 'status'}</span><span className="evt-text">{e.text}</span></div>;
@@ -541,6 +542,7 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
                 <span className="evt-text">{[run.outcome ?? 'ended', run.accountId, run.model, run.effort, run.usage ? `${fmtTokens(run.usage.total)} tokens` : '', run.outcome !== 'success' ? run.reason : ''].filter(Boolean).join(' · ')}</span>
               </div>
             )}
+            {run.endedAt && run.timing && <RunTimeBar t={run.timing} />}
           </div>
         ))}
         {isRunning && <div className="msg m-agent"><div className="typing live"><span /><span /><span /></div></div>}
@@ -565,7 +567,7 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
       <div className="composer">
         {picking && info && <AgentPicker task={task} info={info} accounts={accounts} catalog={catalog} onError={onError} reload={reload} onClose={closePicker} />}
         <textarea value={text} rows={3}
-          placeholder={finished ? 'More work for this agent' : task.status === 'blocked' ? 'Answer the agent, it waits for this' : 'Message for this agent, delivered with its next run'}
+          placeholder={finished ? 'More work or a question for this agent (it continues its own conversation)' : task.status === 'blocked' ? 'Answer the agent, it waits for this' : 'Message for this agent, delivered with its next run'}
           onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <div className="composer-bar">
           <button className="coord-chip" aria-expanded={picking} disabled={!info?.editable} onClick={() => setPicking(v => !v)} title={chipTitle}>
@@ -578,6 +580,32 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
             title={finished ? 'Continue this agent (Enter). Shift + Enter for a new line' : 'Send (Enter). Shift + Enter for a new line'}><Ic i={ArrowUp} /></button>
         </div>
       </div>
+    </div>
+  );
+}
+
+const dur = (ms: number) => {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+};
+
+/** Where a run's time went: one bar (startup, model, tools, compaction) and the numbers, plus how long it waited to start. */
+function RunTimeBar({ t }: { t: RunTiming }) {
+  const parts = [
+    { k: 'startup', v: t.startupMs, label: 'startup' },
+    { k: 'model', v: t.modelMs, label: 'model' },
+    { k: 'tools', v: t.toolMs, label: `tools (${t.toolCalls})` },
+    { k: 'compact', v: t.compactMs, label: `compaction (${t.compactions}×)` },
+  ].filter(p => p.v > 0 || (p.k === 'compact' && t.compactions > 0));
+  const total = Math.max(1, t.totalMs);
+  const text = [`${dur(t.totalMs)}`, ...parts.map(p => `${p.label} ${dur(p.v)}`), t.waitMs >= 1000 ? `waited ${dur(t.waitMs)} before start` : ''].filter(Boolean).join(' · ');
+  return (
+    <div className="evt k-status run-time" title="Where this run's time went. Model = the model reading and writing (thinking included); tools = commands and file operations; waited = time the task waited for this run (dependencies, a free account, approval)">
+      <span className="evt-kind">time</span>
+      <span className="evt-text">
+        <span className="tbar">{parts.map(p => <span key={p.k} className={`tbar-${p.k}`} style={{ width: `${(p.v / total) * 100}%` }} />)}</span>
+        {text}
+      </span>
     </div>
   );
 }

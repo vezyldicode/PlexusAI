@@ -8,13 +8,16 @@ import { effortForRun } from './models.ts';
 import { bus } from './events.ts';
 import { ensure, paths } from './paths.ts';
 import { writeContextFiles } from './context.ts';
-import { buildResumePrompt, buildTaskParts, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
+import { buildCheckpointPrompt, buildForkPrompt, buildResumePrompt, buildTaskParts, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { materializeSkills } from './skills.ts';
 import { finishRun, getTask, listRuns, setRunModel, shortId, startRun, updateTask } from './tasks.ts';
 import { addUsage } from './usage.ts';
 import { addWorktree, commitAll, diffStat, ensureRepo, git } from './util/git.ts';
 import { postMessage, updateProject, writeHandoff } from './projects.ts';
+import { appConfig } from './config.ts';
+import { addTiming } from './adapters/timing.ts';
+import { forkClaudeConversation } from './adapters/claude-fork.ts';
 
 /**
  * Resume a CLI conversation only while that is cheaper than a fresh start with the hand-off notes: every later call
@@ -27,13 +30,30 @@ const LANE_COLD_CTX_MAX = 40_000;
 
 type From = TaskModelInfo['modelFrom'];
 
-/** Model and effort a task runs with on a provider: its own override, the coordinator's (single-agent work), the role's. */
+/** No-output timeout of a run: the role's max runtime, kept within Settings → Scheduler's bounds. */
+export function idleTimeoutMin(maxRuntimeMin: number): number {
+  const c = appConfig();
+  const lo = Math.min(c.idleTimeoutMinMin, c.idleTimeoutMaxMin), hi = Math.max(c.idleTimeoutMinMin, c.idleTimeoutMaxMin);
+  return Math.max(lo, Math.min(hi, maxRuntimeMin));
+}
+
+/**
+ * Plexus's effort per built-in role when nothing else sets one. Without it every run used the CLI's default (often high
+ * on the strongest model), so a planner or a reviewer thought as long as a hard implementation step. Moderate by default;
+ * the architect, whose choices every later task builds on, gets more. A model that lacks the effort ignores it (models.ts).
+ */
+export const ROLE_EFFORT: Record<string, string> = {
+  coordinator: 'medium', analyst: 'medium', architect: 'high', planner: 'medium', solo: 'medium', implementer: 'medium',
+  reviewer: 'medium', qa: 'low', integrator: 'medium', evaluator: 'medium', librarian: 'low',
+};
+
+/** Model and effort a task runs with on a provider: its own override, the coordinator's (single-agent work), the role's, Plexus's default. */
 export function taskModelChoice(p: Project, t: Task, role: Role, prov: Provider): { model: string | undefined; effort: string | undefined; modelFrom: From; effortFrom: From } {
   const solo = t.kind === 'solo';
-  const pick = (own: string | undefined, coord: string | undefined, fromRole: string | undefined): [string | undefined, From] =>
-    own ? [own, 'task'] : solo && coord ? [coord, 'coordinator'] : fromRole ? [fromRole, 'role'] : [undefined, 'default'];
+  const pick = (own: string | undefined, coord: string | undefined, fromRole: string | undefined, plexus?: string): [string | undefined, From] =>
+    own ? [own, 'task'] : solo && coord ? [coord, 'coordinator'] : fromRole ? [fromRole, 'role'] : plexus ? [plexus, 'plexus'] : [undefined, 'default'];
   const [model, modelFrom] = pick(t.models?.[prov], p.settings.coordinatorModels?.[prov], role.models[prov]);
-  const [effort, effortFrom] = pick(t.efforts?.[prov], p.settings.coordinatorEfforts?.[prov], role.efforts?.[prov]);
+  const [effort, effortFrom] = pick(t.efforts?.[prov], p.settings.coordinatorEfforts?.[prov], role.efforts?.[prov], ROLE_EFFORT[role.name]);
   return { model, effort, modelFrom, effortFrom };
 }
 
@@ -54,10 +74,17 @@ export function taskModelInfo(p: Project, t: Task): TaskModelInfo {
   };
 }
 
+/** The thresholds in use (Settings → Context); the constants above are their defaults. */
+export function laneLimits() {
+  const c = appConfig();
+  return { ctxMax: c.laneCtxMaxK * 1000, idleMaxMs: c.laneIdleMaxMin * 60_000, coldCtxMax: c.laneColdCtxMaxK * 1000 };
+}
+
 export function resumeWorthIt(ctx: number, usedAt: string | null): boolean {
-  if (ctx > LANE_CTX_MAX) return false;
+  const l = laneLimits();
+  if (ctx > l.ctxMax) return false;
   const idle = usedAt ? Date.now() - Date.parse(usedAt) : 0;
-  return idle <= LANE_IDLE_MAX_MS || ctx <= LANE_COLD_CTX_MAX;
+  return idle <= l.idleMaxMs || ctx <= l.coldCtxMax;
 }
 
 export interface AttemptOutcome {
@@ -147,6 +174,10 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
   const logDir = ensure(join(paths.logs, p.id));
   // One log per run: an interrupted run and the next one of the same attempt must not share (and overwrite) a file.
   const logPath = join(logDir, `${shortId(task)}-r${listRuns(task.id).length + 1}-${account.id}.log`);
+  // How long the task waited for this run: since it was created, or since its previous run ended (dependencies, a free
+  // account, an approval, a pause).
+  const prevEnd = listRuns(task.id).map(r => r.endedAt).filter((x): x is string => !!x).sort().at(-1);
+  const waitMs = Math.max(0, Date.now() - Date.parse(prevEnd && prevEnd > task.createdAt ? prevEnd : task.createdAt));
   const runId = startRun(task.id, account.id, logPath);
   let wt = '';
   try {
@@ -164,7 +195,7 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
     setRunModel(runId, model ?? null, eff.effort ?? null);
     if (eff.warning) bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: 'status', text: eff.warning }, false);
 
-    const run = (prompt: string, resumeId: string | undefined, note: string, system?: string) => {
+    const run = (prompt: string, resumeId: string | undefined, note: string, system?: string, opts: { fork?: boolean; budget?: boolean } = {}) => {
       appendFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})
 ${system ? `${system}\n\n` : ''}${prompt}
 
@@ -172,7 +203,8 @@ ${system ? `${system}\n\n` : ''}${prompt}
 ${note}`);
       return adapter.run({
         account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, autocompact: p.settings.autocompactTokens,
-        timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: Math.max(10, Math.min(30, role.maxRuntimeMin)) * 60_000,
+        forkSession: opts.fork, maxCompactions: opts.budget === false ? 0 : p.settings.maxCompactions,
+        timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: idleTimeoutMin(role.maxRuntimeMin) * 60_000,
         logPath, signal: ctl.signal,
         onEvent: e => bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: e.kind, text: e.text.slice(0, 2000) }, false),
       });
@@ -180,24 +212,49 @@ ${note}`);
     writeFileSync(logPath, '');
     const warn = eff.warning ? `[plexus] ${eff.warning}
 ` : '';
-    const resumeId = resumableSession(p, task, account);
+    let resumeId = resumableSession(p, task, account);
+    // The coordinator's conversation (held in the project folder): fork it into this worktree so the agent starts with
+    // what the coordinator already read and decided, instead of re-reading the code from scratch.
+    let fork = false;
+    if (resumeId && task.cliForkCwd) {
+      fork = account.provider === 'claude' && forkClaudeConversation(account.home, task.cliForkCwd, wt, resumeId);
+      if (!fork) resumeId = undefined;
+    }
     const started = Date.now();
     const cold = () => buildTaskParts(p, task, role, account, progress, skills);
     // Messages for the agent are delivered with this run's prompt, once.
     const delivered = task.inbox.length;
     let out: Awaited<ReturnType<typeof run>>;
-    if (resumeId) out = await run(buildResumePrompt(p, task, role, progress), resumeId, warn);
+    if (fork && resumeId) {
+      const parts = buildTaskParts(p, task, role, account, progress, skills);
+      out = await run(buildForkPrompt(p, task, role, parts.system), resumeId, `${warn}[plexus] continuing the coordinator's conversation (forked)
+`, undefined, { fork: true });
+    } else if (resumeId) out = await run(buildResumePrompt(p, task, role, progress), resumeId, warn);
     else { const c = cold(); out = await run(c.prompt, undefined, warn, c.system); }
     if (delivered) updateTask(task.id, { inbox: getTask(task.id)!.inbox.slice(delivered) }, true);
     // The CLI no longer knows the conversation (purged, other machine...): start cold, in the same attempt.
-    if (resumeId && !out.killedReason && out.classification.state === 'task_error' && Date.now() - started < 90_000 && !readResult(wt, out.finalText)) {
+    if (resumeId && !out.killedReason && out.classification.state === 'task_error' && Date.now() - started < appConfig().resumeFailWindowSec * 1000 && !readResult(wt, out.finalText)) {
       const failed = out.usage;
       const c = cold();
+      const failedTiming = out.timing;
       out = await run(c.prompt, undefined, `[plexus] resuming ${resumeId} failed; starting a new conversation
 `, c.system);
       out.usage = addUsage(failed, out.usage); // the failed resume spent tokens too
+      out.timing = addTiming(failedTiming, out.timing);
     }
-    if (out.sessionId) updateTask(task.id, { cliSessionId: out.sessionId, cliAccountId: account.id, cliCtxTokens: out.usage?.lastCtx ?? 0, cliUsedAt: now() }, true);
+    // Context budget spent (compacted again and again): the work is larger than one session. One short turn in the same
+    // conversation has the agent commit, write down what is left and report `partial`, instead of running for hours.
+    if (out.killedReason === 'budget' && out.sessionId) {
+      const before = out;
+      rmSync(join(wt, RESULT_FILE), { force: true }); // a result written before the stop is not the final one
+      out = await run(buildCheckpointPrompt(task, role, before.timing?.compactions ?? p.settings.maxCompactions), before.sessionId, `[plexus] context compacted ${before.timing?.compactions ?? '?'} times: asking the agent to checkpoint and report
+`, undefined, { budget: false });
+      out.usage = addUsage(before.usage, out.usage);
+      out.timing = addTiming(before.timing, out.timing);
+      out.sessionId = out.sessionId ?? before.sessionId;
+    }
+    if (out.sessionId) updateTask(task.id, { cliSessionId: out.sessionId, cliAccountId: account.id, cliCtxTokens: out.usage?.lastCtx ?? 0, cliUsedAt: now(), cliForkCwd: null }, true);
+    else if (task.cliForkCwd) updateTask(task.id, { cliForkCwd: null }, true);
     applyClassification(account.id, out.classification, out.quota);
     const result = readResult(wt, out.finalText);
     const c = out.classification;
@@ -206,7 +263,7 @@ ${note}`);
     let outcome: AttemptOutcome;
     if (out.killedReason === 'aborted') outcome = { outcome: 'interrupted', result: null, classification: c, reason: 'stopped by user' };
     else if (accountProblem && !result) outcome = { outcome: 'interrupted', result: null, classification: c, reason: `account ${account.id} ${c.state}: ${c.evidence.join('; ') || c.reason}` };
-    else if (out.killedReason) outcome = { outcome: 'interrupted', result, classification: c, reason: `killed: ${out.killedReason}` };
+    else if (out.killedReason) outcome = { outcome: 'interrupted', result, classification: c, reason: out.killedReason === 'budget' ? 'context budget spent (compacted too often) and no checkpoint was possible' : `killed: ${out.killedReason}` };
     else if (!result) outcome = { outcome: 'interrupted', result: null, classification: c, reason: `no result produced (${c.reason}${out.finalText ? ': ' + out.finalText.slice(0, 300) : ''})` };
     // An analyst that found the docs insufficient did its job (whatever status it chose): Plexus asks the user.
     else if (task.kind === 'ingest' && result.docs_check?.sufficient === false) outcome = { outcome: 'success', result, classification: c, reason: 'ok' };
@@ -214,7 +271,7 @@ ${note}`);
     else if (result.status === 'failed') outcome = { outcome: 'failed', result, classification: c, reason: `failed: ${result.summary}` };
     else outcome = { outcome: 'success', result, classification: c, reason: 'ok' };
 
-    finishRun(runId, outcome.outcome, { ...c, reason: outcome.reason }, out.exitCode, out.usage);
+    finishRun(runId, outcome.outcome, { ...c, reason: outcome.reason }, out.exitCode, out.usage, out.timing ? { ...out.timing, waitMs } : null);
     keepNotes(p, task, wt, result);
     if (outcome.outcome !== 'success') await preserveWork(p, task, wt, account, outcome.reason);
     return outcome;

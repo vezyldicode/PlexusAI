@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import type { AgentResult, Run, Task, TaskKind, TaskStatus, TokenUsage } from '../shared/types.ts';
+import type { AgentResult, Run, Task, TaskKind, TaskStatus, TokenUsage, RunTiming } from '../shared/types.ts';
 import { getDb, json, now } from './db.ts';
 import { bus } from './events.ts';
 
@@ -11,7 +11,7 @@ function rowToTask(r: any): Task {
     reviewCycles: r.review_cycles, acceptance: json(r.acceptance, []), acIds: json(r.ac_ids, []), result: json<AgentResult | null>(r.result, null), error: r.error,
     models: json(r.models, {}), efforts: json(r.efforts, {}), paths: json(r.paths, []), originSessionId: r.origin_session_id ?? null,
     adhoc: !!r.adhoc, cliSessionId: r.cli_session_id ?? null, cliAccountId: r.cli_account_id ?? null,
-    cliCtxTokens: r.cli_ctx_tokens ?? 0, cliUsedAt: r.cli_used_at ?? null, pinnedAccountId: r.pinned_account_id ?? null,
+    cliCtxTokens: r.cli_ctx_tokens ?? 0, cliUsedAt: r.cli_used_at ?? null, cliForkCwd: r.cli_fork_cwd ?? null, pinnedAccountId: r.pinned_account_id ?? null,
     laneFrom: r.lane_from ?? null, inbox: json(r.inbox, []), createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -51,6 +51,10 @@ export function normAcIds(ids: string[]): string[] {
 
 export const shortId = (t: Pick<Task, 'seq'>) => `T${t.seq}`;
 
+/** Title of a task made from what the user typed to a finished agent (may be a question, not more work). */
+export const USER_FOLLOW_UP = 'From user to ';
+export const isUserFollowUp = (t: Pick<Task, 'title' | 'laneFrom'>) => !!t.laneFrom && t.title.startsWith(USER_FOLLOW_UP);
+
 export function createTask(projectId: string, t: {
   title: string; description?: string; role: string; kind: TaskKind; deps?: string[]; parentId?: string | null;
   branch?: string | null; worktree?: string | null; priority?: number; acceptance?: string[]; acIds?: string[]; authorAccountId?: string | null; reviewCycles?: number; paths?: string[];
@@ -86,7 +90,7 @@ const COLS: Record<string, string> = {
   title: 'title', description: 'description', role: 'role', status: 'status', deps: 'deps', branch: 'branch', worktree: 'worktree',
   priority: 'priority', attempts: 'attempts', accountId: 'account_id', lastAccountId: 'last_account_id', authorAccountId: 'author_account_id',
   reviewCycles: 'review_cycles', result: 'result', error: 'error', acceptance: 'acceptance', acIds: 'ac_ids', models: 'models', efforts: 'efforts', paths: 'paths',
-  cliSessionId: 'cli_session_id', cliAccountId: 'cli_account_id', cliCtxTokens: 'cli_ctx_tokens', cliUsedAt: 'cli_used_at',
+  cliSessionId: 'cli_session_id', cliAccountId: 'cli_account_id', cliCtxTokens: 'cli_ctx_tokens', cliUsedAt: 'cli_used_at', cliForkCwd: 'cli_fork_cwd',
   pinnedAccountId: 'pinned_account_id', laneFrom: 'lane_from', inbox: 'inbox',
 };
 
@@ -103,7 +107,7 @@ export function laneFields(prev: Task): Partial<Task> | null {
   const keepBranch = existsSync(prev.worktree) && prev.branch ? { branch: prev.branch } : {};
   return {
     ...keepBranch, laneFrom: prev.id, worktree: prev.worktree, cliSessionId: prev.cliSessionId, cliAccountId: prev.cliAccountId,
-    cliCtxTokens: prev.cliCtxTokens, cliUsedAt: prev.cliUsedAt, lastAccountId: prev.cliAccountId ?? prev.lastAccountId,
+    cliCtxTokens: prev.cliCtxTokens, cliUsedAt: prev.cliUsedAt, cliForkCwd: prev.cliForkCwd, lastAccountId: prev.cliAccountId ?? prev.lastAccountId,
   };
 }
 
@@ -151,15 +155,15 @@ export function setRunModel(id: number, model: string | null, effort: string | n
   getDb().prepare('UPDATE runs SET model = ?, effort = ? WHERE id = ?').run(model, effort, id);
 }
 
-export function finishRun(id: number, outcome: string, classification: unknown, exitCode: number | null, usage: TokenUsage | null = null): void {
-  getDb().prepare('UPDATE runs SET ended_at = ?, outcome = ?, classification = ?, exit_code = ?, usage = ? WHERE id = ?')
-    .run(now(), outcome, JSON.stringify(classification), exitCode, JSON.stringify(usage), id);
+export function finishRun(id: number, outcome: string, classification: unknown, exitCode: number | null, usage: TokenUsage | null = null, timing: RunTiming | null = null): void {
+  getDb().prepare('UPDATE runs SET ended_at = ?, outcome = ?, classification = ?, exit_code = ?, usage = ?, timing = ? WHERE id = ?')
+    .run(now(), outcome, JSON.stringify(classification), exitCode, JSON.stringify(usage), timing ? JSON.stringify(timing) : null, id);
 }
 
 export function listRuns(taskId: string): Run[] {
   return (getDb().prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY id').all(taskId) as any[]).map(r => ({
     id: r.id, taskId: r.task_id, accountId: r.account_id, startedAt: r.started_at, endedAt: r.ended_at, outcome: r.outcome,
     classification: json(r.classification, null), logPath: r.log_path, exitCode: r.exit_code, usage: json<TokenUsage | null>(r.usage, null),
-    model: r.model ?? null, effort: r.effort ?? null,
+    model: r.model ?? null, effort: r.effort ?? null, timing: json<RunTiming | null>(r.timing, null),
   }));
 }

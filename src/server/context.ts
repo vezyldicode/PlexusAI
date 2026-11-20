@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { Project, Task, TaskKind } from '../shared/types.ts';
 import { acMark, handoffDir, readAcceptance, readDecisions, readHandoff, readMemory, type AcceptanceItem, type DecisionEntry } from './projects.ts';
 import { getTask, normAcIds, pathsOverlap, shortId } from './tasks.ts';
+import { appConfig } from './config.ts';
 
 export const CONTEXT_DIR = '.plexus-task/context';
 
@@ -50,7 +51,12 @@ export function profileFor(t: Task): ContextProfile {
   return PROFILES[t.kind] ?? PROFILES.custom;
 }
 
-const LIMITS = { brief: 12_000, summary: 1_800, acceptance: 8_000, decisionsFull: 8_000, decisionsRelevant: 4_000, indexTitles: 80, issues: 3_000, taskIssues: 1_500, codemap: 4_000 };
+/** Characters of each memory file in a prompt (Settings → Context). */
+const limits = () => {
+  const c = appConfig();
+  return { brief: c.briefChars, summary: c.summaryChars, acceptance: c.acceptanceChars, decisionsFull: c.decisionsFullChars, decisionsRelevant: c.decisionsRelevantChars,
+    indexTitles: c.decisionTitles, issues: c.issuesChars, taskIssues: c.taskIssuesChars, codemap: c.codemapChars };
+};
 
 const head = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '\n…(truncated)' : s);
 const tail = (s: string, n: number) => (s.length > n ? '…(earlier entries omitted)\n' + s.slice(-n) : s);
@@ -74,13 +80,13 @@ export function taskAcIds(t: Task): string[] {
 /** Short project summary: summary.md from the analyst, else the start of the brief. */
 export function projectSummary(p: Project): string {
   const s = readMemory(p, 'summary.md').trim();
-  if (s) return head(s, LIMITS.summary);
+  if (s) return head(s, limits().summary);
   const brief = readMemory(p, 'brief.md').trim();
   if (!brief) return '';
-  if (brief.length <= LIMITS.summary) return brief;
-  const cut = brief.slice(0, LIMITS.summary);
+  if (brief.length <= limits().summary) return brief;
+  const cut = brief.slice(0, limits().summary);
   const para = cut.lastIndexOf('\n\n');
-  return (para > LIMITS.summary / 2 ? cut.slice(0, para) : cut) + `\n…(full brief in ${file('brief.md')})`;
+  return (para > limits().summary / 2 ? cut.slice(0, para) : cut) + `\n…(full brief in ${file('brief.md')})`;
 }
 
 /** One criterion for a prompt: no evidence (that stays in acceptance.md; the agent re-checks anyway). */
@@ -100,14 +106,15 @@ export function relevantDecisions(all: DecisionEntry[], t: Task | null): Decisio
 }
 
 function decisionsSection(p: Project, prof: ContextProfile, t: Task | null): string {
-  if (prof.decisions === 'full') return `## Decisions so far\n${orNone(tail(readMemory(p, 'decisions.md'), LIMITS.decisionsFull))}`;
+  if (prof.decisions === 'full') return `## Decisions so far\n${orNone(tail(readMemory(p, 'decisions.md'), limits().decisionsFull))}`;
   const all = readDecisions(p);
   if (!all.length) return '## Decisions so far\n(none yet)';
   const rel = relevantDecisions(all, t);
   const relSet = new Set(rel);
-  const others = all.filter(d => !relSet.has(d)).slice(-LIMITS.indexTitles);
+  const n = limits().indexTitles;
+  const others = n ? all.filter(d => !relSet.has(d)).slice(-n) : [];
   const parts = [`## Decisions so far\n${all.length} recorded. Full text: ${file('decisions.md')}. Read it before making a design choice that could conflict with one of the titles below.`];
-  if (rel.length) parts.push(`### Decisions that concern this task\n${head(rel.map(decisionText).join('\n'), LIMITS.decisionsRelevant)}`);
+  if (rel.length) parts.push(`### Decisions that concern this task\n${head(rel.map(decisionText).join('\n'), limits().decisionsRelevant)}`);
   if (others.length) parts.push(`### Other decisions (titles only)\n${others.map(d => `- ${d.title}`).join('\n')}`);
   return parts.join('\n\n');
 }
@@ -116,9 +123,9 @@ function acceptanceSection(p: Project, prof: ContextProfile, t: Task | null): st
   if (prof.acceptance === 'none') return '';
   const all = readAcceptance(p);
   if (prof.acceptance === 'full') {
-    return `## Acceptance criteria\n${all.length ? head(all.map(acLine).join('\n'), LIMITS.acceptance) : orNone(head(readMemory(p, 'acceptance.md'), LIMITS.acceptance))}`;
+    return `## Acceptance criteria\n${all.length ? head(all.map(acLine).join('\n'), limits().acceptance) : orNone(head(readMemory(p, 'acceptance.md'), limits().acceptance))}`;
   }
-  if (!all.length) return `## Acceptance criteria\n${orNone(head(readMemory(p, 'acceptance.md'), LIMITS.acceptance))}`;
+  if (!all.length) return `## Acceptance criteria\n${orNone(head(readMemory(p, 'acceptance.md'), limits().acceptance))}`;
   const ids = new Set(t ? taskAcIds(t) : []);
   const mine = all.filter(a => ids.has(a.id.toUpperCase()));
   const pointer = `All ${all.length} criteria: ${file('acceptance.md')}.`;
@@ -128,26 +135,26 @@ function acceptanceSection(p: Project, prof: ContextProfile, t: Task | null): st
 function issuesSection(p: Project, prof: ContextProfile, t: Task | null): string {
   if (prof.issues === 'none') return '';
   const md = readMemory(p, 'known-issues.md');
-  if (prof.issues === 'full' || !t) return `## Known issues\n${orNone(tail(md, LIMITS.issues))}`;
+  if (prof.issues === 'full' || !t) return `## Known issues\n${orNone(tail(md, limits().issues))}`;
   const ids = chain(t).map(shortId);
   if (t.laneFrom) ids.push(shortId({ seq: Number(t.laneFrom.split('-T').pop()) || 0 }));
   const re = new RegExp(`\\b(?:${ids.join('|')})\\b`);
   const lines = md.split('\n').filter(l => l.trim());
   const mine = lines.filter(l => re.test(l));
   if (!lines.length) return '';
-  return `## Known issues\n${mine.length ? tail(mine.join('\n'), LIMITS.taskIssues) + '\n' : ''}${lines.length} recorded in total: ${file('known-issues.md')}.`;
+  return `## Known issues\n${mine.length ? tail(mine.join('\n'), limits().taskIssues) + '\n' : ''}${lines.length} recorded in total: ${file('known-issues.md')}.`;
 }
 
 function briefSection(p: Project, prof: ContextProfile): string {
   if (prof.brief === 'none') return '';
-  if (prof.brief === 'full') return `## Project brief\n${orNone(head(readMemory(p, 'brief.md'), LIMITS.brief), '(not written yet; read the documentation in the repository)')}`;
+  if (prof.brief === 'full') return `## Project brief\n${orNone(head(readMemory(p, 'brief.md'), limits().brief), '(not written yet; read the documentation in the repository)')}`;
   return `## Project summary\n${orNone(projectSummary(p), '(not written yet; read the documentation in the repository)')}\nFull brief: ${file('brief.md')}.`;
 }
 
 function codemapSection(p: Project, prof: ContextProfile): string {
   if (!prof.codemap) return '';
   const m = readMemory(p, 'codemap.md').trim();
-  return m ? `## Code map (from earlier agents; check it against the code, update it in \`codemap\` if it is wrong)\n${head(m, LIMITS.codemap)}` : '';
+  return m ? `## Code map (from earlier agents; check it against the code, update it in \`codemap\` if it is wrong)\n${head(m, limits().codemap)}` : '';
 }
 
 /** What the agent this task continues left behind (its progress notes), for a fresh start in its place. */
@@ -156,7 +163,7 @@ export function laneNotes(p: Project, t: Task): string {
   const prev = getTask(t.laneFrom);
   if (!prev) return '';
   const notes = readHandoff(p, shortId(prev)).trim();
-  return notes ? `## Notes left by the previous agent on this work (${shortId(prev)}: ${prev.title})\n${tail(notes, 4_000)}` : '';
+  return notes ? `## Notes left by the previous agent on this work (${shortId(prev)}: ${prev.title})\n${tail(notes, appConfig().laneNotesChars)}` : '';
 }
 
 /**
@@ -190,7 +197,7 @@ export function writeContextFiles(p: Project, wt: string): void {
   // Hand-off notes of earlier tasks (the newest few), so evidence written in one round is still there in the next.
   const src = handoffDir(p);
   if (existsSync(src)) {
-    const files = readdirSync(src).filter(f => /^T\d+\.md$/.test(f)).sort((a, b) => Number(b.slice(1, -3)) - Number(a.slice(1, -3))).slice(0, 8);
+    const files = readdirSync(src).filter(f => /^T\d+\.md$/.test(f)).sort((a, b) => Number(b.slice(1, -3)) - Number(a.slice(1, -3))).slice(0, appConfig().handoffFiles);
     if (files.length) mkdirSync(join(dir, 'handoff'), { recursive: true });
     for (const f of files) cpSync(join(src, f), join(dir, 'handoff', f));
   }

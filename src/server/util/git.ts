@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { childEnv } from './proc.ts';
+import { appConfig } from '../config.ts';
 
 export interface GitResult { code: number; stdout: string; stderr: string }
 
@@ -19,7 +20,11 @@ export async function gitOk(cwd: string, ...args: string[]): Promise<string> {
   return r.stdout.trim();
 }
 
-const IDENTITY = ['-c', 'user.name=Plexus', '-c', 'user.email=plexus@localhost'];
+/** Author of Plexus's own commits (Settings → Advanced). Read per commit, so a change applies at once. */
+const identity = () => {
+  const c = appConfig();
+  return ['-c', `user.name=${c.gitName || 'Plexus'}`, '-c', `user.email=${c.gitEmail || 'plexus@localhost'}`];
+};
 
 /** Make sure `dir` is a git repo with at least one commit; returns the main branch name. */
 export async function ensureRepo(dir: string): Promise<string> {
@@ -30,7 +35,7 @@ export async function ensureRepo(dir: string): Promise<string> {
   if (top.code !== 0 || norm(top.stdout) !== norm(dir)) await gitOk(dir, 'init', '-b', 'main');
   if ((await git(dir, 'rev-parse', '--verify', 'HEAD')).code !== 0) {
     await gitOk(dir, 'add', '-A');
-    await gitOk(dir, ...IDENTITY, 'commit', '--allow-empty', '-m', 'chore: initial commit (plexus)');
+    await gitOk(dir, ...identity(), 'commit', '--allow-empty', '-m', 'chore: initial commit (plexus)');
   }
   addExcludes(dir, ['.plexus/', '.plexus-task/', '.claude/skills/', '.agents/skills/']);
   return gitOk(dir, 'rev-parse', '--abbrev-ref', 'HEAD');
@@ -67,7 +72,7 @@ export async function commitAll(cwd: string, message: string): Promise<boolean> 
   await git(cwd, 'add', '-A');
   const st = await git(cwd, 'diff', '--cached', '--quiet');
   if (st.code === 0) return false;
-  const r = await git(cwd, ...IDENTITY, 'commit', '--no-verify', '-m', message);
+  const r = await git(cwd, ...identity(), 'commit', '--no-verify', '-m', message);
   return r.code === 0;
 }
 
@@ -97,7 +102,7 @@ export async function mergeBranch(repo: string, mainBranch: string, branch: stri
     const co = await git(repo, 'checkout', mainBranch);
     if (co.code !== 0) return { ok: false, conflict: false, detail: `cannot checkout ${mainBranch}: ${co.stderr}` };
   }
-  const r = await git(repo, ...IDENTITY, 'merge', '--no-ff', '--no-edit', '-m', message, branch);
+  const r = await git(repo, ...identity(), 'merge', '--no-ff', '--no-edit', '-m', message, branch);
   if (r.code === 0) return { ok: true, conflict: false, detail: r.stdout };
   const conflict = /CONFLICT|Automatic merge failed/i.test(r.stdout + r.stderr);
   await git(repo, 'merge', '--abort');

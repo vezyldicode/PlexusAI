@@ -10,6 +10,8 @@ import { getDb, json, now } from './db.ts';
 import { bus } from './events.ts';
 import { paths } from './paths.ts';
 import { childEnv, resolveCli, runStreaming } from './util/proc.ts';
+import { appConfig, onConfigChange } from './config.ts';
+import { spentPercent } from './adapters/claude-limits.ts';
 
 function rowToAccount(r: any): Account {
   return {
@@ -71,7 +73,7 @@ function announceIfAvailable(before: Account, after: Account) {
 
 /** Earliest reset of any quota window that is used up, when the CLI didn't say when the limit ends. */
 export function resetFromQuota(q: QuotaSnapshot | null | undefined, nowIso = now()): string | null {
-  const ws = [q?.primary, q?.secondary].filter(w => w && (w.usedPercent ?? 0) >= 100 && w.resetsAt && w.resetsAt > nowIso);
+  const ws = [q?.primary, q?.secondary].filter(w => w && spentPercent(w.usedPercent) && w.resetsAt && w.resetsAt > nowIso);
   return ws.map(w => w!.resetsAt!).sort().at(-1) ?? null;
 }
 
@@ -136,7 +138,7 @@ export async function probeAccount(id: string): Promise<Account> {
 export async function claudeLoggedIn(a: Account): Promise<boolean | null> {
   try {
     const { cmd, prefixArgs } = resolveCli('claude');
-    const r = await runStreaming({ cmd, args: [...prefixArgs, 'auth', 'status'], cwd: a.home, env: { ...process.env, CLAUDE_CONFIG_DIR: a.home }, timeoutMs: 30_000 });
+    const r = await runStreaming({ cmd, args: [...prefixArgs, 'auth', 'status'], cwd: a.home, env: { ...process.env, CLAUDE_CONFIG_DIR: a.home }, timeoutMs: appConfig().controlTimeoutSec * 1000 });
     return !!JSON.parse(r.stdout).loggedIn;
   } catch { return null; }
 }
@@ -181,7 +183,8 @@ export function writeLoginScript(a: Account, lc: { cmd: string; args: string[]; 
 
 // ---------------- Quota service ----------------
 
-const CLAUDE_POLL_MS = 5 * 60_000;
+/** Intervals come from Settings → Quota; the timers re-arm when they change. */
+const claudePollMs = () => appConfig().claudePollMin * 60_000;
 
 class QuotaService {
   private codex = new Map<string, CodexAppServer>();
@@ -194,20 +197,39 @@ class QuotaService {
   private claudeBackoff = new Map<string, number>();
   private started = false;
 
-  start(pollMs = 60_000) {
+  private offConfig: (() => void) | null = null;
+  /** Interval of the Codex poll: the argument (tests), else Settings → Quota. */
+  private codexPollMs: number | null = null;
+
+  start(pollMs?: number) {
     this.started = true;
+    this.codexPollMs = pollMs ?? null;
     for (const a of listAccounts()) if (a.provider === 'codex') this.watch(a);
-    this.timer = setInterval(() => this.pollCodex(), pollMs);
+    this.arm();
     this.checkClaudeLogins();
-    this.loginTimer = setInterval(() => void this.checkClaudeLogins(), CLAUDE_POLL_MS);
-    this.recheckTimer = setInterval(() => void this.recheckLimited(), 5 * 60_000);
+    this.offConfig = onConfigChange(() => { if (this.started) this.arm(); });
+  }
+
+  /** (Re)start the timers with the current intervals. The Claude timer ticks at least every minute; each account keeps its own pace. */
+  private arm() {
+    this.clearTimers();
+    const c = appConfig();
+    this.timer = setInterval(() => this.pollCodex(), this.codexPollMs ?? c.codexPollSec * 1000);
+    this.loginTimer = setInterval(() => void this.checkClaudeLogins(), Math.min(claudePollMs(), 60_000));
+    this.recheckTimer = setInterval(() => void this.recheckLimited(), Math.min(c.limitedRecheckMin * 60_000, 5 * 60_000));
+  }
+
+  private clearTimers() {
+    if (this.timer) clearInterval(this.timer);
+    if (this.loginTimer) clearInterval(this.loginTimer);
+    if (this.recheckTimer) clearInterval(this.recheckTimer);
+    this.timer = this.loginTimer = this.recheckTimer = null;
   }
 
   stop() {
     this.started = false;
-    if (this.timer) clearInterval(this.timer);
-    if (this.loginTimer) clearInterval(this.loginTimer);
-    if (this.recheckTimer) clearInterval(this.recheckTimer);
+    this.clearTimers();
+    this.offConfig?.(); this.offConfig = null;
     for (const c of this.codex.values()) c.close();
     this.codex.clear();
   }
@@ -237,7 +259,7 @@ class QuotaService {
       if (r.needsLogin) applyClassification(id, { state: 'needs_login', reason: 'auth', evidence: [r.error ?? ''] }, null);
       else if (r.quota) {
         setQuota(id, r.quota);
-        const spent = [r.quota.primary, r.quota.secondary].some(w => (w?.usedPercent ?? 0) >= 100);
+        const spent = [r.quota.primary, r.quota.secondary].some(w => spentPercent(w?.usedPercent));
         if (a.state === 'needs_login' || a.state === 'unknown') applyClassification(id, { state: 'ok', reason: 'app-server', evidence: [] }, null);
         // Issue #5: a limited Codex account whose windows have room again is usable; the app-server poll is free.
         else if ((a.state === 'limited' || a.state === 'transient') && !spent) applyClassification(id, { state: 'ok', reason: 'quota reset', evidence: ['app-server rate limits'] }, null);
@@ -246,7 +268,7 @@ class QuotaService {
   }
 
   /**
-   * Every 5 minutes: login state, quota and models of idle Claude accounts through the control protocol (no model call).
+   * Every few minutes (Settings → Quota): login state, quota and models of idle Claude accounts through the control protocol (no model call).
    * Busy accounts are skipped: their runs report quota in the stream for free. Falls back to `claude auth status`.
    */
   async checkClaudeLogins() {
@@ -257,7 +279,7 @@ class QuotaService {
       const st = await readClaudeStatus(a).catch(() => null);
       if (st && st.loggedIn !== null) {
         this.claudeBackoff.delete(a.id);
-        this.claudeNext.set(a.id, Date.now() + CLAUDE_POLL_MS - 30_000);
+        this.claudeNext.set(a.id, Date.now() + Math.max(claudePollMs() - 30_000, claudePollMs() * 0.9));
         if (st.models.length && st.loggedIn) rememberModels(a.id, st.models);
         if (!st.loggedIn) {
           if (a.state !== 'needs_login') { forgetModels(a.id); applyClassification(a.id, { state: 'needs_login', reason: 'not_logged_in', evidence: ['claude initialize: no credentials'] }, null); }
@@ -272,7 +294,7 @@ class QuotaService {
         if (a.state === 'needs_login') { forgetModels(a.id); setState(a.id, 'unknown', 'logged in', null); const after = getAccount(a.id)!; bus.emitEvent('account.updated', null, after); announceIfAvailable(a, after); }
         continue;
       }
-      const back = Math.min(30 * 60_000, (this.claudeBackoff.get(a.id) ?? CLAUDE_POLL_MS / 2) * 2);
+      const back = Math.min(Math.max(appConfig().claudeBackoffMaxMin * 60_000, claudePollMs()), (this.claudeBackoff.get(a.id) ?? claudePollMs() / 2) * 2);
       this.claudeBackoff.set(a.id, back);
       this.claudeNext.set(a.id, Date.now() + back);
       const ok = await claudeLoggedIn(a);
@@ -293,7 +315,7 @@ class QuotaService {
       if (a.cooldownUntil && a.cooldownUntil > nowIso) continue;
       if (a.provider === 'codex') continue;
       const last = this.lastProbe.get(a.id) ?? 0;
-      if (Date.now() - last < 30 * 60_000) continue;
+      if (Date.now() - last < appConfig().limitedRecheckMin * 60_000) continue;
       this.lastProbe.set(a.id, Date.now());
       await probeAccount(a.id).catch(() => {});
     }

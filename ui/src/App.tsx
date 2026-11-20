@@ -136,7 +136,8 @@ export default function App() {
           resizer={<Resizer side="left" width={rw} min={RIGHT.min} max={RIGHT.max} onWidth={setRightW} onReset={() => setRightW(RIGHT.def)} label="Resize chat" />} />
       )}
       {showNew && <NewProjectDialog onClose={() => setShowNew(false)} onCreated={id => { setShowNew(false); setSelected(id); s.loadProjects(); }} onError={s.setError} />}
-      {settings && <SettingsDialog tab={settings} onTab={setSettings} onClose={() => setSettings(null)} accounts={s.accounts} reloadAccounts={s.loadAccounts} onError={s.setError} />}
+      {settings && <SettingsDialog tab={settings} onTab={setSettings} onClose={() => setSettings(null)} accounts={s.accounts} reloadAccounts={s.loadAccounts} onError={s.setError}
+        project={d?.project ?? null} reloadProject={() => { s.loadDetail(); void s.loadProjects(); }} />}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Decision, type Project
 import { getDb, json, now } from './db.ts';
 import { deleteProjectSessions, touchSession, routeSession } from './chat.ts';
 import { bus } from './events.ts';
+import { cleanProjectSettings, projectDefaults } from './config.ts';
 
 function rowToProject(r: any): Project {
   return {
@@ -38,7 +39,7 @@ export function createProject(input: { path: string; name?: string; goal?: strin
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 20) || 'project';
   const id = `${slug}-${randomBytes(2).toString('hex')}`;
   getDb().prepare('INSERT INTO projects (id, name, path, goal, settings, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, name, path, goal, JSON.stringify({ ...DEFAULT_PROJECT_SETTINGS, ...input.settings }), now());
+    .run(id, name, path, goal, JSON.stringify({ ...projectDefaults(), ...cleanProjectSettings((input.settings ?? {}) as Record<string, unknown>) }), now());
   mkdirSync(memoryDir(getProject(id)!), { recursive: true });
   const p = getProject(id)!;
   writeMemory(p, 'goal.md', goal);
@@ -48,7 +49,7 @@ export function createProject(input: { path: string; name?: string; goal?: strin
 
 export function updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'goal' | 'phase' | 'mainBranch' | 'evalRounds'>> & { settings?: Partial<ProjectSettings> }): Project {
   const p = mustProject(id);
-  const settings = { ...p.settings, ...patch.settings };
+  const settings = { ...p.settings, ...cleanProjectSettings((patch.settings ?? {}) as Record<string, unknown>) };
   getDb().prepare('UPDATE projects SET name = ?, goal = ?, phase = ?, main_branch = ?, eval_rounds = ?, settings = ? WHERE id = ?')
     .run(patch.name ?? p.name, patch.goal ?? p.goal, patch.phase ?? p.phase, patch.mainBranch ?? p.mainBranch, patch.evalRounds ?? p.evalRounds, JSON.stringify(settings), id);
   if (patch.goal !== undefined) writeMemory(p, 'goal.md', patch.goal);

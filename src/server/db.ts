@@ -74,6 +74,10 @@ const MIGRATIONS: string[] = [
   // The model and effort a run was started with (what the UI shows as "in use").
   `ALTER TABLE runs ADD COLUMN model TEXT;
    ALTER TABLE runs ADD COLUMN effort TEXT;`,
+  // Where a run's time went (startup, model, tools, compaction, waiting), and a conversation a task forks from another
+  // working directory (the coordinator's chat, held in the project folder) instead of resuming it in place.
+  `ALTER TABLE runs ADD COLUMN timing TEXT;
+   ALTER TABLE tasks ADD COLUMN cli_fork_cwd TEXT;`,
 ];
 
 export function getDb(): DatabaseSync {

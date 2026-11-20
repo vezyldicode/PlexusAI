@@ -1,7 +1,9 @@
 // Fake coding agent used by the `mock` provider (tests and demos, no quota spent).
 // Speaks the same stream-json protocol as `claude -p --output-format stream-json`, so the
 // real Claude classifier is exercised. Behaviour is driven by <home>/mock.json:
-//   { "limitAfterRuns": 3, "delayMs": 200, "rejectReviewOnce": true }
+//   { "limitAfterRuns": 3, "delayMs": 200, "rejectReviewOnce": true, "compactions": 3 }
+// "compactions": the context is compacted that many times in every run (except the checkpoint turn Plexus sends after
+// stopping a run for its context budget).
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -56,6 +58,12 @@ const tool = (name: string, input: unknown) => out({ type: 'assistant', message:
 const delay = Number(cfg.delayMs ?? 50);
 const steps = Number(cfg.steps ?? 3);
 for (let i = 0; i < steps; i++) { say(`[mock ${meta.role}] working step ${i + 1}/${steps}`); await sleep(delay); }
+const checkpoint = prompt.includes('STOP: CONTEXT BUDGET SPENT');
+for (let i = 0; i < Number(cfg.compactions ?? 0) && !checkpoint; i++) {
+  tool('Bash', { command: `echo step ${i}` });
+  out({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 120000, post_tokens: 15000, duration_ms: 1000 } });
+  await sleep(delay);
+}
 
 let result: any = { status: 'done', summary: `mock ${meta.kind} done` };
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'file';
@@ -205,6 +213,7 @@ switch (meta.kind) {
   }
 }
 
+if (checkpoint) result = { ...result, status: 'partial', summary: `checkpoint after context budget: ${result.summary}`, follow_up_tasks: [{ title: 'Rest of the work', description: 'what is left', role: 'implementer', acceptance: [], paths: [] }] };
 if (meta.result_file) {
   mkdirSync(dirname(meta.result_file), { recursive: true });
   writeFileSync(meta.result_file, JSON.stringify(result, null, 2));

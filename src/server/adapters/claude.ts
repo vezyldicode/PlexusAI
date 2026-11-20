@@ -5,6 +5,8 @@ import { readClaudeStatus } from './claude-control.ts';
 import { invocationUsage } from '../usage.ts';
 import { writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { appConfig } from '../config.ts';
+import { createRunTimer } from './timing.ts';
 
 export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
   let e: any;
@@ -49,6 +51,7 @@ export const claudeAdapter: ProviderAdapter = {
     const { cmd, prefixArgs } = resolveCli('claude');
     const args = [...prefixArgs, '-p', '--output-format', 'stream-json', '--verbose'];
     if (spec.resumeId) args.push('--resume', spec.resumeId);
+    if (spec.resumeId && spec.forkSession) args.push('--fork-session');
     if (spec.model) args.push('--model', spec.model);
     if (spec.effort) args.push('--effort', spec.effort);
     if (spec.readOnly) args.push('--tools', 'Read,Glob,Grep');
@@ -61,16 +64,19 @@ export const claudeAdapter: ProviderAdapter = {
     args.push('--strict-mcp-config');
     if (spec.autocompact && spec.autocompact >= 100_000) args.push('--autocompact', String(spec.autocompact));
     args.push('--dangerously-skip-permissions');
+    const timer = createRunTimer('claude');
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
-      onLine: line => { const d = describeClaudeEvent(line); if (d) spec.onEvent?.(d); },
+      onLine: line => { timer.line(line); const d = describeClaudeEvent(line); if (d) spec.onEvent?.(d); },
+      stopWhen: () => !!spec.maxCompactions && timer.compactions >= spec.maxCompactions,
     });
+    const timing = timer.finish();
     const a = classifyClaudeRun({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
     const sessionId = claudeSessionId(r.stdout);
     return {
-      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, sessionId,
+      exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, sessionId, timing,
       usage: invocationUsage('claude', r.stdout, { resumeId: spec.resumeId, sessionId }),
       classification: { state: a.state, reason: a.reason, limitedWindow: a.limitedWindow, resetsAt: a.resetsAt, cooldownUntil: a.cooldownUntil, evidence: a.evidence },
       quota: claudeQuota(a.windows, 'cli-event'),
@@ -85,7 +91,7 @@ export const claudeAdapter: ProviderAdapter = {
     // Fallback: one tiny Haiku call, which reports the rate limits in its stream (costs a little quota).
     const { cmd, prefixArgs } = resolveCli('claude');
     const r = await runStreaming({
-      cmd, args: [...prefixArgs, '-p', 'ok', '--model', 'haiku', '--output-format', 'stream-json', '--verbose', '--max-turns', '1', '--tools', ''],
+      cmd, args: [...prefixArgs, '-p', 'ok', '--model', appConfig().probeModel || 'haiku', '--output-format', 'stream-json', '--verbose', '--max-turns', '1', '--tools', ''],
       cwd: account.home, env: { ...process.env, ...this.accountEnv(account) }, timeoutMs: 90_000,
     });
     const a = classifyClaudeRun({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });

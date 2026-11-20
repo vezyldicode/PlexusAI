@@ -98,6 +98,11 @@ export interface ProjectSettings {
   resumeSessions: boolean;
   /** Compact an agent's conversation once its context passes this many tokens (Claude ≥ 100000; 0 = the CLI's default). */
   autocompactTokens: number;
+  /**
+   * Context budget of one run: after this many automatic compactions the work is larger than one session, so Plexus stops
+   * the agent and has it commit, report what is left (status partial) and hand the rest on (0 = no limit). Claude only.
+   */
+  maxCompactions: number;
 }
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -108,7 +113,7 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   maxAttempts: 4,
   reviewEnabled: true,
   quotaStrategy: 'spread',
-  independentReviewWaitMin: 20,
+  independentReviewWaitMin: 3,
   coordinatorAccountId: null,
   coordinatorModels: {},
   coordinatorEfforts: {},
@@ -119,6 +124,7 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   qaPhase: false,
   resumeSessions: true,
   autocompactTokens: 150_000,
+  maxCompactions: 2,
 };
 
 export interface Project {
@@ -178,6 +184,9 @@ export interface Task {
   /** Context size (tokens) of the last model call of that conversation, and when it ended: decides whether resuming it is cheaper than a fresh start. */
   cliCtxTokens: number;
   cliUsedAt: string | null;
+  /** Set when `cliSessionId` is a conversation held in another working directory (the coordinator's chat): the first run
+   *  forks it into this task's worktree instead of resuming it, so the agent starts with what the coordinator learned. */
+  cliForkCwd: string | null;
   /** Run only on this account while it can run; when it cannot (quota, login), another account takes over. */
   pinnedAccountId: string | null;
   /** The task whose agent this one continues (same worktree path and CLI conversation): a "lane" of one agent. */
@@ -234,6 +243,26 @@ export interface Run {
   /** Model and effort the run was started with (null: the CLI default). */
   model?: string | null;
   effort?: string | null;
+  /** Where the run's time went (null for runs recorded before this was measured). */
+  timing?: RunTiming | null;
+}
+
+/**
+ * Where the wall time of a run went, measured from the CLI's stream. `model` is what is left after startup, tools and
+ * compaction: the model reading and writing (thinking included). `wait` is the time the task waited for this run
+ * (dependencies, a free account, the user's approval) after it was created or its previous run ended.
+ */
+export interface RunTiming {
+  totalMs: number;
+  startupMs: number;
+  modelMs: number;
+  toolMs: number;
+  compactMs: number;
+  waitMs: number;
+  toolCalls: number;
+  compactions: number;
+  /** Model calls (Claude: assistant messages; Codex: not reported). */
+  calls?: number;
 }
 
 /**
@@ -244,8 +273,9 @@ export interface TaskModelInfo {
   provider: Provider;
   model: string | null;
   effort: string | null;
-  modelFrom: 'task' | 'coordinator' | 'role' | 'default';
-  effortFrom: 'task' | 'coordinator' | 'role' | 'default';
+  /** `plexus`: Plexus's default for the role (an explicit, moderate effort); `default`: whatever the CLI uses. */
+  modelFrom: 'task' | 'coordinator' | 'role' | 'plexus' | 'default';
+  effortFrom: 'task' | 'coordinator' | 'role' | 'plexus' | 'default';
   /** The last run: what it was started with, and the model id the CLI reported (the one that did most of the work). */
   ran: { model: string | null; effort: string | null; reported: string | null; running: boolean } | null;
   /** The choice can still change something: the task is not running (it applies from its next run, or to a continuation). */

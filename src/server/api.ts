@@ -27,6 +27,9 @@ import { taskModelInfo } from './worker.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
 import { cleanEfforts, modelCatalog } from './models.ts';
+import { appConfig, configOverrides, projectDefaults, updateConfig, updateProjectDefaults } from './config.ts';
+import { DEFAULT_APP_CONFIG, CONFIG_BOUNDS } from '../shared/config.ts';
+import { DEFAULT_PROJECT_SETTINGS } from '../shared/types.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
 function promptOf(path: string, maxBytes = 400_000): string {
@@ -154,6 +157,12 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     if (st && 'coordinatorEfforts' in st) st.coordinatorEfforts = st.coordinatorEfforts && typeof st.coordinatorEfforts === 'object' ? cleanEfforts(st.coordinatorEfforts) : {};
     return updateProject(id(req), { ...b, ...(st && { settings: st }) });
   });
+  // Engine settings (Settings → Quota, Scheduler, Context, Coordinator, Advanced) and the defaults of new projects.
+  const configView = () => ({ config: appConfig(), overrides: configOverrides(), defaults: DEFAULT_APP_CONFIG, bounds: CONFIG_BOUNDS,
+    projectDefaults: projectDefaults(), projectBuiltin: DEFAULT_PROJECT_SETTINGS });
+  app.get('/api/config', async () => configView());
+  app.patch('/api/config', async req => { updateConfig(body(req)); return configView(); });
+  app.patch('/api/config/project-defaults', async req => { updateProjectDefaults(body(req)); return configView(); });
   app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); deleteProject(id(req)); return { ok: true }; });
   // Open the project folder in the system file manager (the daemon runs on the user's own machine).
   app.post('/api/projects/:id/reveal', async req => {
@@ -277,9 +286,10 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     if (!t) throw new Error('no such task');
     return {
       runs: listRuns(t.id).map(r => ({
-        id: r.id, accountId: r.accountId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome, usage: r.usage, model: r.model ?? null, effort: r.effort ?? null,
+        id: r.id, accountId: r.accountId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome, usage: r.usage, model: r.model ?? null, effort: r.effort ?? null, timing: r.timing ?? null,
         reason: (r.classification as any)?.reason ?? null,
-        turns: readLogTurns(r.logPath).map(x => ({ resuming: x.resuming, at: x.at, promptChars: x.prompt.length, messages: turnMessages(x.prompt), events: streamEvents(r.accountId, x.output).slice(-800) })),
+        turns: readLogTurns(r.logPath).map(x => ({ resuming: x.resuming, at: x.at, promptChars: x.prompt.length,
+          kind: /^# STOP: CONTEXT BUDGET SPENT/m.test(x.prompt) ? 'checkpoint' : /^# YOU ARE NOW THE AGENT DOING THE WORK/m.test(x.prompt) ? 'fork' : null, messages: turnMessages(x.prompt), events: streamEvents(r.accountId, x.output).slice(-800) })),
       })),
     };
   });
@@ -305,7 +315,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.post('/api/tasks/:id/cancel', async req => { orchestrator.cancelTask(id(req)); return getTask(id(req)); });
   app.post('/api/tasks/:id/retry', async req => { orchestrator.retryTask(id(req)); return getTask(id(req)); });
   app.post('/api/tasks/:id/message', async req => orchestrator.sendMessage(id(req), String(body(req).text ?? '')));
-  app.post('/api/tasks/:id/continue', async req => orchestrator.continueTask(id(req), String(body(req).instructions ?? ''), String(body(req).title ?? ''), body(req).sessionId));
+  app.post('/api/tasks/:id/continue', async req => orchestrator.continueTask(id(req), String(body(req).instructions ?? ''), String(body(req).title ?? ''), body(req).sessionId, true));
 
   // ---- roles
   app.get('/api/roles', async () => listRoles());

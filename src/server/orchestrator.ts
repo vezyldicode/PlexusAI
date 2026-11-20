@@ -10,15 +10,16 @@ import {
   setProjectStatus, plexusDir, updateProject, writeAcceptance, writeMemory,
 } from './projects.ts';
 import { getRole } from './roles.ts';
-import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask } from './tasks.ts';
+import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask, USER_FOLLOW_UP } from './tasks.ts';
 import { ensureRepo, changedLines, commitAll, git, hasCommitsAhead, mergeBranch, removeWorktree } from './util/git.ts';
 import { CONTEXT_DIR } from './context.ts';
 import { running, runAttempt, writesCode, type AttemptOutcome } from './worker.ts';
+import { appConfig } from './config.ts';
 
 const UNAVAILABLE = new Set(['limited', 'transient', 'needs_login', 'blocked', 'disabled']);
 const INDEPENDENT_KINDS = new Set(['review', 'evaluate']);
-/** Evaluation gaps up to this many go to one single-agent task instead of one task (and hand-off) each. */
-const BUNDLE_GAPS_MAX = 4;
+/** Evaluation gaps up to this many go to one single-agent task instead of one task (and hand-off) each (Settings → Scheduler). */
+const bundleGapsMax = () => appConfig().gapBundleMax;
 
 // ---------------- documentation check (no model call) ----------------
 
@@ -46,9 +47,9 @@ export function scanDocs(root: string): { files: string[]; chars: number } {
   return { files, chars };
 }
 
-/** Below both of these, Plexus asks the user what to build before spending any quota. */
-const MIN_GOAL_CHARS = 25;
-const MIN_DOC_CHARS = 300;
+/** Below both of these, Plexus asks the user what to build before spending any quota (Settings → Scheduler). */
+const minGoalChars = () => appConfig().minGoalChars;
+const minDocChars = () => appConfig().minDocChars;
 
 export function pickAccount(p: Project, t: Task, accounts: Account[] = listAccounts()): Account | null {
   const role = getRole(t.role);
@@ -100,17 +101,29 @@ export class Orchestrator {
   /** Outcomes being post-processed per project; phase transitions wait for them (avoids double finish). */
   private processing = new Map<string, number>();
 
-  start(intervalMs = 2000) {
+  /** Fixed interval for tests; otherwise Settings → Scheduler, read before every pass. */
+  private intervalMs: number | null = null;
+  private stopped = false;
+
+  private loop() {
+    if (this.stopped) return;
+    this.timer = setTimeout(() => { void this.tick().finally(() => this.loop()); }, this.intervalMs ?? appConfig().tickSec * 1000);
+  }
+
+  start(intervalMs?: number) {
+    this.intervalMs = intervalMs ?? null;
+    this.stopped = false;
     // Recovery: anything "running" when the daemon stopped is resumable work.
     const db = getDb();
     const stale = db.prepare(`SELECT id FROM tasks WHERE status = 'running'`).all() as any[];
     for (const r of stale) updateTask(r.id, { status: 'interrupted', accountId: null, error: 'daemon restarted while running' });
-    this.timer = setInterval(() => void this.tick(), intervalMs);
+    this.loop();
     bus.on('event', ev => { if (ev.type === 'account.available') this.accountAvailable((ev.data as any).id, (ev.data as any).label); });
   }
 
   async stopAll() {
-    if (this.timer) clearInterval(this.timer);
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
     for (const c of running.values()) c.abort();
     await Promise.allSettled([...this.inflight]);
   }
@@ -132,7 +145,7 @@ export class Orchestrator {
       // Look before spending quota: with no goal and no documentation there is nothing to analyse yet.
       const docs = scanDocs(p.path);
       const said = `${readMemory(p, 'goal.md') || p.goal}\n${readMemory(p, 'directives.md')}`.trim();
-      if (said.length < MIN_GOAL_CHARS && docs.chars < MIN_DOC_CHARS) {
+      if (said.length < minGoalChars() && docs.chars < minDocChars()) {
         this.needsInput(p, [
           'What should be built? Describe the goal, the main features or tasks, and what "done" means.',
           'Any constraints (language, framework, platform, existing code to keep)?',
@@ -224,7 +237,7 @@ export class Orchestrator {
    * More work for the agent that did `id`: a new task that continues its CLI conversation in the same worktree path
    * (a lane), so the agent does not re-read the project. Code-writing kinds continue as single-agent work.
    */
-  continueTask(id: string, instructions: string, title = '', sessionId?: string | null): Task {
+  continueTask(id: string, instructions: string, title = '', sessionId?: string | null, fromUser = false): Task {
     const prev = getTask(id);
     if (!prev) throw new Error('no such task');
     if (ACTIVE.includes(prev.status) && prev.status !== 'blocked') {
@@ -232,7 +245,7 @@ export class Orchestrator {
       return this.sendMessage(prev.id, instructions);
     }
     const t = createTask(prev.projectId, {
-      title: title || `Continue ${shortId(prev)}: ${instructions.split('\n')[0].slice(0, 60)}`, description: instructions,
+      title: title || `${fromUser ? USER_FOLLOW_UP : 'Continue '}${shortId(prev)}: ${instructions.split('\n')[0].slice(0, 60)}`, description: instructions,
       role: 'solo', kind: 'solo', priority: 80, adhoc: true, originSessionId: sessionId ?? prev.originSessionId, laneFrom: prev,
       paths: prev.paths, pinnedAccountId: prev.pinnedAccountId,
     });
@@ -250,7 +263,7 @@ export class Orchestrator {
    * The coordinator edits the main checkout: merges wait until it commits (plexus_main_commit) or 10 minutes pass, so a
    * merge never meets a half-edited working tree.
    */
-  holdMain(projectId: string, maxMs = 10 * 60_000): Promise<void> {
+  holdMain(projectId: string, maxMs = appConfig().mainHoldMin * 60_000): Promise<void> {
     if (this.mainHolds.has(projectId)) return Promise.resolve();
     const prev = this.mergeLocks.get(projectId) ?? Promise.resolve();
     let release!: () => void;
@@ -345,7 +358,7 @@ export class Orchestrator {
       if (!a) {
         noAccount++;
         const last = this.lastNoAccountNotice.get(p.id) ?? 0;
-        if (Date.now() - last > 30 * 60_000) {
+        if (Date.now() - last > appConfig().noAccountNoticeMin * 60_000) {
           this.lastNoAccountNotice.set(p.id, Date.now());
           const nowIso = now();
           const next = accounts.filter(x => x.enabled && x.cooldownUntil && x.cooldownUntil > nowIso).map(x => x.cooldownUntil!).sort()[0];
@@ -729,7 +742,7 @@ export class Orchestrator {
       return;
     }
     const tries = listTasks(p.id).filter(x => x.kind === 'integrate' && x.parentId === t.id).length;
-    if (tries >= 2) {
+    if (tries >= appConfig().mergeConflictTries) {
       setStatus(t.id, 'failed', { error: 'merge conflicts could not be resolved' });
       appendMemory(p, 'known-issues.md', `- ${shortId(t)} could not be merged (conflicts persisted after ${tries} integration attempts)`);
       return;
@@ -831,7 +844,7 @@ export class Orchestrator {
     const why = this.stalled(ev, prevEv, changed);
     if (why) return this.waitForUser(mustProject(p.id), t, ev, this.gapList(ev, fus), why);
     // A few gaps go to one agent (one hand-off, no review); many go back to the team as separate tasks.
-    if (fus.length <= BUNDLE_GAPS_MAX || p.settings.pipeline === 'single') {
+    if (fus.length <= bundleGapsMax() || p.settings.pipeline === 'single') {
       const lane = listTasks(p.id).filter(x => x.kind === 'solo' && x.status === 'done').at(-1) ?? null;
       createTask(p.id, {
         title: `Fix the gaps found by evaluation round ${rounds}`, role: 'solo', kind: 'solo', priority: 70,
@@ -841,7 +854,7 @@ export class Orchestrator {
       });
     } else this.createFollowUps(p, t, r);
     updateProject(p.id, { phase: 'build' });
-    postMessage(p.id, 'system', `Evaluation round ${rounds}: not complete yet; ${fus.length} gap(s) ${fus.length <= BUNDLE_GAPS_MAX || p.settings.pipeline === 'single' ? 'given to one agent' : 'planned as separate tasks'}.`);
+    postMessage(p.id, 'system', `Evaluation round ${rounds}: not complete yet; ${fus.length} gap(s) ${fus.length <= bundleGapsMax() || p.settings.pipeline === 'single' ? 'given to one agent' : 'planned as separate tasks'}.`);
   }
 
   private finish(p: Project, report: string, complete: boolean, why = '') {
