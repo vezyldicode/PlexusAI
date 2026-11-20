@@ -190,7 +190,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.post('/api/projects/:id/pause', async req => { orchestrator.pause(id(req), body(req).sessionId); return mustProject(id(req)); });
   app.post('/api/projects/:id/resume', async req => { await orchestrator.resume(id(req), body(req).sessionId); return mustProject(id(req)); });
   app.post('/api/projects/:id/stop', async req => { orchestrator.stop(id(req), body(req).sessionId); return mustProject(id(req)); });
-  app.post('/api/projects/:id/actions', async req => ({ applied: applyActions(id(req), body(req).actions ?? [], 'user', body(req).sessionId) }));
+  app.post('/api/projects/:id/actions', async req => ({ applied: applyActions(id(req), body(req).actions ?? [], body(req).by === 'coordinator' ? 'coordinator' : 'user', body(req).sessionId) }));
 
   // ---- coordinator tools (the plexus MCP server calls these)
   app.get('/api/projects/:id/status-digest', async req => {

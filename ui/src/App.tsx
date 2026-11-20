@@ -36,6 +36,7 @@ export default function App() {
   const [active, setActive] = useState<string>(COORDINATOR);
 
   const [collapsed, setCollapsed] = useStored('plexus.left.collapsed', false);
+  const [leftHover, setLeftHover] = useState(false);
   const [leftW, setLeftW] = useStored('plexus.left.width', LEFT.def);
   const [rightW, setRightW] = useStored('plexus.right.width', RIGHT.def);
   const [pinned, setPinned] = useStored('plexus.chat.pinned', true);
@@ -96,8 +97,12 @@ export default function App() {
   }, []);
 
   // The sidebar button only folds the sidebar; the chat panel keeps its own pin (its own button).
-  const collapse = () => { if (tiny) { setTinyOpen(false); return; } setCollapsed(true); };
-  const expand = () => { if (tiny) { setTinyOpen(true); return; } setCollapsed(false); };
+  const collapse = () => { if (tiny) { setTinyOpen(false); return; } setLeftHover(false); setCollapsed(true); };
+  const expand = () => { if (tiny) { setTinyOpen(true); return; } setLeftHover(false); setCollapsed(false); };
+  const leftLeaveTimer = useRef<number>(undefined);
+  const leftHoverIn = () => { clearTimeout(leftLeaveTimer.current); if (collapsed && !tiny) setLeftHover(true); };
+  const leftHoverOut = () => { clearTimeout(leftLeaveTimer.current); leftLeaveTimer.current = window.setTimeout(() => setLeftHover(false), 280); };
+  useEffect(() => () => clearTimeout(leftLeaveTimer.current), []);
 
   // A hover peek ends a moment after the pointer leaves the panel, so a slip off the edge doesn't close it.
   const leaveTimer = useRef<number>(undefined);
@@ -111,6 +116,14 @@ export default function App() {
   }, [peek]);
 
   const isRail = tiny ? !tinyOpen : collapsed;
+  const leftPeek = collapsed && !tiny && leftHover;
+  const sideProps = {
+    projects: s.projects, accounts: s.accounts, connected: s.connected, selected,
+    onMouseEnter: leftHoverIn, onMouseLeave: leftHoverOut, onCollapse: collapse, onExpand: expand,
+    onProject: (id: string) => { setSelected(id); setTinyOpen(false); }, onNew: () => setShowNew(true),
+    onSettings: (t?: SettingsTab) => { setSettings(t ?? 'accounts'); setTinyOpen(false); },
+    reloadProjects: s.loadProjects, reloadAccounts: s.loadAccounts, onError: s.setError,
+  };
   const lw = clamp(leftW, LEFT.min, LEFT.max);
   const rw = clamp(rightW, RIGHT.min, RIGHT.max);
   const chatToggle = mode !== 'docked' && (
@@ -120,11 +133,10 @@ export default function App() {
   return (
     <div className={`app ${isRail ? 'left-rail' : ''} ${showChat && mode === 'docked' ? 'chat-docked' : ''}`}
       style={{ '--left-w': `${lw}px`, '--right-w': `${rw}px` } as React.CSSProperties}>
-      <Sidebar projects={s.projects} accounts={s.accounts} connected={s.connected} selected={selected}
-        collapsed={isRail} overlay={tiny && tinyOpen} onCollapse={collapse} onExpand={expand}
-        onProject={id => { setSelected(id); setTinyOpen(false); }} onNew={() => setShowNew(true)} onSettings={t => { setSettings(t ?? 'accounts'); setTinyOpen(false); }}
-        reloadProjects={s.loadProjects} reloadAccounts={s.loadAccounts} onError={s.setError}
+      <Sidebar {...sideProps} collapsed={isRail} overlay={tiny && tinyOpen}
         resizer={!tiny && <Resizer side="right" width={lw} min={LEFT.min} max={LEFT.max} onWidth={setLeftW} onReset={() => setLeftW(LEFT.def)} label="Resize sidebar" />} />
+      {/* Collapsed: the full sidebar stays mounted off-screen and slides in over the rail on hover, like the chat panel. */}
+      {collapsed && !tiny && <Sidebar {...sideProps} collapsed={false} overlay={false} hovered shown={leftPeek} />}
       {tiny && tinyOpen && <div className="scrim" onClick={() => setTinyOpen(false)} />}
 
       <main className="main">

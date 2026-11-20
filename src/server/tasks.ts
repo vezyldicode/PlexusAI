@@ -72,11 +72,13 @@ export function createTask(projectId: string, t: {
   const parentAc = t.acIds === undefined && t.parentId ? json<string[]>((db.prepare('SELECT ac_ids AS a FROM tasks WHERE id = ?').get(t.parentId) as any)?.a, []) : [];
   const acIds = normAcIds(t.acIds ?? parentAc);
   const origin = t.originSessionId ?? (t.parentId ? (db.prepare('SELECT origin_session_id AS o FROM tasks WHERE id = ?').get(t.parentId) as any)?.o : null) ?? null;
+  // A chat request's review / fix / conflict tasks belong to that request: they run while the pipeline is paused too.
+  const adhoc = t.adhoc ?? (t.parentId ? !!(db.prepare('SELECT adhoc AS a FROM tasks WHERE id = ?').get(t.parentId) as any)?.a : false);
   db.prepare(`INSERT INTO tasks (id, project_id, seq, title, description, role, kind, status, deps, parent_id, branch, worktree, priority,
               acceptance, ac_ids, author_account_id, review_cycles, paths, origin_session_id, adhoc, last_account_id, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, projectId, seq, t.title, t.description ?? '', t.role, t.kind, JSON.stringify(t.deps ?? []), t.parentId ?? null, t.branch ?? null,
-      t.worktree ?? null, t.priority ?? 50, JSON.stringify(t.acceptance ?? []), JSON.stringify(acIds), t.authorAccountId ?? null, t.reviewCycles ?? 0, JSON.stringify(normPaths(t.paths ?? [])), origin, t.adhoc ? 1 : 0, t.lastAccountId ?? null, now(), now());
+      t.worktree ?? null, t.priority ?? 50, JSON.stringify(t.acceptance ?? []), JSON.stringify(acIds), t.authorAccountId ?? null, t.reviewCycles ?? 0, JSON.stringify(normPaths(t.paths ?? [])), origin, adhoc ? 1 : 0, t.lastAccountId ?? null, now(), now());
   const lane = t.laneFrom ? laneFields(t.laneFrom) : null;
   if (lane || t.pinnedAccountId || t.inbox?.length) {
     updateTask(id, { ...(lane ?? {}), ...(t.pinnedAccountId ? { pinnedAccountId: t.pinnedAccountId } : {}), ...(t.inbox?.length ? { inbox: t.inbox } : {}) }, true);

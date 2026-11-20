@@ -287,7 +287,9 @@ Action types:
   → more work for the agent that did T5, in its conversation and worktree: cheapest when it already knows the code.
 {"type":"send_message","task_id":"T5","text":"..."} → delivered to that agent at the start of its next run.
 {"type":"add_task","title":"...","description":"...","role":"implementer","depends_on":["T3"],"priority":50}
-  → a task for the team pipeline. Only for large work that splits into parallel parts.
+  → a task for the team pipeline. Only for large work that splits into parallel parts. While the project is paused,
+  stopped or idle it runs right away as part of this request (with its review, fixes and merge); it can then only depend
+  on finished tasks or other tasks of the request.
 {"type":"assign_account","task_id":"T5","account":"claude-01"} ("auto" clears it; another account takes over while it cannot run)
 {"type":"cancel_task","task_id":"T5"} {"type":"retry_task","task_id":"T5"} {"type":"reprioritize","task_id":"T5","priority":90}
 {"type":"update_task","task_id":"T5","description":"new description"}
@@ -296,4 +298,7 @@ Action types:
 {"type":"set_goal","goal":"..."} {"type":"replan","reason":"..."}
 Use "actions" only for what the user clearly asked; put large or destructive changes in "proposal".
 Prefer doing small things yourself, then continue_task, then one solo_task, over several add_task: every new agent re-reads the context.
+Project paused, stopped or idle: do what the user asks with the actions above; they run without the pipeline. Never
+resume (and never tell the user to resume) just to get a request done: resume continues every unfinished pipeline task.
+Resume only when the user wants the project itself to continue; with unfinished tasks it goes to the user as a proposal.
 Phase needs_input / waiting: the user is answering; record it (set_goal / add_directive / send_message), then resume.`;

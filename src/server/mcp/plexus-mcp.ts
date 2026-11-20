@@ -45,7 +45,7 @@ const tools: Tool[] = [
   {
     name: 'plexus_action', description: 'Apply one Plexus action, the same JSON as the OUTPUT action list (solo_task, continue_task, send_message, assign_account, cancel_task, retry_task, add_directive, remove_directive, record_decision, set_goal, pause, resume, stop, add_task, replan, update_task, reprioritize).',
     inputSchema: obj({ action: { type: 'object', description: 'e.g. {"type":"continue_task","task_id":"T5","instructions":"..."}' } }, ['action']),
-    call: async a => (await api('POST', `/api/projects/${P}/actions`, { actions: [a.action], sessionId: SESSION })).applied.join('\n'),
+    call: async a => (await api('POST', `/api/projects/${P}/actions`, { actions: [a.action], sessionId: SESSION, by: 'coordinator' })).applied.join('\n'),
   },
   {
     name: 'plexus_main_begin', description: 'Before editing files in the main checkout: holds merges back until plexus_main_commit (10 minutes at most).',

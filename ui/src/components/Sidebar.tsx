@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Copy, FolderOpen, LogIn, PanelLeftClose, Pencil, Plus, Power, RefreshCw, Settings, Trash2 } from 'lucide-react';
+import { Copy, FolderOpen, LogIn, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Power, RefreshCw, Settings, Trash2 } from 'lucide-react';
 import { api, timeAgo } from '../api.ts';
 import type { Account, Project } from '../types.ts';
 import { ContextMenu, Dot, Ic, Meter, type MenuItem } from '../ui.tsx';
@@ -13,6 +13,12 @@ interface Props {
   collapsed: boolean;
   /** Full sidebar drawn over the content (narrow windows). */
   overlay: boolean;
+  /** This instance is the hover overlay that slides in over the icon rail. */
+  hovered?: boolean;
+  /** Hover overlay is slid in. */
+  shown?: boolean;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
   onCollapse: () => void;
   onExpand: () => void;
   onProject: (id: string) => void;
@@ -81,7 +87,7 @@ export function Sidebar(p: Props) {
   const conn = <span className={`conn ${p.connected ? 'ok' : 'bad'}`} title={p.connected ? 'Connected to the daemon' : 'Daemon not reachable'} />;
 
   if (p.collapsed) return (
-    <aside className="sidebar rail" aria-label="Navigation">
+    <aside className="sidebar rail" aria-label="Navigation" onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
       <button className="rail-brand" title="Expand sidebar" aria-label="Expand sidebar" onClick={p.onExpand}><Mark /></button>
       <div className="rail-list">
         {p.projects.map(pr => (
@@ -102,13 +108,15 @@ export function Sidebar(p: Props) {
   );
 
   return (
-    <aside className={`sidebar ${p.overlay ? 'overlay' : ''}`} aria-label="Navigation">
+    <aside className={`sidebar ${p.overlay ? 'overlay' : ''} ${p.hovered ? 'hover-overlay' : ''} ${p.hovered && p.shown ? 'shown' : ''}`} aria-label="Navigation"
+      aria-hidden={p.hovered && !p.shown ? true : undefined} onMouseEnter={p.hovered ? p.onMouseEnter : undefined} onMouseLeave={p.hovered ? p.onMouseLeave : undefined}>
       <div className="brand">
         <button className={`brand-btn ${refresh.busy ? 'busy' : ''}`} title="Refresh status and quota of all accounts" aria-busy={refresh.busy} onClick={refreshAll}><Mark /><span>Plexus</span></button>
         {refresh.note && <span className="brand-note" role="status">{refresh.note}</span>}
         {conn}
         <span className="spacer" />
-        <button className="icon-btn" title="Collapse sidebar" aria-label="Collapse sidebar" onClick={p.onCollapse}><Ic i={PanelLeftClose} /></button>
+        <button className="icon-btn" title={p.hovered ? 'Keep sidebar open' : 'Collapse sidebar'} aria-label={p.hovered ? 'Keep sidebar open' : 'Collapse sidebar'}
+          onClick={p.hovered ? p.onExpand : p.onCollapse}><Ic i={p.hovered ? PanelLeftOpen : PanelLeftClose} /></button>
       </div>
 
       <div className="side-group projects">

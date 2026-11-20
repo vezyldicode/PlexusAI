@@ -97,6 +97,13 @@ const accountRef = (ref: string) => {
   return a.id;
 };
 
+const RESUME_HELD = 'resume held';
+
+/** Pipeline work a resume would continue: unfinished tasks that are not chat requests. */
+function unfinishedPipeline(projectId: string): Task[] {
+  return listTasks(projectId).filter(t => !t.adhoc && ['pending', 'interrupted', 'blocked', 'in_review'].includes(t.status));
+}
+
 /** Apply coordinator / user actions. Returns human-readable summaries. */
 export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null, turn?: { ctx: number; at: string }): string[] {
   const p = mustProject(projectId);
@@ -106,13 +113,27 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
     try {
       switch (a.type) {
         case 'pause': orchestrator.pause(projectId, sessionId); done.push('paused'); break;
-        case 'resume': void orchestrator.resume(projectId, sessionId); done.push('resumed'); break;
+        case 'resume': {
+          // The coordinator never restarts the user's unfinished pipeline on its own: that needs the user's approval.
+          const left = by === 'coordinator' ? unfinishedPipeline(projectId) : [];
+          if (left.length) { done.push(`${RESUME_HELD}: ${left.length} unfinished pipeline task(s) would continue (${left.slice(0, 8).map(shortId).join(', ')}); the user approves it as a proposal`); break; }
+          void orchestrator.resume(projectId, sessionId); done.push('resumed'); break;
+        }
         case 'stop': orchestrator.stop(projectId, sessionId); done.push('stopped'); break;
         case 'add_task': {
-          const deps = a.depends_on.map(d => findTask(projectId, d)?.id).filter((x): x is string => !!x);
-          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps, priority: a.priority ?? 70, originSessionId: sessionId });
-          done.push(`added ${shortId(t)} "${t.title}"`);
-          if (mustProject(projectId).status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
+          const status = mustProject(projectId).status;
+          // The pipeline is paused / stopped / not started: the task is part of this chat request. It runs now (with its
+          // review, fixes and merge) and the rest of the pipeline stays as it is. It can only wait for finished work or
+          // for other tasks of a request: a paused pipeline task would never run.
+          const request = status !== 'running' && status !== 'completed';
+          const refs = a.depends_on.map(d => findTask(projectId, d)).filter((x): x is Task => !!x);
+          const kept = request ? refs.filter(d => d.adhoc || d.status === 'done') : refs;
+          const dropped = refs.filter(d => !kept.includes(d));
+          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps: kept.map(d => d.id), priority: a.priority ?? 70, originSessionId: sessionId, adhoc: request });
+          done.push(`added ${shortId(t)} "${t.title}"${request ? ` (runs now for this request; the ${status} pipeline is not touched)` : ''}` +
+            (dropped.length ? `; not waiting for ${dropped.map(shortId).join(', ')} (paused pipeline work)` : ''));
+          if (request) void orchestrator.tick();
+          else if (status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
           break;
         }
         case 'solo_task': {
@@ -340,7 +361,16 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     const turn = usable && out.sessionId ? { ctx: out.usage?.lastCtx ?? 0, at: now() } : undefined;
     const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId, turn);
     meta.applied = applied;
-    if (parsed.proposal?.actions.length) meta.proposal = { ...parsed.proposal, status: 'pending' };
+    let proposal = parsed.proposal?.actions.length ? parsed.proposal : null;
+    // A held resume becomes a proposal: the user sees which unfinished tasks would continue and decides.
+    const held = applied.find(x => x.startsWith(RESUME_HELD));
+    if (held && !proposal?.actions.some(x => x.type === 'resume')) {
+      const why = `Resume the project: ${held.slice(RESUME_HELD.length + 2).replace(/; the user approves it as a proposal$/, '')}.`;
+      proposal = proposal
+        ? { summary: `${proposal.summary}\n${why}`, actions: [...proposal.actions, { type: 'resume' }] }
+        : { summary: why, actions: [{ type: 'resume' }] };
+    }
+    if (proposal) meta.proposal = { ...proposal, status: 'pending' };
     say('coordinator', parsed.reply, meta);
   } finally {
     runningByAccount.set(account.id, Math.max(0, (runningByAccount.get(account.id) ?? 1) - 1));

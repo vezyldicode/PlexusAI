@@ -114,11 +114,18 @@ kbd { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 4px;
 .app.chat-docked { grid-template-columns: var(--left) minmax(0, 1fr) var(--right); }
 .app.left-rail { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 .app.left-rail.chat-docked { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--right); }
+.app > .main { grid-column: 2; }
+.app.chat-docked > .chat-panel { grid-column: 3; }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing .net { pointer-events: none; }
 .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
 
 .sidebar { position: relative; background: var(--deep); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.sidebar.hover-overlay {
+  position: fixed; top: 0; left: 0; bottom: 0; z-index: 19; width: var(--left); box-shadow: 8px 0 24px rgba(0, 0, 0, 0.45);
+  transform: translateX(calc(-100% - 24px)); visibility: hidden; transition: transform 220ms var(--ease), visibility 0s linear 220ms;
+}
+.sidebar.hover-overlay.shown { transform: none; visibility: visible; transition: transform 220ms var(--ease), visibility 0s; }
 .brand { height: 56px; padding: 0 12px 0 8px; display: flex; align-items: center; gap: 8px; flex: none; }
 .brand-btn { height: 32px; padding: 0 8px; gap: 8px; font-size: 15px; font-weight: 500; background: transparent; border-color: transparent; box-shadow: none; }
 .brand-btn:hover { background: var(--card); }

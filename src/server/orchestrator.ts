@@ -188,7 +188,7 @@ export class Orchestrator {
   pause(id: string, sessionId?: string | null) {
     setControlSession(id, sessionId);
     setProjectStatus(id, 'paused');
-    postMessage(id, 'system', 'Paused: no new tasks will start; running tasks finish their current attempt.');
+    postMessage(id, 'system', 'Paused: no new pipeline tasks will start; running tasks finish their current attempt. Requests from the chat still run.');
   }
 
   resume(id: string, sessionId?: string | null) {
@@ -315,11 +315,26 @@ export class Orchestrator {
         if (p.status === 'running') {
           await this.advance(p.id);
           this.schedule(mustProject(p.id));
-        } else this.schedule(p, true); // idle, completed, paused, stopped: chat requests only
+        } else { // idle, completed, paused, stopped: chat requests only
+          this.dropDeadRequests(p);
+          this.schedule(p, true);
+        }
       }
     } catch (e: any) {
       bus.emitEvent('orchestrator.error', null, { message: String(e?.stack ?? e) });
     } finally { this.ticking = false; }
+  }
+
+  /** advance() does not run while the pipeline is stopped: a request task whose dependency failed would wait forever. */
+  private dropDeadRequests(p: Project) {
+    const tasks = listTasks(p.id);
+    const byId = new Map(tasks.map(t => [t.id, t]));
+    for (const t of tasks) {
+      if (t.adhoc && t.status === 'pending' && t.deps.some(d => ['failed', 'cancelled'].includes(byId.get(d)?.status ?? ''))) {
+        setStatus(t.id, 'cancelled', { error: 'a dependency failed' });
+        postMessage(p.id, 'system', `${shortId(t)} "${t.title}" was cancelled because a task it waited for failed.`, { taskId: t.id, level: 'attention' });
+      }
+    }
   }
 
   /** Why a project currently can't start work, for the UI: no usable account (with the earliest reset, if known). */
@@ -337,7 +352,7 @@ export class Orchestrator {
     bus.emitEvent('project.waiting', id, next, false);
   }
 
-  /** `adhocOnly`: the project pipeline is not running; only single-agent tasks requested from the chat may start. */
+  /** `adhocOnly`: the project pipeline is not running; only chat requests (adhoc tasks and their review / fix / conflict tasks) may start. */
   private schedule(p: Project, adhocOnly = false) {
     const all = listTasks(p.id);
     const active = all.filter(t => t.status === 'running');
@@ -509,6 +524,20 @@ export class Orchestrator {
     }
     // Solo and evaluation results fold their follow-ups into the next step themselves (fewer hand-offs).
     if (mustProject(p.id).status !== 'completed' && t.kind !== 'solo' && t.kind !== 'evaluate') this.createFollowUps(p, getTask(t.id)!, r);
+    this.reportRequestDone(p, getTask(t.id)!);
+  }
+
+  private reportedRequests = new Set<string>();
+
+  /** A chat request done by team roles (build/custom with its review, fixes, merge) is finished: tell the chat. */
+  private reportRequestDone(p: Project, t: Task) {
+    let root = t;
+    for (let guard = 0; root.parentId && guard < 20; guard++) root = getTask(root.parentId) ?? root;
+    if (!root.adhoc || root.kind === 'solo' || root.status !== 'done' || this.reportedRequests.has(root.id)) return;
+    this.reportedRequests.add(root.id);
+    const r = root.result;
+    postMessage(p.id, 'agent', `${shortId(root)} "${root.title}" finished${r ? ` (${r.status}): ${r.summary || '(no summary given)'}` : '.'}`,
+      { taskId: root.id, level: 'done' });
   }
 
   private createArchitect(p: Project, after: Task | null) {
@@ -800,6 +829,11 @@ export class Orchestrator {
 
   private createFollowUps(p: Project, t: Task, r: AgentResult) {
     if (!r.follow_up_tasks.length) return;
+    // A chat request does exactly what was asked: follow-ups are suggestions for the user, not new pipeline work.
+    if (t.adhoc) {
+      postMessage(p.id, 'agent', `${shortId(t)} suggests follow-ups (not started): ${r.follow_up_tasks.map(f => f.title).join('; ')}`, { taskId: t.id });
+      return;
+    }
     // Before planning is done, suggested work goes to the planner as notes instead of becoming duplicate tasks.
     if (['ingest', 'architect', 'plan'].includes(t.kind)) {
       if (t.kind !== 'plan') appendMemory(p, 'planning-notes.md', r.follow_up_tasks.map(f => `- (${t.role}) ${f.title}: ${f.description}`).join('\n'));
