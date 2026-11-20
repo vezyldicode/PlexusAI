@@ -4,23 +4,50 @@
     {
       "name": "plexus-dev",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["src/server/main.ts"],
-      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/home", "PLEXUS_PORT": "4318" },
+      "runtimeArgs": [
+        "src/server/main.ts"
+      ],
+      "env": {
+        "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/home",
+        "PLEXUS_PORT": "4318"
+      },
       "port": 4318
     },
     {
       "name": "plexus-mock",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["src/server/main.ts"],
-      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/mock-home", "PLEXUS_PORT": "4319" },
+      "runtimeArgs": [
+        "src/server/main.ts"
+      ],
+      "env": {
+        "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/mock-home",
+        "PLEXUS_PORT": "4319"
+      },
       "port": 4319
     },
     {
       "name": "plexus-test",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["src/server/main.ts"],
-      "env": { "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/test-home", "PLEXUS_PORT": "4320" },
+      "runtimeArgs": [
+        "src/server/main.ts"
+      ],
+      "env": {
+        "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/test-home",
+        "PLEXUS_PORT": "4320"
+      },
       "port": 4320
+    },
+    {
+      "name": "plexus-fresh",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "src/server/main.ts"
+      ],
+      "env": {
+        "PLEXUS_HOME": "G:/03_Work/Projects/Multiagent-swarm/.plexus-dev/fresh-home",
+        "PLEXUS_PORT": "4321"
+      },
+      "port": 4321
     }
   ]
 }

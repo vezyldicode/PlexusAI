@@ -76,7 +76,9 @@ export function usePlexus(selectedId: string | null) {
     setSessionIdState(sid);
   }, []);
 
-  useEffect(() => { loadProjects(); loadAccounts(); }, [loadProjects, loadAccounts]);
+  /** True once the first projects and accounts reads have settled (the boot screen waits for it). */
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { void Promise.allSettled([loadProjects(), loadAccounts()]).then(() => setLoaded(true)); }, [loadProjects, loadAccounts]);
   useEffect(() => {
     setLogs([]); setLastLine({}); setThinking({}); setSessions([]); setSessionIdState(null); setMessages([]);
     loadDetail(); loadSessions();
@@ -117,7 +119,7 @@ export function usePlexus(selectedId: string | null) {
   const [, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 5000); return () => clearInterval(t); }, []);
 
-  return { projects, accounts, detail, messages, sessions, sessionId, setSessionId, loadSessions, logs, lastLine, logTick, activity, connected, thinking, error, setError, loadProjects, loadAccounts, loadDetail, loadMessages };
+  return { loaded, projects, accounts, detail, messages, sessions, sessionId, setSessionId, loadSessions, logs, lastLine, logTick, activity, connected, thinking, error, setError, loadProjects, loadAccounts, loadDetail, loadMessages };
 }
 
 export type Plexus = ReturnType<typeof usePlexus>;

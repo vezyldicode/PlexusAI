@@ -32,9 +32,9 @@ const SECTIONS: { title: string; tabs: TabDef[] }[] = [
 const ALL_TABS = SECTIONS.flatMap(s => s.tabs);
 const ENGINE_TABS: SettingsTab[] = ['quota', 'scheduler', 'context', 'coordinator', 'advanced'];
 
-export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, onError, project, reloadProject }: {
+export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, onError, project, reloadProject, onRunSetup }: {
   tab: SettingsTab; onTab: (t: SettingsTab) => void; onClose: () => void; accounts: Account[]; reloadAccounts: () => void; onError: (e: string) => void;
-  project: Project | null; reloadProject: () => void;
+  project: Project | null; reloadProject: () => void; onRunSetup?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const store = useConfig(onError);
@@ -101,6 +101,13 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
             {tab === 'skills' && <SkillsSettings onError={onError} />}
             {tab === 'project' && <ProjectSettingsPanel project={project} reloadProject={reloadProject} store={store} scope={scope} onScope={setScope} onError={onError} />}
             {ENGINE_TABS.includes(tab) && <EngineSettings tab={tab as EngineTab} title={cur.label} store={store} />}
+            {tab === 'advanced' && onRunSetup && (
+              <section className="setup-again">
+                <h2>First-run setup</h2>
+                <p className="lead">Check Git, the coding CLIs and the signed-in accounts again, one step at a time</p>
+                <div className="row"><button onClick={onRunSetup}>Run setup again</button></div>
+              </section>
+            )}
           </div>
         </div>
         <TooltipLayer root={ref} />

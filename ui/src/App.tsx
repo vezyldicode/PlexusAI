@@ -10,6 +10,8 @@ import { NewProjectDialog } from './pages.tsx';
 import { SettingsDialog, type SettingsTab } from './settings.tsx';
 import { Empty, Ic } from './ui.tsx';
 import { Resizer, clamp, useMedia, useStored } from './layout.tsx';
+import { Boot, Onboarding } from './onboarding.tsx';
+import { api } from './api.ts';
 
 const MAX_TABS = 24;
 const LEFT = { def: 264, min: 208, max: 400 };
@@ -45,6 +47,25 @@ export default function App() {
   useEffect(() => { if (!tiny) setTinyOpen(false); }, [tiny]);
 
   const s = usePlexus(selected);
+
+  // Boot screen until the first data is in. Coming from the desktop splash (?splash) the heartbeat already ran,
+  // so it holds still; in a browser tab it draws once and stays long enough to finish.
+  const fromSplash = useRef(new URLSearchParams(location.search).has('splash')).current;
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
+  useEffect(() => {
+    // If the check fails, open the app rather than trap people in setup.
+    api<{ onboarded: boolean }>('GET', '/api/setup').then(r => { setOnboarded(r.onboarded); if (!r.onboarded) setShowSetup(true); }).catch(() => setOnboarded(true));
+  }, []);
+  const [minShown, setMinShown] = useState(fromSplash);
+  useEffect(() => { if (fromSplash) return; const t = setTimeout(() => setMinShown(true), 700); return () => clearTimeout(t); }, [fromSplash]);
+  const booted = s.loaded && onboarded !== null && minShown;
+  const [bootGone, setBootGone] = useState(false);
+  useEffect(() => { if (!booted) return; const t = setTimeout(() => setBootGone(true), 220); return () => clearTimeout(t); }, [booted]);
+  const finishSetup = (skipped: boolean) => {
+    void api('POST', '/api/setup/complete', { skipped }).catch(e => s.setError(e.message));
+    setOnboarded(true); setShowSetup(false); s.loadAccounts();
+  };
 
   useEffect(() => { if (selected) store('plexus.project', selected); setTabs([]); setActive(COORDINATOR); }, [selected]);
   useEffect(() => { store('plexus.view', view); }, [view]);
@@ -137,7 +158,9 @@ export default function App() {
       )}
       {showNew && <NewProjectDialog onClose={() => setShowNew(false)} onCreated={id => { setShowNew(false); setSelected(id); s.loadProjects(); }} onError={s.setError} />}
       {settings && <SettingsDialog tab={settings} onTab={setSettings} onClose={() => setSettings(null)} accounts={s.accounts} reloadAccounts={s.loadAccounts} onError={s.setError}
-        project={d?.project ?? null} reloadProject={() => { s.loadDetail(); void s.loadProjects(); }} />}
+        project={d?.project ?? null} reloadProject={() => { s.loadDetail(); void s.loadProjects(); }} onRunSetup={() => { setSettings(null); setShowSetup(true); }} />}
+      {showSetup && <Onboarding accounts={s.accounts} reloadAccounts={s.loadAccounts} onDone={finishSetup} onError={s.setError} />}
+      {!bootGone && <Boot leaving={booted} />}
     </div>
   );
 }

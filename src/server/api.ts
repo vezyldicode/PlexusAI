@@ -31,6 +31,7 @@ import { appConfig, configOverrides, projectDefaults, updateConfig, updateProjec
 import { DEFAULT_APP_CONFIG, CONFIG_BOUNDS } from '../shared/config.ts';
 import { DEFAULT_PROJECT_SETTINGS } from '../shared/types.ts';
 import { chooseFolder } from './folder-picker.ts';
+import { completeOnboarding, loginStatus, onboardingState, openInstall, setupChecks, INSTALL_COMMANDS, type InstallTool } from './setup.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
 function promptOf(path: string, maxBytes = 400_000): string {
@@ -108,6 +109,16 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return { ok: true };
   });
 
+  // ---- first-run setup
+  app.get('/api/setup', async () => onboardingState());
+  app.post('/api/setup/check', async () => setupChecks());
+  app.post('/api/setup/complete', async req => completeOnboarding(!!body(req).skipped));
+  app.post('/api/setup/install', async (req, reply) => {
+    const tool = String(body(req).tool ?? '') as InstallTool;
+    if (!(tool in INSTALL_COMMANDS)) return reply.code(400).send({ error: 'unknown tool' });
+    return openInstall(tool);
+  });
+
   // ---- accounts
   app.get('/api/accounts', async () => listAccounts());
   app.post('/api/accounts', async req => {
@@ -119,6 +130,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.delete('/api/accounts/:id', async req => { removeAccount(id(req)); return { ok: true }; });
   app.post('/api/accounts/:id/login', async req => openLogin(id(req)));
   app.post('/api/accounts/:id/probe', async req => probeAccount(id(req)));
+  app.post('/api/accounts/:id/login-status', async req => loginStatus(id(req)));
   // Re-check every enabled account (state + quota) in parallel; one failing account doesn't stop the others.
   app.post('/api/accounts/probe', async () => {
     const enabled = listAccounts().filter(a => a.enabled);
