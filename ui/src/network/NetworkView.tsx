@@ -4,7 +4,7 @@ import { api, timeAgo } from '../api.ts';
 import type { LogLine, ProjectDetail } from '../store.ts';
 import type { Account, Provider, Role, Task } from '../types.ts';
 import { Dot, Ic, label, Tokens } from '../ui.tsx';
-import { COORD_H, COORD_W, COORDINATOR, layout, NODE_H, NODE_W, type NodeBox } from './layout.ts';
+import { COORD_H, COORD_W, COORDINATOR, layout, NODE_H, NODE_W, originOf, type NodeBox } from './layout.ts';
 import { EffortSelect, ModelDatalist, shownModel, useModels } from '../models.tsx';
 import { modelLabel } from '../settings.tsx';
 
@@ -50,7 +50,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
     const pad = 48;
     const w = g.width + pad * 2, h = g.height + pad * 2;
     // Fit when the graph is small enough to stay readable; otherwise keep 60 % and anchor to the top left.
-    const k = Math.min(1, Math.max(0.6, Math.min(el.clientWidth / w, el.clientHeight / h)));
+    const k = Math.min(1, Math.max(0.8, Math.min(el.clientWidth / w, el.clientHeight / h)));
     const fitsX = g.width * k + pad * 2 <= el.clientWidth, fitsY = g.height * k + pad * 2 <= el.clientHeight;
     setView({ k, x: fitsX ? (el.clientWidth - g.width * k) / 2 : pad, y: fitsY ? (el.clientHeight - g.height * k) / 2 : pad });
   };
@@ -143,25 +143,29 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
           const t = n.task;
           const acct = accountOf(t);
           const model = modelOf(t);
+          const from = originOf(t);
           return (
-            <div key={n.id} role="button" tabIndex={0} className={`node s-${t.status} ${active === t.id ? 'sel' : ''}`} style={{ left: n.x, top: n.y, width: NODE_W, height: NODE_H }}
+            <div key={n.id} role="button" tabIndex={0} className={`node s-${t.status} o-${from} ${active === t.id ? 'sel' : ''}`} style={{ left: n.x, top: n.y, width: NODE_W, height: NODE_H }}
               onClick={() => onOpen(t.id)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(t.id); } }}
               onMouseEnter={() => setHover(n)} onMouseLeave={() => setHover(h => (h?.id === n.id ? null : h))}>
               <div className="node-top">
                 <Dot state={t.status} />
                 <span className="node-id num">T{t.seq}</span>
-                <span className="node-role">{t.role}</span>
+                <span className="node-role">{from === 'coordinator' ? 'coordinator edit' : t.role}</span>
+                {from === 'chat' && <span className="tag" title="Asked for in the coordinator chat">chat</span>}
                 <Tokens u={detail.usage.tasks[t.id]} className="node-tok" />
                 {t.attempts > 1 && <span className="node-att num" title="Attempts">×{t.attempts}</span>}
               </div>
               <div className="node-title">{t.title}</div>
-              <div className="node-meta">
+              {from === 'coordinator' ? (
+                <div className="node-meta"><span className="node-acct mono">{t.paths.length === 1 ? t.paths[0] : `${t.paths.length} files`}</span><span className="node-acct">{timeAgo(t.updatedAt)}</span></div>
+              ) : <div className="node-meta">
                 <span className="node-acct">{acct?.label ?? (t.status === 'pending' ? 'queued' : '—')}</span>
                 <button className="chip" title="Model and effort for this task (applies from the next attempt)"
                   onClick={e => { e.stopPropagation(); setHover(null); setEdit(editFor(n, providerOf(t))); }}>
                   {model || 'default'}{effortOf(t) ? ` · ${effortOf(t)}` : ''}
                 </button>
-              </div>
+              </div>}
             </div>
           );
         })}
@@ -178,16 +182,20 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
             <div className="hc-title">T{t.seq} {t.title}</div>
             <dl className="hc-grid">
               <dt>Status</dt><dd>{label(t.status)}</dd>
-              <dt>Role</dt><dd>{t.role} · {t.kind}</dd>
-              <dt>Account</dt><dd>{accountOf(t)?.label ?? '—'}</dd>
-              <dt>Model</dt><dd>{modelOf(t) || 'CLI default'}{effortOf(t) ? ` · ${effortOf(t)} effort` : ''}</dd>
+              {originOf(t) === 'coordinator' ? <><dt>By</dt><dd>The coordinator, itself</dd></> : <>
+                <dt>Role</dt><dd>{t.role} · {t.kind}</dd>
+                <dt>Account</dt><dd>{accountOf(t)?.label ?? '—'}</dd>
+                <dt>Model</dt><dd>{modelOf(t) || 'CLI default'}{effortOf(t) ? ` · ${effortOf(t)} effort` : ''}</dd>
+              </>}
+              {originOf(t) !== 'plan' && <><dt>From</dt><dd>{t.originSessionId ? 'Coordinator chat' : 'Coordinator'}</dd></>}
               {t.branch && <><dt>Branch</dt><dd className="mono">{t.branch}</dd></>}
               {t.paths.length > 0 && <><dt>Files</dt><dd className="mono">{t.paths.join(', ')}</dd></>}
               <dt>Updated</dt><dd>{timeAgo(t.updatedAt)}</dd>
             </dl>
             {line && t.status === 'running' && <div className="hc-line mono">{line.text.slice(0, 220)}</div>}
             {t.error && t.status !== 'done' && <div className="hc-line err">{t.error.slice(0, 220)}</div>}
-            <div className="hc-foot">Click to open this agent's input and output</div>
+            {originOf(t) === 'coordinator' && t.result?.summary && <div className="hc-line">{t.result.summary}</div>}
+            <div className="hc-foot">{originOf(t) === 'coordinator' ? 'Click to see the message and files' : "Click to open this agent's input and output"}</div>
           </div>
         );
       })()}
@@ -227,7 +235,7 @@ export function NetworkView({ detail, accounts, lastLine, thinking, active, onOp
 
       <div className="net-legend">
         <span><Dot state="running" /> Running</span><span><Dot state="pending" /> Queued</span><span><Dot state="in_review" /> In review</span>
-        <span><Dot state="done" /> Done</span><span><Dot state="failed" /> Failed</span>
+        <span><Dot state="done" /> Done</span><span><Dot state="blocked" /> Blocked</span><span><Dot state="failed" /> Failed</span>
       </div>
     </div>
   );

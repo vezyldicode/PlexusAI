@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -107,6 +107,52 @@ test('readResult falls back to the json block of the final message', () => {
   const r = readResult(dir, 'Done.\n```json\n{"status":"done","summary":"s","review":{"verdict":"approve"}}\n```');
   assert.equal(r?.review?.verdict, 'approve');
   assert.equal(readResult(dir, 'no json here'), null);
+});
+
+test('removing a worktree never deletes what a link inside it points to (node_modules junction)', async () => {
+  const { removeWorktree } = await import('../src/server/util/git.ts');
+  const repo = mkdtempSync(join(tmpdir(), 'plexus-wt-'));
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+  writeFileSync(join(repo, 'a.txt'), 'a');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'a'], { cwd: repo });
+  const deps = join(repo, 'node_modules', 'zod');
+  mkdirSync(deps, { recursive: true });
+  writeFileSync(join(deps, 'index.js'), 'x');
+  const wt = join(mkdtempSync(join(tmpdir(), 'plexus-wt2-')), 'T1');
+  execFileSync('git', ['worktree', 'add', '-q', '--detach', wt], { cwd: repo });
+  mkdirSync(join(wt, 'ui'));
+  symlinkSync(join(repo, 'node_modules'), join(wt, 'node_modules'), 'junction');
+  symlinkSync(join(repo, 'node_modules'), join(wt, 'ui', 'node_modules'), 'junction');
+  await removeWorktree(repo, wt);
+  assert.equal(existsSync(wt), false);
+  assert.equal(existsSync(join(deps, 'index.js')), true);
+});
+
+test('readResult accepts the near-miss shapes an agent writes after compaction (no extra run to fix the JSON)', () => {
+  // Shape of a real solo result that was rejected and cost a whole extra run on a 105k context.
+  const dir = mkdtempSync(join(tmpdir(), 'plexus-res-'));
+  mkdirSync(join(dir, '.plexus-task'));
+  writeFileSync(join(dir, '.plexus-task', 'result.json'), JSON.stringify({
+    status: 'done', summary: 's',
+    decisions: ['Chat tasks get a tag', 'Coordinator edits become records'],
+    follow_up_tasks: ['Test workspace-merge records'],
+    issues: [{ screen: 'board', sign: 'cramped' }],
+    escalate: false,
+    codemap: { 'src/a.ts': 'does A', 'ui/b.tsx': 'shows B' },
+    evaluation: { criteria: [{ criterion: 'build passes', pass: true, evidence: 'vite ok' }, { criterion: 'tests', pass: 'true' }] },
+  }));
+  const r = readResult(dir, '');
+  assert.ok(r);
+  assert.equal(r.decisions[0].title, 'Chat tasks get a tag');
+  assert.equal(r.decisions[1].decision, 'Coordinator edits become records');
+  assert.equal(r.follow_up_tasks[0].title, 'Test workspace-merge records');
+  assert.equal(typeof r.issues[0], 'string');
+  assert.equal(r.escalate, null);
+  assert.match(r.codemap!, /- src\/a\.ts: does A/);
+  assert.equal(r.evaluation?.complete, true);
+  assert.equal(r.evaluation?.criteria[0].id, 'build passes');
+  assert.equal(r.evaluation?.criteria[1].pass, true);
 });
 
 test('coordinator output parsing tolerates prose around the JSON', () => {

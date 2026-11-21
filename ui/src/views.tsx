@@ -4,6 +4,9 @@ import { api, clock, timeAgo } from './api.ts';
 import type { LogLine, ProjectDetail, Plexus } from './store.ts';
 import type { Project, Role, Task } from './types.ts';
 import { Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens, usageTitle } from './ui.tsx';
+import { originOf } from './network/layout.ts';
+import { dropAction } from './board.ts';
+import { Markdown } from './markdown.tsx';
 
 export type View = 'network' | 'tasks' | 'activity' | 'memory' | 'report' | 'status';
 export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report', 'status'];
@@ -61,27 +64,53 @@ const COLUMNS: { title: string; statuses: Task['status'][] }[] = [
   { title: 'Failed or cancelled', statuses: ['failed', 'cancelled'] },
 ];
 
-export function TasksView({ detail, active, onOpen }: { detail: ProjectDetail; active: string; onOpen: (id: string) => void }) {
+export function TasksView({ detail, active, onOpen, onError, reload }: {
+  detail: ProjectDetail; active: string; onOpen: (id: string) => void; onError: (e: string) => void; reload: () => void;
+}) {
   const bySeq = useMemo(() => new Map(detail.tasks.map(t => [t.id, t.seq])), [detail.tasks]);
+  // The card being dragged, and the column under the pointer.
+  const [drag, setDrag] = useState<Task | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const drop = (t: Task, column: string) => {
+    const action = dropAction(t.status, column);
+    if (!action) return;
+    if (action === 'cancel' && t.status === 'running' && !confirm(`T${t.seq} is running. Stop and cancel it?`)) return;
+    api('POST', `/api/tasks/${t.id}/${action}`).then(reload).catch(e => onError(e.message));
+  };
   return (
-    <div className="board">
+    <div className={`board ${drag ? 'dragging' : ''}`}>
       {COLUMNS.map(c => {
         const list = detail.tasks.filter(t => c.statuses.includes(t.status)).sort((a, b) => (c.title === 'Done' ? b.seq - a.seq : b.priority - a.priority || a.seq - b.seq));
+        const accepts = !!drag && !!dropAction(drag.status, c.title);
         return (
-          <section key={c.title} className="col">
-            <div className="col-title">{c.title}<span className="num">{list.length}</span></div>
-            {list.map(t => (
-              <button key={t.id} className={`card s-${t.status} ${active === t.id ? 'sel' : ''}`} onClick={() => onOpen(t.id)}>
-                <div className="card-top"><Dot state={t.status} /><span className="num">T{t.seq}</span><span className="card-role">{t.role}</span><Tokens u={detail.usage.tasks[t.id]} className="card-tok" /></div>
-                <div className="card-title">{t.title}</div>
-                <div className="card-meta">
-                  {t.accountId ? t.accountId : t.lastAccountId ? `last ${t.lastAccountId}` : ''}
-                  {t.attempts > 0 ? ` · attempt ${t.attempts}` : ''}
-                  {t.deps.length ? ` · after ${t.deps.map(d => 'T' + bySeq.get(d)).join(', ')}` : ''}
-                </div>
-                {t.error && t.status !== 'done' && <div className="card-err">{t.error.slice(0, 140)}</div>}
-              </button>
-            ))}
+          <section key={c.title} className={`col ${drag ? (accepts ? 'drop-ok' : 'drop-no') : ''} ${accepts && over === c.title ? 'drop-over' : ''}`}
+            onDragOver={e => { if (!accepts) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOver(c.title); }}
+            onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(o => (o === c.title ? null : o)); }}
+            onDrop={e => { e.preventDefault(); const t = drag; setDrag(null); setOver(null); if (t) drop(t, c.title); }}>
+            <div className="col-title"><Dot state={c.statuses[0]} /><span className="col-name" title={c.title}>{c.title}</span><span className="num">{list.length}</span></div>
+            <div className="col-list">
+              {!list.length && <div className="col-empty">{accepts ? 'Drop here' : 'No tasks'}</div>}
+              {list.map(t => (
+                <button key={t.id} className={`card s-${t.status} ${active === t.id ? 'sel' : ''} ${drag?.id === t.id ? 'lifted' : ''}`} onClick={() => onOpen(t.id)}
+                  draggable={originOf(t) !== 'coordinator'}
+                  onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', t.id); setDrag(t); }}
+                  onDragEnd={() => { setDrag(null); setOver(null); }}>
+                  <div className="card-top">
+                    <Dot state={t.status} /><span className="num">T{t.seq}</span>
+                    {originOf(t) === 'chat' && <span className="tag" title="Asked for in the coordinator chat">chat</span>}
+                    <span className="card-role">{originOf(t) === 'coordinator' ? 'coordinator edit' : t.role}</span><Tokens u={detail.usage.tasks[t.id]} className="card-tok" />
+                  </div>
+                  <div className="card-title">{t.title}</div>
+                  <div className="card-meta">
+                    {(originOf(t) === 'coordinator'
+                      ? [`${t.paths.length} file${t.paths.length === 1 ? '' : 's'}`, timeAgo(t.updatedAt)]
+                      : [t.accountId ?? (t.lastAccountId ? `last ${t.lastAccountId}` : ''), t.attempts > 0 ? `attempt ${t.attempts}` : '', t.deps.length ? `after ${t.deps.map(d => 'T' + bySeq.get(d)).join(', ')}` : '']
+                    ).filter(Boolean).join(' · ')}
+                  </div>
+                  {t.error && t.status !== 'done' && <div className="card-err">{t.error.slice(0, 140)}</div>}
+                </button>
+              ))}
+            </div>
           </section>
         );
       })}
@@ -188,7 +217,7 @@ export function MemoryView({ project, onError }: { project: Project; onError: (e
 export function ReportView({ project }: { project: Project }) {
   const [r, setR] = useState('');
   useEffect(() => { api('GET', `/api/projects/${project.id}/report`).then(d => setR(d.report)); }, [project.id, project.status]);
-  return <div className="report">{r ? <pre className="pre prose">{r}</pre> : <div className="stream-empty">The final report appears here when Plexus finishes</div>}</div>;
+  return <div className="report">{r ? <Markdown className="prose" text={r} /> : <div className="stream-empty">The final report appears here when Plexus finishes</div>}</div>;
 }
 
 // ---------------------------------------------------------------- status

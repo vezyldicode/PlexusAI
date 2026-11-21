@@ -1,4 +1,5 @@
 import type { Account, ModelInfo, Provider, QuotaSnapshot, RunTiming, TokenUsage } from '../../shared/types.ts';
+import type { StreamEvent } from './plan.ts';
 
 export type RunState = 'ok' | 'warning' | 'limited' | 'transient' | 'needs_login' | 'blocked' | 'task_error';
 
@@ -36,7 +37,7 @@ export interface RunSpec {
   logPath: string;
   signal?: AbortSignal;
   /** Called for each parsed stream event (already JSON-parsed when possible). */
-  onEvent?: (ev: { kind: 'text' | 'tool' | 'status' | 'raw'; text: string }) => void;
+  onEvent?: (ev: StreamEvent) => void;
 }
 
 export interface RunOutcome {

@@ -7,25 +7,43 @@ import { writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
 import { appConfig } from '../config.ts';
 import { createRunTimer } from './timing.ts';
+import { PLAN_TOOL, planEvent, planItems, type StreamEvent } from './plan.ts';
 
-export function describeClaudeEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
+/**
+ * Everything one line of Claude Code's stream says, in order. An assistant message can hold words and several tool
+ * calls: each becomes its own event, so neither the words before a call nor the calls after the first are lost.
+ */
+export function describeClaudeEvents(line: string): StreamEvent[] {
   let e: any;
-  try { e = JSON.parse(line); } catch { return { kind: 'raw', text: line.slice(0, 500) }; }
+  try { e = JSON.parse(line); } catch { return [{ kind: 'raw', text: line.slice(0, 500) }]; }
   if (e.type === 'assistant') {
-    const parts: string[] = [];
+    const out: StreamEvent[] = [];
+    let words: string[] = [];
+    const flush = () => { if (words.length) out.push({ kind: 'text', text: words.join('\n') }); words = []; };
     for (const c of e.message?.content ?? []) {
-      if (c.type === 'text' && c.text?.trim()) parts.push(c.text.trim());
-      if (c.type === 'tool_use') return { kind: 'tool', text: `${c.name} ${summarizeInput(c.input)}` };
+      if (c.type === 'text' && c.text?.trim()) words.push(c.text.trim());
+      if (c.type === 'tool_use') {
+        flush();
+        // The checklist: Plexus's plexus_plan tool (mcp__plexus__plexus_plan) or Claude Code's own TodoWrite.
+        const plan = c.name === 'TodoWrite' ? planItems(c.input?.todos) : String(c.name).endsWith(PLAN_TOOL) ? planItems(c.input?.items) : null;
+        out.push(plan ? planEvent(plan) : { kind: 'tool', text: `${c.name} ${summarizeInput(c.input)}` });
+      }
     }
-    return parts.length ? { kind: 'text', text: parts.join('\n') } : null;
+    flush();
+    return out;
   }
-  if (e.type === 'result') return { kind: 'status', text: `result: ${e.subtype}${e.is_error ? ' (error)' : ''}` };
+  if (e.type === 'result') return [{ kind: 'status', text: `result: ${e.subtype}${e.is_error ? ' (error)' : ''}` }];
   if (e.type === 'rate_limit_event') {
     const w = e.rate_limit_info?.unifiedWindows;
     const pct = (x: any) => (typeof x?.utilization === 'number' ? Math.round(x.utilization * 100) + '%' : '?');
-    return { kind: 'status', text: `quota ${e.rate_limit_info?.status}: 5h ${pct(w?.five_hour)} · week ${pct(w?.seven_day)}` };
+    return [{ kind: 'status', text: `quota ${e.rate_limit_info?.status}: 5h ${pct(w?.five_hour)} · week ${pct(w?.seven_day)}` }];
   }
-  return null;
+  return [];
+}
+
+/** The first event of a line (tests and callers that look at one event). */
+export function describeClaudeEvent(line: string): StreamEvent | null {
+  return describeClaudeEvents(line)[0] ?? null;
 }
 
 /** The conversation id Claude Code reports in its stream (system init / result events). */
@@ -69,7 +87,7 @@ export const claudeAdapter: ProviderAdapter = {
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
-      onLine: line => { timer.line(line); const d = describeClaudeEvent(line); if (d) spec.onEvent?.(d); },
+      onLine: line => { timer.line(line); for (const d of describeClaudeEvents(line)) spec.onEvent?.(d); },
       stopWhen: () => !!spec.maxCompactions && timer.compactions >= spec.maxCompactions,
     });
     const timing = timer.finish();

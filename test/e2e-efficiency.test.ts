@@ -112,7 +112,7 @@ test('blocked waits, gap rounds resume and converge, pins fall back, coordinator
       return waitFor(async () => { const ms = (await messages(p3.id)).filter((m: any) => m.author === 'coordinator'); return ms.length >= n ? ms.at(-1) : null; }, 30_000, `reply ${n}`);
     };
     const r1 = await say('mcp: plexus_status', 1);
-    assert.match(r1.text, /TOOL: \[plexus tools: 8\] Project pin/, r1.text);
+    assert.match(r1.text, /TOOL: \[plexus tools: 9\] Project pin/, r1.text);
     assert.equal(r1.meta.tools, true);
     const r2 = await say('mcp: plexus_action {"action":{"type":"add_directive","text":"Give the refactor to account mock-b"}}', 2);
     assert.match(r2.text, /directive added/);

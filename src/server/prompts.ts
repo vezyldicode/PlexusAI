@@ -11,6 +11,8 @@ import { autoCommit, baseRef } from './checkout.ts';
 export const TASK_DIR = '.plexus-task';
 export const RESULT_FILE = `${TASK_DIR}/result.json`;
 export const PROGRESS_FILE = `${TASK_DIR}/progress.md`;
+/** The output contract, also kept as a file: a compacted conversation loses the exact schema of the first prompt. */
+export const CONTRACT_FILE = `${TASK_DIR}/contract.md`;
 
 const base = () => readFileSync(join(appRoot, 'defaults', 'base.md'), 'utf8');
 const head = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '\n…(truncated)' : s);
@@ -54,8 +56,13 @@ When finished, write this JSON object to \`${RESULT_FILE}\` (create the folder i
 {
 ${COMMON_FIELDS}${extra ? ',\n' + extra : ''}
 }
-Omit empty arrays if you like. After writing the file, end your reply with the same JSON in a \`\`\`json block.`;
+Omit empty arrays if you like. After writing the file, end your reply with the same JSON in a \`\`\`json block.
+Keep these exact field names and types. A copy of this contract is in \`${CONTRACT_FILE}\`: if your context was
+compacted, read that file again before you write the result.`;
 }
+
+/** Text of the contract file written into the worktree (see CONTRACT_FILE). */
+export const contractText = (kind: Task['kind']): string => `${outputContract(kind)}\n${DECISION_SCOPE}\n`;
 
 function taskSection(p: Project, t: Task): string {
   const parts = [`# TASK ${shortId(t)}: ${t.title}`, `- kind: ${t.kind}\n- role: ${t.role}\n- main branch: ${baseRef(p)}${t.branch ? `\n- your branch: ${t.branch}` : ''}`];
@@ -177,7 +184,7 @@ export function buildForkPrompt(p: Project, t: Task, role: Role, system: string)
   return [
     `# YOU ARE NOW THE AGENT DOING THE WORK
 The conversation above was the coordinator's chat with the user. You continue it as a separate agent: you are no longer
-the coordinator, you have no plexus tools, and your reply is not shown in the chat. You work in a new git worktree (the
+the coordinator, your only plexus tool is plexus_plan (your checklist), and your reply is not shown in the chat. You work in a new git worktree (the
 current directory, branch ${t.branch ?? '(see TASK)'}, created from ${baseRef(p)}); the project folder you saw above is
 not yours to edit. Use what you already learned above (files, causes, decisions) instead of searching again.`,
     system,
@@ -223,6 +230,8 @@ function coordinatorGuide(p: Project, tools: boolean): string {
     ? `You have full permissions in the project: read and edit files, run commands (git, tests), and the \`plexus\` tools:
 plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) · plexus_action(action) (any action listed under OUTPUT) ·
 plexus_main_begin / plexus_main_commit(message: what you changed) · plexus_workspace / plexus_workspace_merge(message).
+For a request of several steps, keep a checklist with plexus_plan(items) (the user watches it): the whole list each time
+a step starts or finishes.
 - Look before you answer: read logs, results, files and git history yourself instead of guessing or asking the user to paste them.
 - Small change (one or two files, no long test run): do it yourself. Call plexus_main_begin first (it holds merges back so you
   never edit the main checkout while a task merges), edit, then plexus_main_commit. Larger change: plexus_workspace gives you
@@ -280,7 +289,10 @@ Action types:
 {"type":"solo_task","title":"...","description":"what to change, where (files, functions, the cause you found), and 2-5 checks that say it is done","account":"optional account id"}
   → ONE agent (your model, own worktree, tests, self-review, merge). Runs even when the project is idle, paused or finished.
   Scope = exactly what the user asked. Never add features, platforms, formats or verification steps the user did not ask
-  for (they multiply the time and quota of the run); offer them in "reply" as optional follow-ups instead. A broad or
+  for (they multiply the time and quota of the run); offer them in "reply" as optional follow-ups instead. Checks are
+  commands the repo already runs (build, typecheck, tests): never require screenshots, demo data, a running server or new
+  test infrastructure unless the user asked for them. Do not add data models, records or endpoints the request does not
+  need. A broad or
   ambiguous request ("remove all limits", "make it better"): say how you read it and put the narrow reading in "proposal".
   When the work is clearly larger than one session, start a first slice and name the rest.
 {"type":"continue_task","task_id":"T5","instructions":"what to do next"}

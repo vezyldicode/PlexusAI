@@ -4,7 +4,9 @@ import type { Task } from '../types.ts';
  * Lays the agent network out as lanes, left to right:
  *  - the coordinator (main agent) on the far left,
  *  - one "Pipeline" lane for the phase tasks (analyse → architect → plan → QA → evaluate),
- *  - one lane per feature: a root build task followed by its review / fix / integrate children.
+ *  - one lane per feature: a root build task followed by its review / fix / integrate children,
+ *  - one "From chat" lane, last, for the work asked for in the coordinator chat and the coordinator's own edits,
+ *    laid out as a grid because those tasks don't depend on each other.
  * Positions are deterministic so nodes don't jump around while Plexus runs.
  */
 
@@ -20,6 +22,11 @@ const LEFT = COORD_W + 96; // first task column starts after the coordinator
 
 const PIPELINE_KINDS = new Set(['ingest', 'architect', 'plan', 'qa', 'evaluate']);
 const FINISHED = new Set(['done', 'cancelled']);
+const CHAT = 'chat';
+const CHAT_COLS = 2; // as wide as the pipeline lane
+
+/** Where a task came from: the planned pipeline, the coordinator chat, or the coordinator's own edit. */
+export const originOf = (t: Task): 'plan' | 'chat' | 'coordinator' => (t.kind === 'coordinator' ? 'coordinator' : t.adhoc ? 'chat' : 'plan');
 
 export interface NodeBox { id: string; x: number; y: number; task: Task }
 export interface Edge { id: string; from: string; to: string; kind: 'assign' | 'parent' | 'dep' | 'flow'; live: boolean; d: string }
@@ -52,13 +59,14 @@ export function layout(tasks: Task[], showFinished: boolean): Graph {
   const laneOrder: string[] = [];
   for (const t of sorted) {
     const r = rootOf(t);
-    const key = PIPELINE_KINDS.has(r.kind) && !r.parentId ? 'pipeline' : r.id;
+    const key = r.adhoc ? CHAT : PIPELINE_KINDS.has(r.kind) && !r.parentId ? 'pipeline' : r.id;
     laneOf.set(t.id, key);
     if (!laneTasks.has(key)) { laneTasks.set(key, []); laneOrder.push(key); }
     laneTasks.get(key)!.push(t);
   }
-  // Pipeline first, features in creation order.
-  laneOrder.sort((a, b) => (a === 'pipeline' ? -1 : b === 'pipeline' ? 1 : 0));
+  // Pipeline first, features in creation order, chat last.
+  const rank = (k: string) => (k === 'pipeline' ? 0 : k === CHAT ? 2 : 1);
+  laneOrder.sort((a, b) => rank(a) - rank(b));
 
   const nodes: NodeBox[] = [];
   const lanes: Lane[] = [];
@@ -74,11 +82,13 @@ export function layout(tasks: Task[], showFinished: boolean): Graph {
     if (finished && !showFinished) { hiddenLanes++; continue; }
 
     const cols = new Map<number, Task[]>();
-    for (const t of list) {
-      const col = key === 'pipeline' ? (pipeIndex.get(rootOf(t).id) ?? 0) + depthOf(t) : depthOf(t);
+    // Chat lane: newest first, so recent work stays near the top.
+    const ordered = key === CHAT ? [...list].reverse() : list;
+    ordered.forEach((t, i) => {
+      const col = key === CHAT ? i % CHAT_COLS : key === 'pipeline' ? (pipeIndex.get(rootOf(t).id) ?? 0) + depthOf(t) : depthOf(t);
       if (!cols.has(col)) cols.set(col, []);
       cols.get(col)!.push(t);
-    }
+    });
     const rows = Math.max(...[...cols.values()].map(c => c.length));
     const top = y + LANE_LABEL;
     for (const [col, ts] of cols) {
@@ -91,7 +101,7 @@ export function layout(tasks: Task[], showFinished: boolean): Graph {
     const colCount = Math.max(...cols.keys()) + 1;
     const root = list[0];
     lanes.push({
-      id: key, title: key === 'pipeline' ? 'Pipeline' : `T${root.seq} ${root.title}`,
+      id: key, title: key === 'pipeline' ? 'Pipeline' : key === CHAT ? 'From chat' : `T${root.seq} ${root.title}`,
       x: LEFT, y, w: (colCount - 1) * COL + NODE_W, h: LANE_LABEL + (rows - 1) * ROW + NODE_H,
       done, total: list.length, finished, running: list.filter(t => t.status === 'running').length,
     });
@@ -121,7 +131,8 @@ export function layout(tasks: Task[], showFinished: boolean): Graph {
   for (const t of sorted) {
     if (!visible(t.id)) continue;
     if (t.parentId && visible(t.parentId)) add(t.parentId, t.id, 'parent');
-    else if (laneOf.get(t.id) !== 'pipeline') add(COORDINATOR, t.id, 'assign');
+    // Chat tasks get an edge only while they run; a line to every past request would bury the feature lanes.
+    else if (laneOf.get(t.id) === CHAT ? t.status === 'running' : laneOf.get(t.id) !== 'pipeline') add(COORDINATOR, t.id, 'assign');
     for (const d of t.deps) {
       if (!visible(d)) continue;
       if (laneOf.get(d) === 'pipeline' && laneOf.get(t.id) === 'pipeline') continue; // already drawn as flow

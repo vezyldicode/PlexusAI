@@ -221,9 +221,9 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return { header: `${shortId(t)} run ${run.id} on ${run.accountId} (${run.outcome ?? 'running'}), log: ${run.logPath}${lines.length > tail ? ` — last ${tail} of ${lines.length} lines` : ''}`, lines: lines.slice(-tail) };
   });
   app.post('/api/projects/:id/main/begin', async req => ({ text: await beginMainEdit(id(req)) }));
-  app.post('/api/projects/:id/main/commit', async req => ({ text: await commitMainEdit(id(req), String(body(req).message ?? '')) }));
+  app.post('/api/projects/:id/main/commit', async req => ({ text: await commitMainEdit(id(req), String(body(req).message ?? ''), body(req).sessionId ?? null) }));
   app.post('/api/projects/:id/coordinator-workspace', async req => ({ text: await coordinatorWorkspace(id(req)) }));
-  app.post('/api/projects/:id/coordinator-workspace/merge', async req => ({ text: await mergeCoordinatorWorkspace(id(req), String(body(req).message ?? '')) }));
+  app.post('/api/projects/:id/coordinator-workspace/merge', async req => ({ text: await mergeCoordinatorWorkspace(id(req), String(body(req).message ?? ''), body(req).sessionId ?? null) }));
   app.get('/api/projects/:id/memory', async req => {
     const p = mustProject(id(req));
     return Object.fromEntries(MEMORY_FILES.map(f => [f, readMemory(p, f)]));

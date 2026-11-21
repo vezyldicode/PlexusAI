@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync, type Dirent } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { childEnv } from './proc.ts';
 import { appConfig } from '../config.ts';
 
@@ -64,7 +65,26 @@ export async function addWorktree(repo: string, path: string, opts: { branch?: s
   } else await gitOk(repo, 'worktree', 'add', path, opts.branch!);
 }
 
+/**
+ * Remove the links (symlinks, Windows junctions) inside a folder, without touching what they point to. An agent that
+ * linked `node_modules` to the project's own copy would otherwise have that copy emptied when its worktree is deleted:
+ * a recursive delete follows a junction on Windows.
+ */
+export function unlinkLinks(dir: string, depth = 4): void {
+  let entries: Dirent[];
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name === '.git') continue;
+    const p = join(dir, e.name);
+    let st; try { st = lstatSync(p); } catch { continue; }
+    if (st.isSymbolicLink()) {
+      try { unlinkSync(p); } catch { try { rmdirSync(p); } catch { /* left for git */ } }
+    } else if (st.isDirectory() && depth > 0 && e.name !== 'node_modules') unlinkLinks(p, depth - 1);
+  }
+}
+
 export async function removeWorktree(repo: string, path: string): Promise<void> {
+  if (existsSync(path)) unlinkLinks(path);
   await git(repo, 'worktree', 'remove', '--force', path);
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
   await git(repo, 'worktree', 'prune');
@@ -171,25 +191,29 @@ async function blobOnDisk(repo: string, path: string): Promise<string | null> {
 
 /**
  * Bring the changes `from..to` into the files of the checkout, without touching HEAD, the index or any branch.
- * A file is written only when it is still exactly as in `from` on disk (or already as in `to`); if the user changed any of
- * them, nothing is written at all and the files are returned, so their edits are never overwritten.
+ * A file is written when it is still exactly as in `from` on disk (or already as in `to`). A file the user changed too is
+ * merged line by line (their edits and Plexus's, as `git merge-file` does); only when that leaves conflicting hunks is
+ * nothing written at all and the files are returned, so the user's edits are never overwritten.
  */
 export async function applyToCheckout(repo: string, from: string, to: string): Promise<{ ok: boolean; files: string[]; conflicts: string[] }> {
   const r = await gitBuf(repo, ['diff', '--name-only', '--no-renames', '-z', from, to]);
   if (r.code !== 0) throw new Error(`git diff failed: ${r.stderr}`);
   const files = r.stdout.toString('utf8').split('\0').filter(Boolean);
-  const writes: { path: string; blob: string | null }[] = [];
+  const writes: { path: string; blob: string | null; merged?: Buffer }[] = [];
   const conflicts: string[] = [];
   for (const path of files) {
     const [before, after, disk] = await Promise.all([blobAt(repo, from, path), blobAt(repo, to, path), blobOnDisk(repo, path)]);
     if (disk === after) continue;
-    if (disk === before) writes.push({ path, blob: after });
+    if (disk === before) { writes.push({ path, blob: after }); continue; }
+    const merged = before && after && disk ? await mergeFile(repo, from, to, path) : null;
+    if (merged) writes.push({ path, blob: after, merged });
     else conflicts.push(path);
   }
   if (conflicts.length) return { ok: false, files, conflicts };
   for (const w of writes) {
     const abs = join(repo, w.path);
     if (w.blob === null) { rmSync(abs, { force: true }); continue; }
+    if (w.merged) { writeFileSync(abs, w.merged); continue; }
     // As it would be checked out: smudge filters and the repository's line endings applied.
     const c = await gitBuf(repo, ['cat-file', '--filters', `${to}:${w.path}`]);
     if (c.code !== 0) throw new Error(`git cat-file ${w.path} failed: ${c.stderr}`);
@@ -197,6 +221,28 @@ export async function applyToCheckout(repo: string, from: string, to: string): P
     writeFileSync(abs, c.stdout);
   }
   return { ok: true, files, conflicts };
+}
+
+/** Three-way merge of the file on disk with the change `from..to` to it; null when hunks conflict (or it is binary). */
+async function mergeFile(repo: string, from: string, to: string, path: string): Promise<Buffer | null> {
+  const [base, theirs] = await Promise.all([
+    gitBuf(repo, ['cat-file', '--filters', `${from}:${path}`]), gitBuf(repo, ['cat-file', '--filters', `${to}:${path}`]),
+  ]);
+  if (base.code !== 0 || theirs.code !== 0) return null;
+  const tmp = mkdtempSync(join(tmpdir(), 'plexus-merge-'));
+  try {
+    const ours = readFileSync(join(repo, path));
+    if ([ours, base.stdout, theirs.stdout].some(b => b.includes(0))) return null; // binary
+    // Merge with LF everywhere (the disk and git's checkout form may differ in line endings), then keep the disk's style.
+    const lf = (b: Buffer) => b.toString('utf8').replace(/\r\n/g, '\n');
+    const f = (n: string, b: Buffer) => { const p = join(tmp, n); writeFileSync(p, lf(b)); return p; };
+    const m = await gitBuf(repo, ['merge-file', '-p', f('ours', ours), f('base', base.stdout), f('theirs', theirs.stdout)]);
+    if (m.code !== 0) return null;
+    const crlf = ours.includes('\r\n');
+    return Buffer.from(crlf ? m.stdout.toString('utf8').replace(/\n/g, '\r\n') : m.stdout.toString('utf8'), 'utf8');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /**

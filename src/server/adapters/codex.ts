@@ -7,14 +7,26 @@ import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './typ
 import { appConfig } from '../config.ts';
 import { spentPercent, transientBackoffMs, unknownResetBackoffMs } from './claude-limits.ts';
 import { createRunTimer } from './timing.ts';
+import { PLAN_TOOL, planEvent, planItems, type StreamEvent } from './plan.ts';
 import { codexUserDefaults } from './codex-config.ts';
 
 
-export function describeCodexEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
+export function describeCodexEvent(line: string): StreamEvent | null {
   let e: any;
   try { e = JSON.parse(line); } catch { return { kind: 'raw', text: line.slice(0, 500) }; }
-  if (e.type === 'item.completed' || e.type === 'item.started') {
+  if (e.type === 'item.completed' || e.type === 'item.started' || e.type === 'item.updated') {
     const it = e.item ?? {};
+    // The checklist: Codex's own todo list (started, then updated as steps finish) or Plexus's plexus_plan tool.
+    if (it.type === 'todo_list') { const plan = planItems(it.items); return plan ? planEvent(plan) : null; }
+    if (it.type === 'mcp_tool_call' && e.type === 'item.started') {
+      let args = it.arguments;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* shown as is */ } }
+      const plan = it.tool === PLAN_TOOL ? planItems(args?.items) : null;
+      if (plan) return planEvent(plan);
+      const arg = args && typeof args === 'object' ? Object.values(args).find(v => typeof v === 'string' || typeof v === 'number') : args;
+      return { kind: 'tool', text: `${it.tool ?? 'mcp'} ${arg == null ? '' : String(arg).slice(0, 200)}`.trim() };
+    }
+    if (e.type === 'item.updated') return null;
     if (it.type === 'agent_message' && e.type === 'item.completed') return { kind: 'text', text: it.text ?? '' };
     if (it.type === 'command_execution' && e.type === 'item.started') return { kind: 'tool', text: `shell ${String(it.command ?? '').slice(0, 200)}` };
     if (it.type === 'file_change' && e.type === 'item.completed') return { kind: 'tool', text: `edit ${(it.changes ?? []).map((c: any) => c.path).join(', ').slice(0, 200)}` };

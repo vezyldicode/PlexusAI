@@ -146,7 +146,7 @@ export default function App() {
             <ProjectHeader s={s} detail={d} view={view} onView={setView} trailing={chatToggle} />
             <div className="view-body">
               {view === 'network' && <NetworkView detail={d} accounts={s.accounts} lastLine={s.lastLine} thinking={Object.values(s.thinking)[0] ?? null} active={active} onOpen={open} onError={s.setError} reload={s.loadDetail} />}
-              {view === 'tasks' && <TasksView detail={d} active={active} onOpen={open} />}
+              {view === 'tasks' && <TasksView detail={d} active={active} onOpen={open} onError={s.setError} reload={s.loadDetail} />}
               {view === 'activity' && <ActivityView logs={s.logs} activity={s.activity} detail={d} onOpen={open} />}
               {view === 'memory' && <MemoryView project={d.project} onError={s.setError} />}
               {view === 'report' && <ReportView project={d.project} />}

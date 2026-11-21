@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Account, AcceptanceItemLike, ChatMessage, ChatSession, Project, ProjectUsage, Task, TaskModelInfo } from './types.ts';
+import type { Account, AcceptanceItemLike, ChatMessage, ChatStep, ChatSession, Project, ProjectUsage, Task, TaskModelInfo } from './types.ts';
 import { api, connectEvents, type PlexusEvent } from './api.ts';
+import { parsePlan, planLine, type PlanItem } from './activity.tsx';
+
+/**
+ * What the coordinator is doing in a chat session while it answers: its tool calls so far, its steps in order (the words
+ * it writes between tool calls included), its checklist, and when it started (ms).
+ */
+export interface LiveActivity { tools: string[]; steps: ChatStep[]; plan: PlanItem[] | null; since: number }
+
+const freshLive = (since = Date.now()): LiveActivity => ({ tools: [], steps: [], plan: null, since });
 
 export interface LogLine { at: string; taskSeq: number; taskId: string; account: string; kind: string; text: string }
 
@@ -25,6 +34,7 @@ export function usePlexus(selectedId: string | null) {
   const [sessionId, setSessionIdState] = useState<string | null>(null);
   /** Account the coordinator is thinking on, per chat session id. */
   const [thinking, setThinking] = useState<Record<string, string>>({});
+  const [live, setLive] = useState<Record<string, LiveActivity>>({});
   const [error, setError] = useState<string | null>(null);
   const sel = useRef(selectedId);
   sel.current = selectedId;
@@ -95,7 +105,9 @@ export function usePlexus(selectedId: string | null) {
       return;
     }
     if (e.type === 'task.log') {
-      const line: LogLine = { at: e.createdAt, taskSeq: e.data.seq, taskId: e.data.id, account: e.data.account, kind: e.data.kind, text: e.data.text };
+      // A checklist arrives as its JSON list; logs and the network card show it as one line.
+      const plan = e.data.kind === 'plan' ? parsePlan(e.data.text) : null;
+      const line: LogLine = { at: e.createdAt, taskSeq: e.data.seq, taskId: e.data.id, account: e.data.account, kind: e.data.kind, text: plan ? planLine(plan) : e.data.text };
       setLogs(l => [...l.slice(-800), line]);
       if (line.kind !== 'raw') setLastLine(m => ({ ...m, [line.taskId]: line }));
       debounce('logtick', () => setLogTick(x => x + 1), 400);
@@ -103,6 +115,21 @@ export function usePlexus(selectedId: string | null) {
     }
     if (e.type === 'chat.thinking') {
       setThinking(t => { const { [e.data.sessionId]: _gone, ...rest } = t; return e.data.thinking ? { ...rest, [e.data.sessionId]: e.data.account } : rest; });
+      // The reply carries what was done (its meta.activity) from here on.
+      if (!e.data.thinking) setLive(l => { const { [e.data.sessionId]: _gone, ...rest } = l; return rest; });
+      else setLive(l => ({ ...l, [e.data.sessionId]: l[e.data.sessionId] ?? freshLive() }));
+      return;
+    }
+    if (e.type === 'chat.activity') {
+      const sid: string = e.data.sessionId;
+      setLive(l => {
+        // A retry starts its steps over, but the clock keeps counting from the first attempt.
+        const cur = e.data.reset ? freshLive(l[sid]?.since) : l[sid] ?? freshLive();
+        if (e.data.kind === 'plan') return { ...l, [sid]: { ...cur, plan: parsePlan(e.data.text) ?? cur.plan } };
+        if (e.data.kind === 'tool') return { ...l, [sid]: { ...cur, tools: [...cur.tools, e.data.text], steps: [...cur.steps, { kind: 'tool', text: e.data.text }] } };
+        if (e.data.kind === 'text') return { ...l, [sid]: { ...cur, steps: [...cur.steps, { kind: 'text', text: e.data.text }] } };
+        return { ...l, [sid]: cur };
+      });
       return;
     }
     if (e.type === 'chat.session') { debounce('sessions', loadSessions, 100); return; }
@@ -119,7 +146,7 @@ export function usePlexus(selectedId: string | null) {
   const [, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 5000); return () => clearInterval(t); }, []);
 
-  return { loaded, projects, accounts, detail, messages, sessions, sessionId, setSessionId, loadSessions, logs, lastLine, logTick, activity, connected, thinking, error, setError, loadProjects, loadAccounts, loadDetail, loadMessages };
+  return { loaded, projects, accounts, detail, messages, sessions, sessionId, setSessionId, loadSessions, logs, lastLine, logTick, activity, connected, thinking, live, error, setError, loadProjects, loadAccounts, loadDetail, loadMessages };
 }
 
 export type Plexus = ReturnType<typeof usePlexus>;

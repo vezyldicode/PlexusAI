@@ -8,7 +8,7 @@ import { effortForRun } from './models.ts';
 import { bus } from './events.ts';
 import { ensure, paths } from './paths.ts';
 import { writeContextFiles } from './context.ts';
-import { buildCheckpointPrompt, buildForkPrompt, buildResumePrompt, buildTaskParts, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
+import { buildCheckpointPrompt, buildForkPrompt, buildResumePrompt, buildTaskParts, CONTRACT_FILE, contractText, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { materializeSkills } from './skills.ts';
 import { finishRun, getTask, listRuns, setRunModel, shortId, startRun, updateTask } from './tasks.ts';
@@ -19,6 +19,7 @@ import { postMessage, updateProject, writeHandoff } from './projects.ts';
 import { appConfig } from './config.ts';
 import { addTiming } from './adapters/timing.ts';
 import { forkClaudeConversation } from './adapters/claude-fork.ts';
+import { taskMcp } from './mcp/spec.ts';
 
 /**
  * Resume a CLI conversation only while that is cheaper than a fresh start with the hand-off notes: every later call
@@ -156,11 +157,52 @@ export function readResult(wt: string, finalText: string): AgentResult | null {
   if (brace >= 0) candidates.push(finalText.slice(brace));
   for (const c of candidates) {
     try {
-      const parsed = AgentResultSchema.safeParse(JSON.parse(c));
+      const parsed = AgentResultSchema.safeParse(normalizeResult(JSON.parse(c)));
       if (parsed.success) return parsed.data;
     } catch { /* try next */ }
   }
   return null;
+}
+
+const str = (x: unknown): string => (typeof x === 'string' ? x : x == null ? '' : JSON.stringify(x));
+const mdMap = (x: unknown): string => typeof x === 'string' ? x
+  : x && typeof x === 'object' ? Object.entries(x as Record<string, unknown>).map(([k, v]) => `- ${k}: ${str(v)}`).join('\n') : '';
+
+/**
+ * Repair the near-misses agents write after their context was compacted and the exact contract is gone (strings where
+ * objects are expected, `escalate: false`, a codemap object, `criterion` instead of `id`). Rejecting such a result throws
+ * away a finished run and costs a whole extra turn on a large context, only to rewrite a JSON file.
+ */
+export function normalizeResult(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const r: Record<string, any> = { ...(raw as Record<string, any>) };
+  const arr = (k: string) => { if (r[k] != null && !Array.isArray(r[k])) r[k] = [r[k]]; };
+  for (const k of ['decisions', 'decisions_digest', 'issues', 'questions', 'follow_up_tasks', 'tasks']) arr(k);
+  const asDecision = (d: any) => typeof d === 'string' ? { title: d.slice(0, 120), decision: d }
+    : d && typeof d === 'object' ? { ...d, title: str(d.title ?? d.decision ?? ''), decision: str(d.decision ?? d.title ?? '') } : d;
+  for (const k of ['decisions', 'decisions_digest']) if (Array.isArray(r[k])) r[k] = r[k].map(asDecision);
+  if (Array.isArray(r.issues)) r.issues = r.issues.map(str);
+  if (Array.isArray(r.questions)) r.questions = r.questions.map((q: any) => typeof q === 'string' ? { question: q } : q);
+  const asTask = (t: any) => typeof t === 'string' ? { title: t.slice(0, 120), description: t } : t;
+  for (const k of ['follow_up_tasks', 'tasks']) if (Array.isArray(r[k])) r[k] = r[k].map(asTask);
+  if (r.escalate === false || r.escalate === '') r.escalate = null;
+  else if (typeof r.escalate === 'string') r.escalate = { reason: r.escalate };
+  else if (r.escalate === true) r.escalate = { reason: '' };
+  if (r.codemap != null && typeof r.codemap !== 'string') r.codemap = mdMap(r.codemap);
+  for (const k of ['summary', 'project_brief', 'project_summary']) if (r[k] != null && typeof r[k] !== 'string') r[k] = str(r[k]);
+  if (r.evaluation && typeof r.evaluation === 'object') {
+    const e = { ...r.evaluation };
+    const crit = Array.isArray(e.criteria) ? e.criteria : [];
+    e.criteria = crit.map((c: any, i: number) => {
+      if (!c || typeof c !== 'object') return c;
+      const pass = c.pass === 'true' ? true : c.pass === 'false' ? false : c.pass;
+      return { ...c, id: str(c.id ?? c.ac_id ?? c.criterion ?? `C${i + 1}`), pass, evidence: str(c.evidence ?? '') };
+    });
+    if (typeof e.complete !== 'boolean') e.complete = e.criteria.length > 0 && e.criteria.every((c: any) => c?.pass === true);
+    if (e.report != null && typeof e.report !== 'string') e.report = str(e.report);
+    r.evaluation = e;
+  }
+  return r;
 }
 
 export async function runAttempt(p: Project, task: Task, account: Account): Promise<AttemptOutcome> {
@@ -189,6 +231,7 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
     const skills = materializeSkills(wt, role.skills);
     const progress = readFileSync(join(wt, PROGRESS_FILE), 'utf8');
     rmSync(join(wt, RESULT_FILE), { force: true });
+    writeFileSync(join(wt, CONTRACT_FILE), contractText(task.kind));
     const prov = account.provider;
     // A single-agent task runs on the coordinator's model/effort (a strong model) unless the task overrides it.
     const choice = taskModelChoice(p, task, role, prov);
@@ -204,11 +247,11 @@ ${system ? `${system}\n\n` : ''}${prompt}
 # output
 ${note}`);
       return adapter.run({
-        account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, autocompact: p.settings.autocompactTokens,
+        account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, autocompact: p.settings.autocompactTokens, mcp: taskMcp(),
         forkSession: opts.fork, maxCompactions: opts.budget === false ? 0 : p.settings.maxCompactions,
         timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: idleTimeoutMin(role.maxRuntimeMin) * 60_000,
         logPath, signal: ctl.signal,
-        onEvent: e => bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: e.kind, text: e.text.slice(0, 2000) }, false),
+        onEvent: e => bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: e.kind, text: e.kind === 'plan' ? e.text : e.text.slice(0, 2000) }, false),
       });
     };
     writeFileSync(logPath, '');

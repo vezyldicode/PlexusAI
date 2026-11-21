@@ -92,3 +92,25 @@ test('work is merged on the hidden base and lands uncommitted; the user\'s edits
   assert.equal(git(dir, 'rev-parse', 'HEAD'), head);
   assert.equal(git(dir, 'rev-list', '--count', 'main'), '1');
 });
+
+test('a file the user changed in another place than the task is merged, not reported as a conflict', async () => {
+  const dir = mkdtempSync(join(root, 'merge3-'));
+  git(dir, 'init', '-q', '-b', 'main');
+  const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+  writeFileSync(join(dir, 'c.ts'), lines.join('\n') + '\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'user commit');
+  await ensureRepo(dir);
+  const p = project(dir, 'merge3');
+  await absorbCheckout(p);
+  // The task changes the end of the file; meanwhile the user commits a change at the top (like f12535f did).
+  const b = await taskCommit(p, 'M1', { 'c.ts': [...lines.slice(0, 19), 'line 20 (task)'].join('\n') + '\n' });
+  writeFileSync(join(dir, 'c.ts'), ['line 1 (user)', ...lines.slice(1)].join('\n') + '\n');
+  git(dir, 'commit', '-q', '-am', 'user edit');
+  const m = await mergeIntoBase(p, b, 'merge M1');
+  assert.ok(m.ok, m.detail);
+  assert.ok(m.sync?.ok, JSON.stringify(m.sync));
+  const out = read(dir, 'c.ts');
+  assert.match(out, /^line 1 \(user\)$/m);
+  assert.match(out, /^line 20 \(task\)$/m);
+});

@@ -18,13 +18,24 @@ Rules every agent follows:
    option, state the assumption in `decisions`, and continue. Put genuinely open questions in `questions` with a default
    answer. Use status "blocked" only when you truly cannot do anything useful without the user; say exactly what you need.
 7. Missing tools or dependencies needed to build, run or test: install them inside the project (virtualenv, node_modules,
-   a local tool folder), never system-wide, and note it in `progress.md`. If that is impossible, report the affected
+   a local tool folder), never system-wide, and note it in `progress.md`. Never link (symlink, junction) folders from
+   outside the worktree, such as the project's `node_modules`: deleting your worktree would delete their contents. If that is impossible, report the affected
    checks as blocked instead of failing them.
-8. Read selectively: search (grep, glob, symbols) first, then read the parts you need. Everything you read stays in your
-   context and is re-read on every later step, so never dump a whole large file (no `cat` of files over ~200 lines, no
-   `sed -n 1,400p`): read the function or the line range you need. Keep command output short (`| tail`, `| grep`, quiet
-   test reporters). The code map in the context tells you where things are. For a wide exploration (several areas or
-   questions at once), use sub-agents if your tool has them: they read in their own context and return only conclusions.
+8. Work in few, large steps. Every step (tool call) re-sends your whole context, so the number of steps costs more time
+   and tokens than the size of what you read. Batch: put several greps and reads into one command, or issue several
+   tool calls at once when they do not depend on each other. Never spend a step on a few lines (`sed -n 176,180p`):
+   read a whole file you are going to change (up to ~500 lines) once, instead of slice after slice; for larger files
+   read whole functions. Do not re-read what you already have. Keep command output short (`| tail`, `| grep`, quiet
+   test reporters), and run the full test suite once at the end, not repeatedly. The code map in the context tells you
+   where things are. For a wide exploration, use sub-agents if your tool has them.
+   Change files with your file-editing tool (Edit / Write / apply_patch), never with python, sed or heredoc scripts that
+   rewrite source: their escaping breaks `\n`, quotes and regexes, and fixing that costs many steps.
+   Verify with the cheapest check that proves the point (build, typecheck, the tests for what you changed). Screenshots,
+   demo data, servers or browser automation only when the task asks for them; then set them up once and reuse them.
 9. Never fake success: if tests fail or work is incomplete, say so with status "partial" or "failed".
 10. Write files as UTF-8 (on Windows PowerShell pass `-Encoding utf8`; prefer your file-writing tool).
-11. Finish by writing the result JSON file described in OUTPUT CONTRACT. This file is mandatory.
+11. Finish by writing the result JSON file described in OUTPUT CONTRACT (copy in `.plexus-task/contract.md`; reread it
+    if your context was compacted). Use its exact field names and types. This file is mandatory.
+12. For work of several steps, keep a checklist with the `plexus_plan` tool (the user watches it): call it with every
+    step once you know them, then again with the whole list whenever a step starts or finishes, exactly one step
+    `in_progress` while you work. Steps are short imperative phrases of what you will do; skip it for a one-step task.

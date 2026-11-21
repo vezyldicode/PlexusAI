@@ -140,7 +140,9 @@ export interface Project {
   createdAt: string;
 }
 
-export type TaskKind = 'ingest' | 'architect' | 'plan' | 'build' | 'fix' | 'review' | 'integrate' | 'qa' | 'evaluate' | 'compact' | 'solo' | 'custom';
+export type TaskKind = 'ingest' | 'architect' | 'plan' | 'build' | 'fix' | 'review' | 'integrate' | 'qa' | 'evaluate' | 'compact' | 'solo' | 'custom'
+  /** Work the coordinator did itself (edited the project folder or merged its worktree): recorded as a finished task. */
+  | 'coordinator';
 /** `blocked`: the agent said it cannot go on without the user (an answer, a decision, a change of input); never retried by itself. */
 export type TaskStatus = 'pending' | 'running' | 'interrupted' | 'in_review' | 'done' | 'failed' | 'cancelled' | 'blocked';
 
@@ -281,6 +283,18 @@ export interface TaskModelInfo {
   /** The choice can still change something: the task is not running (it applies from its next run, or to a continuation). */
   editable: boolean;
 }
+
+/** One step of an agent's checklist (reported with the plexus_plan tool or the CLI's own todo tool). */
+export interface PlanItem { text: string; status: 'pending' | 'in_progress' | 'completed' }
+
+/** One thing the coordinator did while answering: words it wrote along the way, or a tool call. */
+export interface ChatStep { kind: 'text' | 'tool'; text: string }
+
+/**
+ * What the coordinator did while answering one message: its tool calls (oldest first), its last checklist, and (newer
+ * replies) its steps in order, the words it wrote between tool calls included.
+ */
+export interface ChatActivity { tools: string[]; plan: PlanItem[] | null; steps?: ChatStep[] }
 
 export interface ChatMessage {
   id: number;

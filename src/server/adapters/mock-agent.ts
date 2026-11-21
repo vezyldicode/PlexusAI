@@ -54,6 +54,10 @@ if (limited) {
 const git = (...args: string[]) => { try { return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e: any) { return String(e.stdout ?? '') + String(e.stderr ?? ''); } };
 const say = (text: string) => out({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
 const tool = (name: string, input: unknown) => out({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } });
+/** The checklist, as a real agent reports it (the plexus_plan tool): `at` steps done, the next one in progress. */
+const plan = (steps: string[], at: number) => tool('mcp__plexus__plexus_plan', {
+  items: steps.map((step, i) => ({ step, status: i < at ? 'completed' : i === at ? 'in_progress' : 'pending' })),
+});
 
 const delay = Number(cfg.delayMs ?? 50);
 const steps = Number(cfg.steps ?? 3);
@@ -107,6 +111,13 @@ switch (meta.kind) {
     for (const m of msg.matchAll(/^action:\s*(\{.*\})\s*$/gm)) actions.push(JSON.parse(m[1]));
     const toolCall = msg.match(/^mcp:\s*(\S+)\s*(\{.*\})?\s*$/m);
     const toolOut = toolCall ? await mcpCall(toolCall[1], toolCall[2] ? JSON.parse(toolCall[2]) : {}) : '';
+    // `steps`: answer like a coordinator doing a request of several steps (checklist and tool calls stream to the chat).
+    if (/\bsteps\b/i.test(msg)) {
+      const todo = ['Look at the project status', 'Read the latest task log', 'Answer'];
+      plan(todo, 0); tool('mcp__plexus__plexus_status', {}); await sleep(Math.max(delay, 600));
+      plan(todo, 1); tool('mcp__plexus__plexus_task_log', { id: 'T1' }); tool('Bash', { command: 'git log --oneline -5' }); await sleep(Math.max(delay, 600));
+      plan(todo, 2); await sleep(Math.max(delay, 600)); plan(todo, 3);
+    }
     if (/pause|dừng/i.test(msg)) actions.push({ type: 'pause' });
     if (/resume|tiếp tục/i.test(msg)) actions.push({ type: 'resume' });
     const solo = msg.match(/do:\s*(.+)/i);
@@ -148,11 +159,20 @@ switch (meta.kind) {
     const gapRound = /# TASK T\d+: Close the remaining gaps/.test(prompt);
     const named = [...new Set([...prompt.matchAll(/FILE:\s*(\S+)/g)].map(m => m[1]))];
     const files = gapRound && cfg.soloNoProgress ? [] : !gapRound && cfg.soloFirstFiles ? cfg.soloFirstFiles : named.length ? named : ['alpha.txt', 'beta.txt'];
-    for (const f of files) {
+    const todo = ['Read the task and the code map', ...files.map(f => `Write ${f}`), 'Commit and evaluate'];
+    plan(todo, 0);
+    tool('Read', { file_path: '.plexus-task/contract.md' });
+    tool('Grep', { pattern: 'FILE:' });
+    say(`Writing ${files.join(', ') || 'nothing new'}.`);
+    for (const [i, f] of files.entries()) {
+      plan(todo, i + 1);
       tool('Write', { file_path: f });
       writeFileSync(f, (existsSync(f) ? readFileSync(f, 'utf8') : '') + `written by mock (solo, ${meta.task_id})\n`);
     }
+    plan(todo, files.length + 1);
+    tool('Bash', { command: 'git status --short' });
     if (files.length) { git('add', '-A'); git('commit', '-m', `solo: ${files.join(', ')} (mock)`); }
+    plan(todo, todo.length);
     if (cfg.soloEscalate && !existsSync(join(home, 'escalated'))) {
       writeFileSync(join(home, 'escalated'), '1');
       result.escalate = { reason: 'mock: the rest needs a team' };
@@ -202,6 +222,13 @@ switch (meta.kind) {
       break;
     }
     const file = prompt.match(/FILE:\s*(\S+)/)?.[1] ?? `${slug(meta.task_id ?? 'out')}.txt`;
+    const todo = ['Read the task contract', `Write ${file}`, 'Check the result', 'Commit and write the result file'];
+    plan(todo, 0);
+    tool('Read', { file_path: '.plexus-task/contract.md' });
+    tool('Bash', { command: 'git status --short' });
+    await sleep(delay);
+    plan(todo, 1);
+    say(`Writing ${file}.`);
     tool('Write', { file_path: file });
     const prev = existsSync(file) ? readFileSync(file, 'utf8') : '';
     writeFileSync(file, prev + `written by mock (${meta.kind}, ${meta.task_id})\n`);
@@ -209,7 +236,12 @@ switch (meta.kind) {
       writeFileSync(join(home, `crashed-${meta.task_id}`), '1');
       say('mock: crashing mid-task'); process.exit(3);
     }
+    plan(todo, 2);
+    tool('Bash', { command: `cat ${file}` });
+    await sleep(delay);
+    plan(todo, 3);
     git('add', '-A'); git('commit', '-m', `${meta.kind}: ${file} (mock)`);
+    plan(todo, todo.length);
   }
 }
 

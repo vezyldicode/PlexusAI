@@ -1,6 +1,7 @@
 // The coordinator's `plexus` tools: a minimal MCP server (JSON-RPC 2.0, one message per line on stdio) that the
 // coordinator's CLI starts (claude --mcp-config / codex -c mcp_servers.plexus...). Each tool calls the daemon's API.
-// Environment: PLEXUS_API (http://127.0.0.1:<port>), PLEXUS_TOKEN, PLEXUS_PROJECT, PLEXUS_SESSION.
+// Environment: PLEXUS_API (http://127.0.0.1:<port>), PLEXUS_TOKEN, PLEXUS_PROJECT, PLEXUS_SESSION; PLEXUS_TOOLS (comma
+// separated) limits the tools offered: task agents get only plexus_plan, which needs none of the others.
 import { createInterface } from 'node:readline';
 
 const API = process.env.PLEXUS_API ?? '';
@@ -23,7 +24,24 @@ const obj = (props: Record<string, unknown> = {}, required: string[] = []) => ({
 const str = (description: string) => ({ type: 'string', description });
 const P = encodeURIComponent(PROJECT);
 
-const tools: Tool[] = [
+const STEP_STATUS = ['pending', 'in_progress', 'completed'];
+
+const all: Tool[] = [
+  {
+    // The call itself is the record: Plexus reads the list from the agent's stream and shows it as a checklist.
+    name: 'plexus_plan',
+    description: 'Your checklist for this work, shown to the user. Send the whole list each time: once when you have a plan of several steps, then again whenever a step starts or finishes. Exactly one step is in_progress while you work.',
+    inputSchema: obj({
+      items: {
+        type: 'array', minItems: 1, description: 'Every step, in order',
+        items: obj({ step: str('what the step does, a short imperative phrase'), status: { type: 'string', enum: STEP_STATUS } }, ['step', 'status']),
+      },
+    }, ['items']),
+    call: async a => {
+      const items: any[] = Array.isArray(a.items) ? a.items : [];
+      return `Plan noted: ${items.filter(x => x?.status === 'completed').length} of ${items.length} steps done.`;
+    },
+  },
   {
     name: 'plexus_status', description: 'Project status: phase, tasks (status, account, paths, errors), accounts and quota, recent events.',
     inputSchema: obj(), call: async () => (await api('GET', `/api/projects/${P}/status-digest`)).text,
@@ -54,7 +72,7 @@ const tools: Tool[] = [
   {
     name: 'plexus_main_commit', description: 'Finish your edits in the main checkout and let merges continue. The edits stay uncommitted for the user to review (Plexus commits them only when auto-commit is on in Settings).',
     inputSchema: obj({ message: str('what you changed (used as the commit message only with auto-commit on)') }, ['message']),
-    call: async a => (await api('POST', `/api/projects/${P}/main/commit`, { message: a.message })).text,
+    call: async a => (await api('POST', `/api/projects/${P}/main/commit`, { message: a.message, sessionId: SESSION })).text,
   },
   {
     name: 'plexus_workspace', description: 'Your own git worktree (internal branch plexus/coordinator) for larger changes; returns its path.',
@@ -63,9 +81,12 @@ const tools: Tool[] = [
   {
     name: 'plexus_workspace_merge', description: 'Merge your worktree through the merge queue; the result reaches the project folder as uncommitted changes (committed on the branch only with auto-commit on).',
     inputSchema: obj({ message: str('what the change does') }, ['message']),
-    call: async a => (await api('POST', `/api/projects/${P}/coordinator-workspace/merge`, { message: a.message })).text,
+    call: async a => (await api('POST', `/api/projects/${P}/coordinator-workspace/merge`, { message: a.message, sessionId: SESSION })).text,
   },
 ];
+
+const only = (process.env.PLEXUS_TOOLS ?? '').split(',').map(x => x.trim()).filter(Boolean);
+const tools = only.length ? all.filter(t => only.includes(t.name)) : all;
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + '\n');
 const reply = (id: unknown, result: unknown) => send({ jsonrpc: '2.0', id, result });

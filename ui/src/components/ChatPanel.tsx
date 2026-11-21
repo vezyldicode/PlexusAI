@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api, clock, timeAgo } from '../api.ts';
-import type { ProjectDetail, Plexus } from '../store.ts';
-import type { Account, ChatMessage, ChatSession, Project, Provider, Role, RunTiming, Task, TaskModelInfo, TokenUsage } from '../types.ts';
+import type { LiveActivity, ProjectDetail, Plexus } from '../store.ts';
+import type { Account, ChatActivity, ChatMessage, ChatStep, ChatSession, Project, Provider, Role, RunTiming, Task, TaskModelInfo, TokenUsage } from '../types.ts';
 import { ContextMenu, Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens } from '../ui.tsx';
 import { useStored } from '../layout.tsx';
 import { COORDINATOR } from '../network/layout.ts';
+import { groupEvents, parsePlan, PlanCard, ToolGroup } from '../activity.tsx';
 import { effortsFor, shownModel, useModels } from '../models.tsx';
 import { ModelEffort, modelLabel } from '../settings.tsx';
+import { Markdown, plain } from '../markdown.tsx';
 
 interface Props {
   s: Plexus;
@@ -33,6 +35,12 @@ export function ChatPanel({ s, detail, visible, mode, tabs, active, onActivate, 
   const current = s.sessions.find(x => x.id === s.sessionId);
   // Looking at a session counts as reading it: system/agent notices that arrive meanwhile are acknowledged right away.
   const viewing = visible && onCoordinator;
+  // A task asked for in the coordinator chat links back to that conversation.
+  const origin = (t: Task | undefined) => {
+    const sid = t?.originSessionId;
+    const session = sid ? s.sessions.find(x => x.id === sid) : undefined;
+    return session ? { title: session.title, open: () => { s.setSessionId(session.id); onActivate(COORDINATOR); } } : null;
+  };
   useEffect(() => {
     if (viewing && current && current.unread > 0) api('POST', `/api/chat-sessions/${current.id}/read`).then(s.loadSessions).catch(() => {});
   }, [viewing, current?.id, current?.unread]);
@@ -47,8 +55,11 @@ export function ChatPanel({ s, detail, visible, mode, tabs, active, onActivate, 
           {mode === 'overlay' && <button className="icon-btn" title="Close chat" aria-label="Close chat" onClick={onHide}><Ic i={X} /></button>}
         </>} />
       {onCoordinator
-        ? <CoordinatorChat project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null} onError={s.setError} reload={s.loadDetail} />
-        : <AgentChat key={active} task={byId.get(active)!} info={detail.models?.[active]} accounts={s.accounts} logTick={s.logTick} onError={s.setError} reload={s.loadDetail} />}
+        ? <CoordinatorChat project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null}
+            live={s.sessionId ? s.live[s.sessionId] ?? null : null} onError={s.setError} reload={s.loadDetail} />
+        : byId.get(active)!.kind === 'coordinator'
+          ? <CoordinatorRecord key={active} task={byId.get(active)!} origin={origin(byId.get(active))} />
+          : <AgentChat key={active} task={byId.get(active)!} origin={origin(byId.get(active))} info={detail.models?.[active]} accounts={s.accounts} logTick={s.logTick} onError={s.setError} reload={s.loadDetail} />}
     </aside>
   );
 }
@@ -268,12 +279,42 @@ function CoordinatorPicker({ o, accounts, onClose }: { o: ReturnType<typeof useC
   );
 }
 
-function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onError, reload }: { project: Project; accounts: Account[]; sessionId: string | null; messages: ChatMessage[]; thinking: string | null; onError: (e: string) => void; reload: () => void }) {
+const toolLines = (tools: string[]) => tools.map(text => ({ kind: 'tool', text }));
+
+/** The coordinator's steps as the chat shows them: its words in full, each run of tool calls folded into one grey line. */
+function Steps({ steps, live }: { steps: ChatStep[]; live?: boolean }) {
+  const items = groupEvents(steps);
+  return <>{items.map((it, i) => it.type === 'group'
+    ? <ToolGroup key={i} lines={it.lines} live={live && i === items.length - 1} />
+    : <Markdown key={i} className="msg-text step-text" text={it.e.text} />)}</>;
+}
+
+/** What the coordinator is doing right now, from its last step: thinking, or the tool it runs. */
+function nowDoing(steps: ChatStep[]): string {
+  const last = steps.at(-1);
+  if (last?.kind !== 'tool') return 'Thinking';
+  const name = last.text.trim().split(/\s+/)[0].replace(/^mcp__\w+?__/, '');
+  return `Running ${name}`;
+}
+
+/** Time since `since`, ticking while shown: "45s", "2m 05s". */
+function Elapsed({ since }: { since: number }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, []);
+  const s = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  return <span className="num">{s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`}</span>;
+}
+
+function CoordinatorChat({ project, accounts, sessionId, messages, thinking, live, onError, reload }: { project: Project; accounts: Account[]; sessionId: string | null; messages: ChatMessage[]; thinking: string | null; live: LiveActivity | null; onError: (e: string) => void; reload: () => void }) {
   const [text, setText] = useState('');
   const [picking, setPicking] = useState(false);
   const closePicker = useCallback(() => setPicking(false), []);
   const opts = useCoordinatorOptions(project, accounts, onError, reload, messages.length);
-  const follow = useFollow(`${sessionId}:${messages.length}:${thinking}`);
+  const follow = useFollow(`${sessionId}:${messages.length}:${thinking}:${live?.steps.length}`);
+  // The checklist of the turn in progress, else of the last answer to your last message.
+  const lastUser = messages.findLastIndex(m => m.author === 'user');
+  const answered = messages.slice(lastUser + 1).find(m => m.author === 'coordinator')?.meta?.activity as ChatActivity | undefined;
+  const plan = thinking ? live?.plan ?? null : answered?.plan ?? null;
   const send = async () => {
     const t = text.trim();
     if (!t) return;
@@ -298,7 +339,11 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onE
           return (
             <div key={m.id} className={`msg m-${m.author} ${level}`}>
               <div className="msg-head"><span className="msg-who">{AUTHOR[m.author]}</span><span className="msg-meta num">{clock(m.createdAt)}{m.meta?.account ? ` · ${m.meta.account}` : ''}{m.meta?.model ? ` · ${m.meta.model}` : ''}{m.meta?.tokens ? <> · <Tokens u={m.meta.tokens as TokenUsage} unit /></> : null}</span></div>
-              <div className="msg-text">{m.text}</div>
+              {(() => {
+                const a = m.meta?.activity as ChatActivity | undefined;
+                return a?.steps?.length ? <Steps steps={a.steps} /> : a?.tools.length ? <ToolGroup lines={toolLines(a.tools)} /> : null;
+              })()}
+              {m.author === 'coordinator' || m.author === 'agent' ? <Markdown className="msg-text" text={m.text} /> : <div className="msg-text">{m.text}</div>}
               {Array.isArray(m.meta?.applied) && (m.meta!.applied as string[]).length > 0 && <div className="msg-applied">Applied: {(m.meta!.applied as string[]).join(', ')}</div>}
               {prop && (
                 <div className="proposal">
@@ -313,8 +358,18 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onE
             </div>
           );
         })}
-        {thinking && <div className="msg m-coordinator"><div className="msg-head"><span className="msg-who">Coordinator</span><span className="msg-meta">thinking on {thinking}</span></div><div className="typing"><span /><span /><span /></div></div>}
+        {thinking && (
+          <div className="msg m-coordinator working" aria-live="polite">
+            <div className="msg-head">
+              <span className="msg-who">Coordinator</span>
+              <span className="msg-meta">{nowDoing(live?.steps ?? [])}{live && <> · <Elapsed since={live.since} /></>} · {thinking}</span>
+            </div>
+            {live?.steps.length ? <Steps steps={live.steps} live /> : null}
+            <div className="typing live"><span /><span /><span /></div>
+          </div>
+        )}
       </div>
+      {plan && <div className="agent-dock"><PlanCard items={plan} live={!!thinking} /></div>}
       <div className="composer">
         {picking && <CoordinatorPicker o={opts} accounts={accounts} onClose={closePicker} />}
         <textarea value={text} rows={3} placeholder="Message the coordinator" onChange={e => setText(e.target.value)}
@@ -338,7 +393,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, onE
 
 
 /** First line of a text, cut to a short summary. */
-const brief = (s: string, n = 140) => { const l = s.trim().split('\n').find(x => x.trim())?.trim() ?? ''; return l.length > n ? `${l.slice(0, n - 1)}…` : l; };
+const brief = (s: string, n = 140) => { const l = plain(s).trim().split('\n').find(x => x.trim())?.trim() ?? ''; return l.length > n ? `${l.slice(0, n - 1)}…` : l; };
 
 /** An icon button whose label shows as a tooltip on hover or keyboard focus. */
 const TipButton = ({ icon, label: text, onClick, danger }: { icon: LucideIcon; label: string; onClick: () => void; danger?: boolean }) => (
@@ -440,7 +495,33 @@ function askOf(task: Task, run: RunTurns, ri: number, x: TurnRow, ti: number): s
   return x.resuming ? `Retry on ${run.accountId}, continuing the same conversation` : `Attempt ${ri + 1} on ${run.accountId}`;
 }
 
-function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: Task; info: TaskModelInfo | undefined; accounts: Account[]; logTick: number; onError: (e: string) => void; reload: () => void }) {
+type Origin = { title: string; open: () => void } | null;
+
+const FromChat = ({ origin }: { origin: Origin }) => origin && (
+  <span><button className="link-btn" title="Open the chat this came from" onClick={origin.open}>From chat: {origin.title}</button></span>
+);
+
+/** Work the coordinator did itself: its commit message and the files it changed. There is no agent run to show. */
+function CoordinatorRecord({ task, origin }: { task: Task; origin: Origin }) {
+  const body = task.description.split(/\r?\n/).slice(1).join('\n').trim();
+  return (
+    <div className="chat agent">
+      <header className="agent-head">
+        <div className="agent-title"><Dot state={task.status} /><span className="num">T{task.seq}</span><span className="agent-name" title={task.title}>{task.title}</span></div>
+        <div className="agent-meta">
+          <span>Coordinator edit</span><span>{timeAgo(task.updatedAt)}</span><FromChat origin={origin} />
+        </div>
+      </header>
+      <div className="stream record">
+        {body && <Markdown className="record-body" text={body} />}
+        {task.result?.summary && <Markdown className="record-sum" text={task.result.summary} />}
+        <ul className="record-files mono">{task.paths.map(f => <li key={f}>{f}</li>)}</ul>
+      </div>
+    </div>
+  );
+}
+
+function AgentChat({ task, origin, info, accounts, logTick, onError, reload }: { task: Task; origin: Origin; info: TaskModelInfo | undefined; accounts: Account[]; logTick: number; onError: (e: string) => void; reload: () => void }) {
   const [runs, setRuns] = useState<RunTurns[] | null>(null);
   const [text, setText] = useState('');
   const [picking, setPicking] = useState(false);
@@ -490,6 +571,9 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
   const report = failedNow ? { kind: 'err', label: 'Error', short: brief(task.error!) }
     : r ? { kind: r.status === 'done' ? 'ok' : 'warn', label: `Result · ${r.status}`, short: brief(r.summary || '(no summary)') } : null;
   const failing = r?.evaluation?.criteria.filter(c => c.pass !== true) ?? [];
+  // The checklist: the last one the agent reported, in any run.
+  const planText = runs?.flatMap(x => x.turns.flatMap(t => t.events)).filter(e => e.kind === 'plan').at(-1)?.text;
+  const plan = planText ? parsePlan(planText) : null;
 
   return (
     <div className="chat agent">
@@ -503,6 +587,7 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
           <span>{task.role}</span><span>{label(task.status)}</span>
           {acct && <span>{acct.label || acct.id}</span>}
           {task.attempts > 1 && <span className="num">attempt {task.attempts}</span>}
+          <FromChat origin={origin} />
           {total && <span><TokenStat total={total} runs={(runs ?? []).filter(x => x.usage).length} run={lastRun?.usage} /></span>}
         </div>
       </header>
@@ -524,43 +609,44 @@ function AgentChat({ task, info, accounts, logTick, onError, reload }: { task: T
                   {x.promptChars > 0 && <PromptToggle url={`/api/tasks/${task.id}/prompt?run=${run.id}&turn=${ti}`} chars={x.promptChars}
                     note={x.kind === 'fork' ? "continues the coordinator's conversation" : x.resuming ? 'resumed' : 'new conversation'} />}
                 </div>
-                {x.events.map((e, i) => {
-                  if (e.kind !== 'text') return <div key={i} className={`evt k-${e.kind}`}><span className="evt-kind">{e.kind === 'tool' ? 'tool' : 'status'}</span><span className="evt-text">{e.text}</span></div>;
-                  const head = x.events[i - 1]?.kind !== 'text';
-                  return (
-                    <div key={i} className="msg m-agent">
-                      {head && <div className="msg-head"><span className="msg-who">{label(task.role)}</span></div>}
-                      <div className="msg-text">{e.text}</div>
-                    </div>
-                  );
-                })}
+                {(() => {
+                  // The agent's words in full; everything it ran between them folds into one grey line.
+                  const items = groupEvents(x.events);
+                  const lastTurn = ri === runs.length - 1 && ti === run.turns.length - 1 && !run.endedAt;
+                  let named = false;
+                  return items.map((it, i) => {
+                    if (it.type === 'group') return <ToolGroup key={i} lines={it.lines} live={isRunning && lastTurn && i === items.length - 1} />;
+                    const head = !named; named = true;
+                    return (
+                      <div key={i} className="msg m-agent">
+                        {head && <div className="msg-head"><span className="msg-who">{label(task.role)}</span></div>}
+                        <Markdown className="msg-text" text={it.e.text} />
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             ))}
-            {run.endedAt && (
-              <div className="evt k-status run-end">
-                <span className="evt-kind">run</span>
-                <span className="evt-text">{[run.outcome ?? 'ended', run.accountId, run.model, run.effort, run.usage ? `${fmtTokens(run.usage.total)} tokens` : '', run.outcome !== 'success' ? run.reason : ''].filter(Boolean).join(' · ')}</span>
-              </div>
-            )}
-            {run.endedAt && run.timing && <RunTimeBar t={run.timing} />}
+            {run.endedAt && <RunEnd run={run} />}
           </div>
         ))}
-        {isRunning && <div className="msg m-agent"><div className="typing live"><span /><span /><span /></div></div>}
+        {isRunning && <div className="typing live" aria-label="Working"><span /><span /><span /></div>}
       </div>
 
-      {report && (
+      {(report || plan) && (
         <div className="agent-dock">
-          <details className={`fold fold-${report.kind}`}>
+          {plan && <PlanCard items={plan} live={isRunning} />}
+          {report && <details className={`fold fold-${report.kind}`}>
             <summary><Ic i={ChevronRight} size={14} /><span className="fold-label">{report.label}</span><span className="fold-sum">{report.short}</span></summary>
             <div className="fold-body">
-              {failedNow ? <pre className="pre">{task.error}</pre> : <div className="msg-text">{r!.summary}</div>}
+              {failedNow ? <pre className="pre">{task.error}</pre> : <Markdown className="msg-text" text={r!.summary} />}
               {failedNow && lastRun?.reason && lastRun.reason !== task.error && <div className="fold-line">Run: {lastRun.reason}</div>}
               {!failedNow && r!.issues.length > 0 && <><div className="io-label">Open issues</div><ul className="fold-list">{r!.issues.map((x, i) => <li key={i}>{x}</li>)}</ul></>}
               {!failedNow && failing.length > 0 && <><div className="io-label">Criteria not met</div><ul className="fold-list">{failing.map(c => <li key={c.id}><span className="num">{c.id}</span> {c.pass === 'blocked' ? 'cannot be checked here' : 'fails'}: {c.evidence}</li>)}</ul></>}
-              {!failedNow && r!.review && <div className="review"><b>Review: {r!.review.verdict.replace('_', ' ')}</b>{r!.review.comments.map((c, i) => <div key={i}>{c}</div>)}</div>}
+              {!failedNow && r!.review && <div className="review"><b>Review: {r!.review.verdict.replace('_', ' ')}</b>{r!.review.comments.map((c, i) => <Markdown key={i} text={c} />)}</div>}
               {(task.branch || task.paths.length > 0) && <div className="fold-line mono">{[task.branch, ...task.paths].filter(Boolean).join('  ')}</div>}
             </div>
-          </details>
+          </details>}
         </div>
       )}
 
@@ -588,6 +674,29 @@ const dur = (ms: number) => {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 };
+
+/** The end of a run as one grey line (how it ended, how long, tokens), opening to the account, model and where the time went. */
+function RunEnd({ run }: { run: RunTurns }) {
+  const [open, setOpen] = useState(false);
+  const ok = run.outcome === 'success';
+  const ms = run.endedAt ? Date.parse(run.endedAt) - Date.parse(run.startedAt) : 0;
+  const head = [ok ? 'Run finished' : `Run ${label(run.outcome ?? 'ended').toLowerCase()}`, ms > 0 ? dur(ms) : '', run.usage ? `${fmtTokens(run.usage.total)} tokens` : ''].filter(Boolean).join(' · ');
+  return (
+    <div className={`tgroup run-fold ${open ? 'open' : ''} ${ok ? '' : 'bad'}`}>
+      <button className="tgroup-head" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        <span className="tgroup-sum num">{head}</span>
+        <Ic i={ChevronRight} size={14} />
+      </button>
+      {!ok && run.reason && !open && <div className="tgroup-now">{brief(run.reason)}</div>}
+      {open && (
+        <div className="run-fold-body">
+          <div className="evt k-status"><span className="evt-kind">run</span><span className="evt-text">{[run.outcome ?? 'ended', run.accountId, run.model, run.effort, run.outcome !== 'success' ? run.reason : ''].filter(Boolean).join(' · ')}</span></div>
+          {run.timing && <RunTimeBar t={run.timing} />}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Where a run's time went: one bar (startup, model, tools, compaction) and the numbers, plus how long it waited to start. */
 function RunTimeBar({ t }: { t: RunTiming }) {

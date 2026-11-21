@@ -288,8 +288,9 @@ export class Orchestrator {
   }
 
   /** A merge landed on the base but could not be written into the project folder (the user edits those files). */
-  private reportSync(p: Project, r: MergeOutcome) {
-    if (r.ok && r.sync && !r.sync.ok) postMessage(p.id, 'system', conflictNotice(r.sync), { level: 'attention' });
+  private reportSync(p: Project, r: MergeOutcome, t?: Task) {
+    // With the task id the notice goes to the chat the request came from, next to the task's "finished" message.
+    if (r.ok && r.sync && !r.sync.ok) postMessage(p.id, 'system', conflictNotice(r.sync), { level: 'attention', ...(t ? { taskId: t.id } : {}) });
   }
 
   /** Merge a branch the coordinator worked on (its own worktree) through the same queue as task merges. */
@@ -765,7 +766,7 @@ export class Orchestrator {
   private async doMerge(p: Project, t: Task) {
     if (!t.branch) { setStatus(t.id, 'done'); this.markChainDone(t); return; }
     const r = await mergeIntoBase(p, t.branch, `merge ${shortId(t)}: ${t.title}`);
-    this.reportSync(p, r);
+    this.reportSync(p, r, t);
     if (r.ok) {
       setStatus(t.id, 'done');
       this.markChainDone(t);

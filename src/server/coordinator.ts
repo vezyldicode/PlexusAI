@@ -1,9 +1,11 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
+import { AgentResultSchema, CoordinatorOutputSchema, type ChatActivity, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
 import type { McpServerSpec } from './adapters/types.ts';
+import { parsePlan } from './adapters/plan.ts';
+import { plexusMcp } from './mcp/spec.ts';
 import { addUsage } from './usage.ts';
 import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
 import { now } from './db.ts';
@@ -16,9 +18,9 @@ import {
 import { buildCoordinatorPrompt, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { runtime } from './runtime.ts';
-import { countByStatus, createTask, findTask, listTasks, shortId, updateTask } from './tasks.ts';
+import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, updateTask } from './tasks.ts';
 import { orchestrator, pickAccount } from './orchestrator.ts';
-import { addWorktree, commitAll, git, hasCommitsAhead } from './util/git.ts';
+import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit } from './util/git.ts';
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
 import { appConfig } from './config.ts';
 import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
@@ -194,10 +196,38 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
 
 // ---------------- the coordinator's own edits ----------------
 
+/**
+ * Work the coordinator did itself (a main-checkout edit or a merged workspace) becomes a finished task of kind
+ * `coordinator`, so it shows up with the other tasks: title = message, paths = files changed, linked to its chat session.
+ */
+export function recordCoordinatorWork(projectId: string, how: 'main' | 'workspace', message: string, files: string[], sessionId?: string | null): Task | null {
+  const msg = message.trim() || (how === 'main' ? 'Coordinator edit' : 'Coordinator change');
+  if (!files.length) return null;
+  const where = how === 'main' ? 'Edited in the project folder' : 'Merged from the coordinator worktree';
+  const t = createTask(projectId, {
+    title: msg.split(/\r?\n/)[0].slice(0, 120), description: msg, role: 'coordinator', kind: 'coordinator', adhoc: true,
+    priority: 0, paths: files, originSessionId: sessionId ?? null,
+  });
+  return setStatus(t.id, 'done', { result: AgentResultSchema.parse({ status: 'done', summary: `${where}: ${files.length} file${files.length === 1 ? '' : 's'} changed.` }) });
+}
+
+/** Snapshot of the project folder when the coordinator started editing it, to list the files it changed. */
+const mainSnaps = new Map<string, { snap: string; at: number }>();
+const folderSnapshot = async (p: Project) =>
+  snapshotCommit(p.path, await revParse(p.path, 'HEAD'), 'plexus: folder before coordinator edit (not on any branch)').catch(() => null);
+const changedFiles = async (repo: string, ...range: string[]) =>
+  (await git(repo, 'diff', '--name-only', '--no-renames', ...range)).stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+
 /** Start editing the main checkout: merges wait until plexus_main_commit (or 10 minutes). */
 export async function beginMainEdit(projectId: string): Promise<string> {
   const p = mustProject(projectId);
   await orchestrator.holdMain(p.id);
+  // A second begin within the same hold keeps the first snapshot; an old one (the hold timed out) is replaced.
+  const held = mainSnaps.get(p.id);
+  if (!held || Date.now() - held.at > appConfig().mainHoldMin * 60_000) {
+    const snap = await folderSnapshot(p);
+    if (snap) mainSnaps.set(p.id, { snap, at: Date.now() }); else mainSnaps.delete(p.id);
+  }
   const st = (await git(p.path, 'status', '--short')).stdout.trim();
   return `Merges are held until plexus_main_commit (10 min at most). You may edit ${p.path} now.` +
     (autoCommit() ? '' : ' Do not run git commit there: your edits stay uncommitted for the user to review and commit.') +
@@ -210,9 +240,13 @@ ${st}` : '');
  * The coordinator finished editing the main checkout: let merges continue. Without auto-commit nothing is committed; the
  * folder (with the edits) becomes the base later tasks start from. With auto-commit the edits are committed on the branch.
  */
-export async function commitMainEdit(projectId: string, message: string): Promise<string> {
+export async function commitMainEdit(projectId: string, message: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
+  const before = mainSnaps.get(p.id)?.snap;
+  mainSnaps.delete(p.id);
   try {
+    const after = before ? await folderSnapshot(p) : null;
+    if (before && after) recordCoordinatorWork(p.id, 'main', message, await changedFiles(p.path, before, after), sessionId);
     if (!autoCommit()) {
       const notice = await absorbCheckout(p);
       return notice || 'Done. Your edits are left uncommitted in the project folder (the user commits them); tasks started from now on see them.';
@@ -240,15 +274,16 @@ export async function coordinatorWorkspace(projectId: string): Promise<string> {
 }
 
 /** Merge the coordinator's worktree into the base through the merge queue (its branch is internal to Plexus). */
-export async function mergeCoordinatorWorkspace(projectId: string, message: string): Promise<string> {
+export async function mergeCoordinatorWorkspace(projectId: string, message: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
   const wt = coordWorktree(p);
   if (!existsSync(wt)) return 'No coordinator worktree: call plexus_workspace first.';
   const base = baseRef(p);
   await commitAll(wt, message.trim() || 'chore: coordinator change');
   if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base))) return 'Nothing to merge.';
+  const files = await changedFiles(p.path, `${base}...${COORD_BRANCH}`).catch(() => [] as string[]);
   const r = await orchestrator.mergeCoordinatorBranch(p, COORD_BRANCH, `merge coordinator: ${message.trim() || 'change'}`);
-  if (r.ok) await git(wt, 'reset', '--hard', base);
+  if (r.ok) { await git(wt, 'reset', '--hard', base); recordCoordinatorWork(p.id, 'workspace', message, files, sessionId); }
   const done = autoCommit() ? `Merged into ${p.mainBranch}.` : 'Merged; the changes are in the project folder, uncommitted (the user commits them).';
   return r.ok ? done : `Not merged (${r.detail.slice(0, 800)}). Resolve it in your worktree (git merge ${base}) and try again.`;
 }
@@ -285,16 +320,24 @@ export function coordinatorTarget(p: Project) {
   return { role, accounts, pinnedId, pinned, account, model, effort };
 }
 
+/** Tool calls kept with one coordinator reply (the rest are in its log). */
+const MAX_ACTIVITY = 200;
+
+/**
+ * The words of a coordinator message worth showing while it works: its JSON answer (bare or in a ```json block) is
+ * left out, since it becomes the reply and its actions. Empty when the message is only that JSON.
+ */
+export function chatProse(text: string): string {
+  const t = text.replace(/```json\s*\n[\s\S]*?(```|$)/g, '').trim();
+  if (t.startsWith('{') && parseCoordinatorOutput(t)) return '';
+  const brace = t.search(/\n\s*\{\s*"reply"/);
+  return (brace >= 0 ? t.slice(0, brace) : t).trim();
+}
+
 /** The `plexus` MCP server the coordinator's CLI starts (it calls back into this daemon's API). */
 export function coordinatorMcp(projectId: string, sessionId: string): McpServerSpec | undefined {
   if (!runtime.port || !runtime.token) return undefined;
-  return {
-    name: 'plexus', command: process.execPath, args: [join(appRoot, 'src', 'server', 'mcp', 'plexus-mcp.ts')],
-    env: {
-      PLEXUS_API: `http://127.0.0.1:${runtime.port}`, PLEXUS_TOKEN: runtime.token, PLEXUS_PROJECT: projectId, PLEXUS_SESSION: sessionId,
-      ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-    },
-  };
+  return plexusMcp({ PLEXUS_API: `http://127.0.0.1:${runtime.port}`, PLEXUS_TOKEN: runtime.token, PLEXUS_PROJECT: projectId, PLEXUS_SESSION: sessionId });
 }
 
 async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
@@ -322,6 +365,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text, tools);
   const deltaPrompt = () => buildCoordinatorTurnPrompt(p, statusDigest(projectId, lastReply?.createdAt ?? null),
     messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
+  const activity: ChatActivity = { tools: [], plan: null };
   const attempt = (resumeId: string | undefined, tag: string) => {
     const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`);
     const prompt = resumeId ? deltaPrompt() : fullPrompt();
@@ -330,9 +374,23 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     const um = getMessage(userMsgId);
     if (um) updateMessageMeta(userMsgId, { ...(um.meta ?? {}), promptLog: logPath, promptChars: prompt.length, promptResumed: !!resumeId });
     // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
+    // Its tool calls and checklist stream to the chat while it works and stay with its reply (its text is the reply).
+    activity.tools = []; activity.plan = null; activity.steps = [];
+    bus.emitEvent('chat.activity', projectId, { sessionId, reset: true }, false);
     return adapterFor(account.provider).run({
       account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
       mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: appConfig().chatIdleTimeoutMin * 60_000, logPath,
+      onEvent: e => {
+        let text: string;
+        if (e.kind === 'plan') { activity.plan = parsePlan(e.text); text = e.text; }
+        else if (e.kind === 'tool' && activity.steps!.length < MAX_ACTIVITY) {
+          text = e.text.slice(0, 300);
+          activity.tools.push(text); activity.steps!.push({ kind: 'tool', text });
+        } else if (e.kind === 'text' && activity.steps!.length < MAX_ACTIVITY && (text = chatProse(e.text).slice(0, 4000))) {
+          activity.steps!.push({ kind: 'text', text });
+        } else return;
+        bus.emitEvent('chat.activity', projectId, { sessionId, kind: e.kind, text }, false);
+      },
     });
   };
 
@@ -352,7 +410,13 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     else if (lostCli) setCliSession(sessionId, null);
 
     const parsed = parseCoordinatorOutput(out.finalText);
-    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, tokens: out.usage, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli, tools, ...(tooBig && sameCli ? { freshContext: true } : {}) };
+    // The words after the last tool call are the answer itself (posted as the reply): the kept steps end at that call.
+    const steps = activity.steps ?? [];
+    const lastTool = steps.map(x => x.kind).lastIndexOf('tool');
+    activity.steps = steps.slice(0, lastTool + 1);
+    if (!activity.steps.length) delete activity.steps;
+    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, tokens: out.usage, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli, tools, ...(tooBig && sameCli ? { freshContext: true } : {}),
+      ...(activity.tools.length || activity.plan ? { activity } : {}) };
     if (!parsed) {
       const why = !usable ? ` (${account.id}: ${out.classification.state})` : '';
       say('coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, meta);
