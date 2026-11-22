@@ -8,9 +8,11 @@ import { spawn } from 'node:child_process';
 import type { Account, ModelInfo, QuotaSnapshot, QuotaWindow } from '../../shared/types.ts';
 import { childEnv, killTree, resolveCli } from '../util/proc.ts';
 import type { Classification } from './types.ts';
+import { appConfig } from '../config.ts';
+import { unknownResetBackoffMs } from './claude-limits.ts';
 
 /** Send `initialize` plus the given control subtypes; resolve with each response body keyed by subtype. */
-export function claudeControl(account: Account, subtypes: string[], timeoutMs = 30_000): Promise<Record<string, any>> {
+export function claudeControl(account: Account, subtypes: string[], timeoutMs = appConfig().controlTimeoutSec * 1000): Promise<Record<string, any>> {
   const { cmd, prefixArgs } = resolveCli('claude');
   const all = ['initialize', ...subtypes.filter(s => s !== 'initialize')];
   return new Promise((resolve, reject) => {
@@ -107,16 +109,16 @@ export function classifyClaudeUsage(usage: any, now = Date.now()): Classificatio
     if (w && typeof w === 'object' && typeof w.utilization === 'number' && 'resets_at' in w) all.push({ name, pct: w.utilization, resetsAt: isoOrNull(w.resets_at) });
   }
   if (!all.length) return null;
-  const spent = all.filter(x => x.pct >= 100);
+  const spent = all.filter(x => x.pct >= appConfig().exhaustedPercent);
   if (spent.length) {
     const resets = spent.map(x => x.resetsAt).filter((r): r is string => !!r && Date.parse(r) > now).sort().at(-1) ?? null;
     return {
       state: 'limited', reason: 'quota_exhausted', limitedWindow: spent[0].name, resetsAt: resets,
-      cooldownUntil: resets ?? new Date(now + 15 * 60_000).toISOString(), evidence: spent.map(x => `get_usage ${x.name}=${x.pct}%`),
+      cooldownUntil: resets ?? new Date(now + unknownResetBackoffMs()).toISOString(), evidence: spent.map(x => `get_usage ${x.name}=${x.pct}%`),
     };
   }
   const max = all.reduce((a, b) => (b.pct > a.pct ? b : a));
-  if (max.pct >= 90) return { state: 'warning', reason: 'near_limit', limitedWindow: max.name, evidence: [`get_usage ${max.name}=${max.pct}%`] };
+  if (max.pct >= appConfig().warnPercent) return { state: 'warning', reason: 'near_limit', limitedWindow: max.name, evidence: [`get_usage ${max.name}=${max.pct}%`] };
   return { state: 'ok', reason: 'usage-api', evidence: [] };
 }
 

@@ -1,11 +1,14 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { quotaService } from './accounts.ts';
 import { buildApi } from './api.ts';
 import { closeDb, getDb } from './db.ts';
 import { orchestrator } from './orchestrator.ts';
 import { paths } from './paths.ts';
 import { seedRoles } from './roles.ts';
+import { backfillRunUsage } from './usage.ts';
+import { runtime } from './runtime.ts';
 
 export function loadToken(): string {
   if (existsSync(paths.token)) return readFileSync(paths.token, 'utf8').trim();
@@ -25,8 +28,20 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
   await app.listen({ port, host });
   quotaService.start();
   orchestrator.start();
+  // Runs recorded before token usage was stored: read it back from their logs, once.
+  setImmediate(() => {
+    // A stored path may predate a move of the data folder (swarm → plexus): fall back to <logs>/<project>/<file>.
+    const readLog = (p: string) => {
+      const here = join(paths.logs, ...p.split(/[\\/]/).slice(-2));
+      const f = existsSync(p) ? p : existsSync(here) ? here : null;
+      return f ? readFileSync(f, 'utf8') : null;
+    };
+    try { backfillRunUsage(readLog); } catch (e: any) { console.error('usage backfill failed:', e?.message ?? e); }
+  });
   const addr = app.server.address();
   const realPort = typeof addr === 'object' && addr ? addr.port : port;
+  runtime.port = realPort;
+  runtime.token = token;
   if (!opts.quiet) {
     console.log(`plexus daemon listening on http://${host}:${realPort}`);
     console.log(`data: ${paths.home}`);

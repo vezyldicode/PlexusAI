@@ -1,16 +1,32 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
 import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.ts';
+import { invocationUsage } from '../usage.ts';
+import { codexMcpOverrides, withSystem } from './mcp-config.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { appConfig } from '../config.ts';
+import { spentPercent, transientBackoffMs, unknownResetBackoffMs } from './claude-limits.ts';
+import { createRunTimer } from './timing.ts';
+import { PLAN_TOOL, planEvent, planItems, type StreamEvent } from './plan.ts';
+import { codexUserDefaults } from './codex-config.ts';
 
-const UNKNOWN_RESET_BACKOFF_MS = 15 * 60 * 1000;
-const TRANSIENT_BACKOFF_MS = 60 * 1000;
 
-export function describeCodexEvent(line: string): { kind: 'text' | 'tool' | 'status' | 'raw'; text: string } | null {
+export function describeCodexEvent(line: string): StreamEvent | null {
   let e: any;
   try { e = JSON.parse(line); } catch { return { kind: 'raw', text: line.slice(0, 500) }; }
-  if (e.type === 'item.completed' || e.type === 'item.started') {
+  if (e.type === 'item.completed' || e.type === 'item.started' || e.type === 'item.updated') {
     const it = e.item ?? {};
+    // The checklist: Codex's own todo list (started, then updated as steps finish) or Plexus's plexus_plan tool.
+    if (it.type === 'todo_list') { const plan = planItems(it.items); return plan ? planEvent(plan) : null; }
+    if (it.type === 'mcp_tool_call' && e.type === 'item.started') {
+      let args = it.arguments;
+      if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* shown as is */ } }
+      const plan = it.tool === PLAN_TOOL ? planItems(args?.items) : null;
+      if (plan) return planEvent(plan);
+      const arg = args && typeof args === 'object' ? Object.values(args).find(v => typeof v === 'string' || typeof v === 'number') : args;
+      return { kind: 'tool', text: `${it.tool ?? 'mcp'} ${arg == null ? '' : String(arg).slice(0, 200)}`.trim() };
+    }
+    if (e.type === 'item.updated') return null;
     if (it.type === 'agent_message' && e.type === 'item.completed') return { kind: 'text', text: it.text ?? '' };
     if (it.type === 'command_execution' && e.type === 'item.started') return { kind: 'tool', text: `shell ${String(it.command ?? '').slice(0, 200)}` };
     if (it.type === 'file_change' && e.type === 'item.completed') return { kind: 'tool', text: `edit ${(it.changes ?? []).map((c: any) => c.path).join(', ').slice(0, 200)}` };
@@ -54,11 +70,11 @@ export function classifyCodexRun(run: { stdout: string; stderr?: string; exitCod
   if (!completed || exitCode !== 0) {
     if (hit(/usage_not_included|not included in your plan/i)) return { state: 'blocked', reason: 'usage_not_included', finalText, evidence };
     if (hit(/usage[ _]limit|usage_limit_reached|quota_exceeded|reached your usage limit|hit your usage limit/i)) {
-      return { state: 'limited', reason: 'quota_exhausted', cooldownUntil: new Date(now + UNKNOWN_RESET_BACKOFF_MS).toISOString(), finalText, evidence };
+      return { state: 'limited', reason: 'quota_exhausted', cooldownUntil: new Date(now + unknownResetBackoffMs()).toISOString(), finalText, evidence };
     }
     if (hit(/401|unauthori[sz]ed|not logged in|authentication required|please log ?in|refresh token/i)) return { state: 'needs_login', reason: 'auth', finalText, evidence };
     if (hit(/reconnecting|stream disconnected|connection (failed|refused)|error sending request|timed out|503|502|overloaded|rate limit/i)) {
-      return { state: 'transient', reason: 'network_or_api', cooldownUntil: new Date(now + TRANSIENT_BACKOFF_MS).toISOString(), finalText, evidence };
+      return { state: 'transient', reason: 'network_or_api', cooldownUntil: new Date(now + transientBackoffMs()).toISOString(), finalText, evidence };
     }
     evidence.push(completed ? `exit ${exitCode}` : 'turn not completed');
     return { state: 'task_error', reason: completed ? `exit ${exitCode}` : 'turn_not_completed', finalText, evidence };
@@ -76,48 +92,63 @@ export const codexAdapter: ProviderAdapter = {
   async run(spec: RunSpec): Promise<RunOutcome> {
     const { cmd, prefixArgs } = resolveCli('codex');
     // --ignore-user-config: workers must not inherit per-machine config (custom endpoints, MCP servers...).
+    // --disable plugins: curated plugins in CODEX_HOME/plugins (e.g. Notion) start their MCP servers despite
+    // --ignore-user-config, adding tool schemas to every call (and failing on auth). Plexus's own MCP server is a config override.
     // `exec resume` has no -C/--sandbox: the working directory is the spawn cwd and read-only is a config override.
     const args = spec.resumeId
-      ? [...prefixArgs, 'exec', 'resume', '--json', '--ignore-user-config', '--skip-git-repo-check']
-      : [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--skip-git-repo-check', '-C', spec.cwd];
-    if (spec.model) args.push('-m', spec.model);
-    if (spec.effort) args.push('-c', `model_reasoning_effort="${spec.effort}"`);
+      ? [...prefixArgs, 'exec', 'resume', '--json', '--ignore-user-config', '--disable', 'plugins', '--skip-git-repo-check']
+      : [...prefixArgs, 'exec', '--json', '--ignore-user-config', '--disable', 'plugins', '--skip-git-repo-check', '-C', spec.cwd];
+    // --ignore-user-config drops the model and effort the person chose for Codex too: pass those explicitly when Plexus
+    // has no choice of its own, so a run uses the same model as the Codex app.
+    const user = !spec.model || !spec.effort ? codexUserDefaults(spec.account.home) : {};
+    const model = spec.model ?? user.model, effort = spec.effort ?? user.effort;
+    if (model) args.push('-m', model);
+    if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
+    // Note: on Windows the read-only sandbox refuses to start any process (even `Get-Location`), so a read-only Codex
+    // agent cannot even read files there. Only use it where that is acceptable.
     if (spec.readOnly) args.push(...(spec.resumeId ? ['-c', 'sandbox_mode="read-only"'] : ['--sandbox', 'read-only']));
     else args.push('--dangerously-bypass-approvals-and-sandbox');
+    args.push(...codexMcpOverrides(spec));
+    if (spec.autocompact && spec.autocompact > 0) args.push('-c', `model_auto_compact_token_limit=${Math.floor(spec.autocompact)}`);
     if (spec.resumeId) args.push(spec.resumeId);
     args.push('-');
+    const since = Date.now();
+    const timer = createRunTimer('codex', since);
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
       env: { ...process.env, ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
-      onLine: line => { const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },
+      onLine: line => { timer.line(line); const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },
     });
+    const timing = timer.finish();
     const a = classifyCodexRun({ stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode });
     // Quota is not in the exec stream: read it from app-server right after the run.
     const rl = await readCodexRateLimitsOnce(spec.account.home).catch(() => null);
     const classification: Classification = { state: a.state, reason: a.reason, cooldownUntil: a.cooldownUntil, evidence: a.evidence };
     if (rl?.reached || a.state === 'limited') {
       const windows = [rl?.quota?.primary, rl?.quota?.secondary].filter(Boolean);
-      const exhausted = windows.filter(w => (w!.usedPercent ?? 0) >= 100).map(w => w!.resetsAt).filter(Boolean) as string[];
+      const exhausted = windows.filter(w => spentPercent(w!.usedPercent)).map(w => w!.resetsAt).filter(Boolean) as string[];
       if (rl?.reached) classification.evidence.push(`app-server rateLimitReachedType=${rl.reached}`);
       classification.state = 'limited';
       classification.reason = 'quota_exhausted';
       if (exhausted.length) classification.cooldownUntil = classification.resetsAt = exhausted.sort().at(-1)!;
     }
-    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage: a.usage, classification, quota: rl?.quota ?? null, sessionId: codexThreadId(r.stdout) };
+    const sessionId = codexThreadId(r.stdout) ?? spec.resumeId;
+    const usage = invocationUsage('codex', r.stdout, { model, resumeId: spec.resumeId, sessionId, codexHome: spec.account.home, since, until: Date.now() });
+    return { exitCode: r.exitCode, finalText: a.finalText, killedReason: r.killedReason, usage, classification, quota: rl?.quota ?? null, sessionId, timing };
   },
 
   async probe(account: Account) {
     const rl = await readCodexRateLimitsOnce(account.home);
     if (rl.needsLogin) return { classification: { state: 'needs_login', reason: 'auth', evidence: [rl.error ?? ''] }, quota: null };
-    if (rl.error) return { classification: { state: 'transient', reason: 'app-server', cooldownUntil: new Date(Date.now() + TRANSIENT_BACKOFF_MS).toISOString(), evidence: [rl.error] }, quota: null };
+    if (rl.error) return { classification: { state: 'transient', reason: 'app-server', cooldownUntil: new Date(Date.now() + transientBackoffMs()).toISOString(), evidence: [rl.error] }, quota: null };
     const windows = [rl.quota?.primary, rl.quota?.secondary].filter(Boolean);
     const maxUsed = Math.max(0, ...windows.map(w => w!.usedPercent ?? 0));
-    if (rl.reached || maxUsed >= 100) {
-      const resets = windows.filter(w => (w!.usedPercent ?? 0) >= 100).map(w => w!.resetsAt).filter(Boolean).sort().at(-1) ?? null;
-      return { classification: { state: 'limited', reason: 'quota_exhausted', resetsAt: resets, cooldownUntil: resets ?? new Date(Date.now() + UNKNOWN_RESET_BACKOFF_MS).toISOString(), evidence: [`used ${maxUsed}%`] }, quota: rl.quota };
+    if (rl.reached || spentPercent(maxUsed)) {
+      const resets = windows.filter(w => spentPercent(w!.usedPercent)).map(w => w!.resetsAt).filter(Boolean).sort().at(-1) ?? null;
+      return { classification: { state: 'limited', reason: 'quota_exhausted', resetsAt: resets, cooldownUntil: resets ?? new Date(Date.now() + unknownResetBackoffMs()).toISOString(), evidence: [`used ${maxUsed}%`] }, quota: rl.quota };
     }
-    return { classification: { state: maxUsed >= 90 ? 'warning' : 'ok', reason: 'probe', evidence: [] }, quota: rl.quota };
+    return { classification: { state: maxUsed >= appConfig().warnPercent ? 'warning' : 'ok', reason: 'probe', evidence: [] }, quota: rl.quota };
   },
 
   listModels(account: Account) {

@@ -54,6 +54,30 @@ const MIGRATIONS: string[] = [
      SELECT p.id || '-default', p.id, 'Default', COALESCE((SELECT MAX(id) FROM messages m WHERE m.project_id = p.id), 0), p.created_at, p.created_at FROM projects p;
    UPDATE messages SET session_id = project_id || '-default' WHERE project_id IN (SELECT id FROM projects);
    UPDATE projects SET control_session_id = id || '-default';`,
+  // Acceptance criterion ids a task serves (from the planner), so its prompt carries only those criteria.
+  `ALTER TABLE tasks ADD COLUMN ac_ids TEXT NOT NULL DEFAULT '[]';`,
+  // Chat-requested single-agent tasks, and the CLI conversation of a task's last attempt (resumed by fixes/retries).
+  `ALTER TABLE tasks ADD COLUMN adhoc INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE tasks ADD COLUMN cli_session_id TEXT;
+   ALTER TABLE tasks ADD COLUMN cli_account_id TEXT;`,
+  // Tokens per run (normalized, see usage.ts; JSON null = nothing readable), and the last report of each CLI conversation
+  // so a resumed turn that reports thread totals (Codex) is counted by its own share.
+  `ALTER TABLE runs ADD COLUMN usage TEXT;
+   CREATE TABLE IF NOT EXISTS cli_usage (session_id TEXT PRIMARY KEY, usage TEXT NOT NULL, updated_at TEXT NOT NULL);`,
+  // Lanes (a task continuing another task's agent), account pins, messages for an agent, and the context size of the
+  // last call of a task's CLI conversation (resume only while that is cheaper than starting fresh).
+  `ALTER TABLE tasks ADD COLUMN cli_ctx_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE tasks ADD COLUMN cli_used_at TEXT;
+   ALTER TABLE tasks ADD COLUMN pinned_account_id TEXT;
+   ALTER TABLE tasks ADD COLUMN lane_from TEXT;
+   ALTER TABLE tasks ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';`,
+  // The model and effort a run was started with (what the UI shows as "in use").
+  `ALTER TABLE runs ADD COLUMN model TEXT;
+   ALTER TABLE runs ADD COLUMN effort TEXT;`,
+  // Where a run's time went (startup, model, tools, compaction, waiting), and a conversation a task forks from another
+  // working directory (the coordinator's chat, held in the project folder) instead of resuming it in place.
+  `ALTER TABLE runs ADD COLUMN timing TEXT;
+   ALTER TABLE tasks ADD COLUMN cli_fork_cwd TEXT;`,
 ];
 
 export function getDb(): DatabaseSync {

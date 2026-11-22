@@ -1,7 +1,7 @@
 // Stop in the middle of a task, restart the daemon, resume, and still finish; an agent also crashes mid-task once.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -53,7 +53,7 @@ test('stop → daemon restart → resume completes; crashed attempt is retried',
     assert.equal(s.project.phase, 'done', JSON.stringify(s.tasks.map((t: any) => [t.seq, t.kind, t.status, t.error])));
     const crashed = s.tasks.filter((t: any) => t.attempts > 0);
     assert.ok(crashed.length > 0, 'a crashed attempt was recorded and retried');
-    const files = execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: proj, encoding: 'utf8' });
+    const files = readdirSync(proj).sort().join('\n');
     assert.match(files, /alpha\.txt/);
     assert.match(files, /beta\.txt/);
   } finally { await d.shutdown(); }

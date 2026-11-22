@@ -1,4 +1,5 @@
-import type { Account, ModelInfo, Provider, QuotaSnapshot } from '../../shared/types.ts';
+import type { Account, ModelInfo, Provider, QuotaSnapshot, RunTiming, TokenUsage } from '../../shared/types.ts';
+import type { StreamEvent } from './plan.ts';
 
 export type RunState = 'ok' | 'warning' | 'limited' | 'transient' | 'needs_login' | 'blocked' | 'task_error';
 
@@ -19,14 +20,24 @@ export interface RunSpec {
   /** Reasoning effort, already checked against the model's supported efforts (see models.ts). */
   effort?: string;
   readOnly: boolean;
+  /** Text for the CLI's system prompt (same for every task of a role, so it is cached); prepended to the prompt where unsupported. Not sent on resume. */
+  system?: string;
+  /** An MCP server the agent gets (the coordinator's `plexus` tools). */
+  mcp?: McpServerSpec;
+  /** Compact the conversation once its context passes this many tokens (0/undefined: the CLI's default). */
+  autocompact?: number;
   /** Continue this provider CLI conversation instead of starting one (the prompt then only carries what is new). */
   resumeId?: string;
+  /** With resumeId: continue a copy of that conversation under a new id (Claude --fork-session); the original stays as it was. */
+  forkSession?: boolean;
+  /** Stop the run (killedReason `budget`) once the CLI compacted the context this many times (0/undefined: no limit). */
+  maxCompactions?: number;
   timeoutMs: number;
   idleTimeoutMs: number;
   logPath: string;
   signal?: AbortSignal;
   /** Called for each parsed stream event (already JSON-parsed when possible). */
-  onEvent?: (ev: { kind: 'text' | 'tool' | 'status' | 'raw'; text: string }) => void;
+  onEvent?: (ev: StreamEvent) => void;
 }
 
 export interface RunOutcome {
@@ -34,11 +45,16 @@ export interface RunOutcome {
   finalText: string;
   classification: Classification;
   quota: QuotaSnapshot | null;
-  killedReason: 'timeout' | 'idle' | 'aborted' | null;
-  usage?: Record<string, number>;
+  killedReason: 'timeout' | 'idle' | 'aborted' | 'budget' | null;
+  /** Where the run's time went (waitMs is filled in by the caller). */
+  timing?: RunTiming | null;
+  /** Tokens this invocation spent (null when the CLI reported none). */
+  usage: TokenUsage | null;
   /** Provider CLI conversation id of this run (claude session_id / codex thread_id), for a later resume. */
   sessionId?: string;
 }
+
+export interface McpServerSpec { name: string; command: string; args: string[]; env: Record<string, string> }
 
 export interface LoginCommand { cmd: string; args: string[]; env: Record<string, string> }
 

@@ -1,24 +1,72 @@
-// Settings dialog: accounts, roles and skills. Edits that can be changed back save on their own;
-// only things that cannot be undone (remove, delete, reset) ask first.
+// Settings dialog. Workspace: accounts, roles and skills. Project: how the open project (or every new one) is built.
+// Engine: quota checks, scheduler, context sizes, coordinator chat. Edits that can be changed back save on their own;
+// only things that cannot be undone (remove, delete, reset) ask first. Right-click a tab to reset all of it.
 import { useEffect, useRef, useState } from 'react';
-import { Blocks, Check, ChevronDown, GripVertical, Plus, UserCog, Users, X } from 'lucide-react';
+import { Blocks, Check, ChevronDown, FolderCog, Gauge, GripVertical, Layers, MessagesSquare, Plus, RotateCcw, Timer, UserCog, Users, Wrench, X } from 'lucide-react';
 import { api, clock } from './api.ts';
-import type { Account, ModelCatalog, Provider, Role, Skill } from './types.ts';
-import { ContextMenu, Dot, Ic, Meter } from './ui.tsx';
+import type { Account, ModelCatalog, Project, Provider, Role, Skill } from './types.ts';
+import { ContextMenu, Dot, Ic, Meter, type MenuItem } from './ui.tsx';
 import { FALLBACK, effortsFor, useModels } from './models.tsx';
 import { accountItems } from './components/Sidebar.tsx';
+import { EngineSettings, ProjectSettingsPanel, TooltipLayer, engineKeys, resetProjectTab, useConfig, type EngineTab } from './engine-settings.tsx';
 
-export type SettingsTab = 'accounts' | 'roles' | 'skills';
-const TABS: { id: SettingsTab; label: string; icon: typeof Users }[] = [
-  { id: 'accounts', label: 'Accounts', icon: Users },
-  { id: 'roles', label: 'Roles', icon: UserCog },
-  { id: 'skills', label: 'Skills', icon: Blocks },
+export type SettingsTab = 'accounts' | 'roles' | 'skills' | 'project' | EngineTab;
+type TabDef = { id: SettingsTab; label: string; icon: typeof Users; tip: string };
+const SECTIONS: { title: string; tabs: TabDef[] }[] = [
+  { title: 'Workspace', tabs: [
+    { id: 'accounts', label: 'Accounts', icon: Users, tip: 'Claude and Codex accounts, their quota and how many tasks each runs' },
+    { id: 'roles', label: 'Roles', icon: UserCog, tip: 'What each kind of agent does, and the model it runs on' },
+    { id: 'skills', label: 'Skills', icon: Blocks, tip: 'Instruction folders copied into the workspace of the roles that use them' },
+  ] },
+  { title: 'Project', tabs: [
+    { id: 'project', label: 'Pipeline', icon: FolderCog, tip: 'How a project is built, reviewed and spread over accounts' },
+  ] },
+  { title: 'Engine', tabs: [
+    { id: 'quota', label: 'Quota', icon: Gauge, tip: 'Usage checks and when an account rests' },
+    { id: 'scheduler', label: 'Scheduler', icon: Timer, tip: 'When tasks start and how long a silent agent may run' },
+    { id: 'context', label: 'Context', icon: Layers, tip: 'How much each agent reads, which decides most of the token use' },
+    { id: 'coordinator', label: 'Coordinator', icon: MessagesSquare, tip: 'What the coordinator reads on each chat turn' },
+    { id: 'advanced', label: 'Advanced', icon: Wrench, tip: 'CLI paths, the fallback probe model and the commit author' },
+  ] },
 ];
+const ALL_TABS = SECTIONS.flatMap(s => s.tabs);
+const ENGINE_TABS: SettingsTab[] = ['quota', 'scheduler', 'context', 'coordinator', 'advanced'];
 
-export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, onError }: {
+export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, onError, project, reloadProject, onRunSetup }: {
   tab: SettingsTab; onTab: (t: SettingsTab) => void; onClose: () => void; accounts: Account[]; reloadAccounts: () => void; onError: (e: string) => void;
+  project: Project | null; reloadProject: () => void; onRunSetup?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const store = useConfig(onError);
+  const [scope, setScope] = useState<'project' | 'defaults'>(project ? 'project' : 'defaults');
+  const [menu, setMenu] = useState<{ x: number; y: number; tab: TabDef } | null>(null);
+  /** Bumped by a tab reset that the open tab must read again (roles). */
+  const [epoch, setEpoch] = useState(0);
+  const cur = ALL_TABS.find(t => t.id === tab) ?? ALL_TABS[0];
+
+  const resetItems = (t: TabDef): MenuItem[] => {
+    const item = (label: string, onSelect: () => void, disabled = false): MenuItem => ({ label, icon: RotateCcw, onSelect, disabled });
+    switch (t.id) {
+      case 'accounts': return [item('Reset parallel tasks and priority', () => {
+        if (!confirm('Set every account back to 1 task at a time and priority 10?')) return;
+        void Promise.all(accounts.map(a => api('PATCH', `/api/accounts/${a.id}`, { maxConcurrency: 1, priority: 10 }))).then(reloadAccounts).catch(e => onError(e.message));
+      }, !accounts.length)];
+      case 'roles': return [item('Reset built-in roles to default', () => {
+        if (!confirm('Reset every built-in role (instructions, models, limits) to its default? Roles you created are kept.')) return;
+        void api<Role[]>('GET', '/api/roles').then(rs => Promise.allSettled(rs.map(r => api('POST', `/api/roles/${r.name}/reset`)))).then(() => setEpoch(x => x + 1)).catch(e => onError(e.message));
+      })];
+      case 'skills': return [item('Skills have no defaults', () => {}, true)];
+      case 'project': return [
+        item(project ? `Reset ${project.name} to new-project defaults` : 'Reset the open project', () => resetProjectTab('project', project, store, reloadProject, onError), !project),
+        item('Reset new-project defaults', () => resetProjectTab('defaults', project, store, reloadProject, onError)),
+      ];
+      default: {
+        const keys = engineKeys(t.id as EngineTab);
+        const changed = !!store.view && keys.some(k => k in store.view!.overrides);
+        return [item(changed ? `Reset ${t.label} to default` : `${t.label} is at its defaults`, () => store.resetKeys(keys), !changed)];
+      }
+    }
+  };
   useEffect(() => {
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !document.querySelector('.menu, .drawer')) onClose(); };
     addEventListener('keydown', key);
@@ -30,21 +78,40 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
       <div ref={ref} tabIndex={-1} className="dialog settings" role="dialog" aria-label="Settings">
         <nav className="settings-nav" role="tablist" aria-label="Settings sections">
           <div className="settings-title">Settings</div>
-          {TABS.map(t => (
-            <button key={t.id} role="tab" aria-selected={tab === t.id} className={`nav-row ${tab === t.id ? 'active' : ''}`} onClick={() => onTab(t.id)}>
-              <span className="nav-ic"><Ic i={t.icon} /></span><span className="nav-text">{t.label}</span>
-            </button>
+          {SECTIONS.map(sec => (
+            <div key={sec.title} className="settings-section">
+              <div className="settings-section-label">{sec.title}</div>
+              {sec.tabs.map(t => (
+                <button key={t.id} role="tab" aria-selected={tab === t.id} data-tip={t.tip}
+                  className={`nav-row ${tab === t.id ? 'active' : ''} ${menu?.tab.id === t.id ? 'menu-open' : ''}`} onClick={() => onTab(t.id)}
+                  onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, tab: t }); }}
+                  onKeyDown={e => { if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left + 16, y: r.bottom, tab: t }); } }}>
+                  <span className="nav-ic"><Ic i={t.icon} /></span><span className="nav-text">{t.label}</span>
+                </button>
+              ))}
+            </div>
           ))}
-          <div className="settings-note">Changes save as you make them</div>
+          <div className="settings-note">Changes save as you make them. Right-click a tab or a setting to reset it</div>
         </nav>
         <div className="settings-main">
           <button className="icon-btn settings-close" onClick={onClose} title="Close" aria-label="Close settings"><Ic i={X} /></button>
-          <div className="settings-body">
+          <div className="settings-body" key={`${cur.id}-${epoch}`}>
             {tab === 'accounts' && <AccountsSettings accounts={accounts} reload={reloadAccounts} onError={onError} />}
             {tab === 'roles' && <RolesSettings onError={onError} />}
             {tab === 'skills' && <SkillsSettings onError={onError} />}
+            {tab === 'project' && <ProjectSettingsPanel project={project} reloadProject={reloadProject} store={store} scope={scope} onScope={setScope} onError={onError} />}
+            {ENGINE_TABS.includes(tab) && <EngineSettings tab={tab as EngineTab} title={cur.label} store={store} />}
+            {tab === 'advanced' && onRunSetup && (
+              <section className="setup-again">
+                <h2>First-run setup</h2>
+                <p className="lead">Check Git, the coding CLIs and the signed-in accounts again, one step at a time</p>
+                <div className="row"><button onClick={onRunSetup}>Run setup again</button></div>
+              </section>
+            )}
           </div>
         </div>
+        <TooltipLayer root={ref} />
+        {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={resetItems(menu.tab)} />}
       </div>
     </div>
   );
@@ -132,7 +199,9 @@ function AccountsSettings({ accounts, reload, onError }: { accounts: Account[]; 
       {msg && <div className="banner info" role="status" onClick={() => setMsg('')}>{msg}</div>}
       <div className="table-wrap">
         <table className="table accounts">
-          <thead><tr><th>Account</th><th>State</th><th className="c-meter">5h</th><th className="c-meter">Week</th><th className="r">Parallel</th><th className="r">Priority</th></tr></thead>
+          <thead><tr><th>Account</th><th>State</th><th className="c-meter"><span data-tip="Usage of the 5-hour window">5h</span></th><th className="c-meter"><span data-tip="Usage of the weekly window">Week</span></th>
+            <th className="r"><span data-tip="Most tasks this account runs at the same time">Parallel</span></th>
+            <th className="r"><span data-tip="Lower runs first when accounts are otherwise equal, and decides the order when a project picks accounts by priority">Priority</span></th></tr></thead>
           <tbody>
             {accounts.map(a => (
               <tr key={a.id} tabIndex={0} className={`${menu?.a.id === a.id ? 'menu-open' : ''} ${busy === a.id ? 'busy' : ''}`}
@@ -374,9 +443,9 @@ function RolesSettings({ onError }: { onError: (e: string) => void }) {
           </div>
 
           <div className="role-grid">
-            <label>Running at once<span className="field-note">Per project, 0 means no limit</span>
+            <label><span data-tip="Most tasks of this role running at the same time in one project. 0 leaves only the project's own limit">Running at once</span><span className="field-note">Per project, 0 means no limit</span>
               <NumField className="" value={cur.maxParallel} min={0} max={20} onValue={n => set({ maxParallel: n })} /></label>
-            <label>Max runtime<span className="field-note">Minutes</span>
+            <label><span data-tip="A run of this role is stopped after this long. It also sets the silence timeout, within the bounds under Scheduler">Max runtime</span><span className="field-note">Minutes</span>
               <NumField className="" value={cur.maxRuntimeMin} min={1} max={1440} onValue={n => set({ maxRuntimeMin: n })} /></label>
           </div>
           <label className="check"><input type="checkbox" checked={cur.writesCode} onChange={e => set({ writesCode: e.target.checked })} />Writes code (gets its own branch, changes are merged)</label>

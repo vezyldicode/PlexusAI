@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Plexus</title>
+<!-- Shown the moment the window opens, while the daemon starts. Same mark and layout as the boot screen in the UI
+     (ui/src/onboarding.tsx), so the hand-over to the app does not move anything. The main process drives it through
+     window.splash; the buttons report back by changing the URL hash (no preload needed). -->
+<style>
+  :root { color-scheme: dark; --deep: #0f0f10; --raised: #232325; --raised-2: #2b2b2e; --line: rgba(237,237,237,.08);
+    --text: #ededed; --text-2: #a1a1a6; --muted: #85858b; --ease: cubic-bezier(.22,1,.36,1); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--deep); color: var(--text);
+    font: 14px/20px 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; user-select: none; }
+  .boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+  /* Same heartbeat as the UI's boot screen (ui/src/styles.css, .mark.loading). */
+  .m-edge { fill: none; stroke: var(--text-2); stroke-linecap: round; stroke-dasharray: 1; animation: flow 1.6s ease-in-out infinite both; }
+  .m-node { fill: var(--text); }
+  .core { transform-box: fill-box; transform-origin: center; animation: beat 1.6s ease-in-out infinite; }
+  @keyframes flow { 0% { stroke-dashoffset: 1; } 35%, 60% { stroke-dashoffset: 0; } 85%, 100% { stroke-dashoffset: -1; } }
+  @keyframes beat { 0%, 38% { transform: scale(1); } 48% { transform: scale(1.1); } 60%, 100% { transform: scale(1); } }
+  .error { display: none; flex-direction: column; align-items: center; gap: 16px; max-width: 46ch; text-align: center; }
+  .error p { margin: 0; color: var(--text-2); }
+  .boot.failed svg * { animation: none; }
+  .boot.failed .error { display: flex; }
+  .actions { display: flex; gap: 8px; }
+  button { font: inherit; font-size: 13px; font-weight: 500; height: 32px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+    color: var(--text); background: var(--raised); border: 1px solid var(--line); transition: background-color 140ms var(--ease); }
+  button:hover { background: var(--raised-2); }
+  button.primary { background: var(--text); color: var(--deep); border-color: transparent; }
+  button.primary:hover { background: #fff; }
+  button:focus-visible { outline: 2px solid #5fcfa8; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .m-edge, .core { animation: none; } }
+</style>
+</head>
+<body>
+<div class="boot" id="boot" role="status" aria-label="Plexus is loading">
+  <svg viewBox="10 20 140 125" width="64" height="57" aria-hidden="true">
+    <path class="m-edge" d="M35 43 64 70" pathLength="1" stroke-width="3.3" style="animation-delay:0ms" />
+    <path class="m-edge" d="M124 47 96 70" pathLength="1" stroke-width="3.3" style="animation-delay:100ms" />
+    <path class="m-edge" d="M112 121 94 94" pathLength="1" stroke-width="3.3" style="animation-delay:200ms" />
+    <circle class="m-node" cx="25" cy="35" r="12.5" />
+    <circle class="m-node" cx="135" cy="40" r="12.5" />
+    <circle class="m-node" cx="120" cy="130" r="12.5" />
+    <circle class="m-node core" cx="80" cy="80" r="20" />
+  </svg>
+  <div class="error">
+    <p id="message"></p>
+    <div class="actions">
+      <button id="log">Open log</button>
+      <button id="retry" class="primary">Try again</button>
+    </div>
+  </div>
+</div>
+<script>
+  const boot = document.getElementById('boot');
+  window.splash = {
+    reset() { boot.classList.remove('failed'); },
+    fail(text) { document.getElementById('message').textContent = text; boot.classList.add('failed'); document.getElementById('retry').focus(); },
+  };
+  // Each click changes the hash to a new value so the main process sees every one.
+  let n = 0;
+  document.getElementById('retry').onclick = () => { location.hash = `retry-${++n}`; };
+  document.getElementById('log').onclick = () => { location.hash = `log-${++n}`; };
+</script>
+</body>
+</html>

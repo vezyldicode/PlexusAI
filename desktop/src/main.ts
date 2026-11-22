@@ -2,7 +2,7 @@
 // The daemon (src/server) runs as its own background process, started with Electron's built-in Node
 // (ELECTRON_RUN_AS_NODE). This window is only a client of it: closing the window, or quitting the app,
 // leaves Plexus running, exactly like closing the browser tab with `npm start`.
-import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray, type MenuItemConstructorOptions } from 'electron';
+import { app, BrowserWindow, Menu, nativeImage, shell, Tray, type MenuItemConstructorOptions } from 'electron';
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -13,6 +13,8 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 /** Folder holding src/server, defaults, ui/dist and the daemon's node_modules. */
 const appRoot = app.isPackaged ? join(process.resourcesPath, 'app-root') : resolve(import.meta.dirname, '..', '..');
+/** Shown while the daemon starts (same mark and layout as the UI's boot screen). */
+const splashPath = join(import.meta.dirname, 'splash.html');
 const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : resolve(import.meta.dirname, '..', 'build', 'icon.png');
 
 /** Same rule as src/server/paths.ts. */
@@ -60,6 +62,8 @@ function spawnDaemon(): void {
   child.unref();
 }
 
+const daemonLog = () => join(plexusHome(), 'logs', 'daemon.log');
+
 /** Make sure a Plexus daemon answers on PORT, starting one if needed. Returns an error message on failure. */
 async function ensureDaemon(): Promise<string | null> {
   let h = await health();
@@ -72,7 +76,7 @@ async function ensureDaemon(): Promise<string | null> {
     h = await health();
     if (h === 'plexus') return null;
   }
-  return `Plexus daemon did not start within 30 s. See ${join(plexusHome(), 'logs', 'daemon.log')}.`;
+  return `The Plexus daemon did not start within 30 seconds. The log may say why.`;
 }
 
 async function stopDaemon(): Promise<void> {
@@ -89,10 +93,32 @@ function isInternal(url: string): boolean {
   try { return new URL(url).origin === ORIGIN; } catch { return false; }
 }
 
+/** Call the splash page's window.splash API (a no-op once the app page is loaded). */
+function splash(w: BrowserWindow, fn: 'reset' | 'fail', text = ''): Promise<unknown> {
+  if (w.isDestroyed()) return Promise.resolve();
+  return w.webContents.executeJavaScript(`window.splash?.${fn}(${JSON.stringify(text)})`).catch(() => {});
+}
+
+let booting = false;
+/** Show the splash, make sure the daemon runs, then load the app (or show the error with Try again on the splash). */
+async function boot(w: BrowserWindow): Promise<void> {
+  if (booting || w.isDestroyed()) return;
+  booting = true;
+  try {
+    if (w.webContents.getURL().startsWith('file:')) await splash(w, 'reset');
+    else await w.loadFile(splashPath).catch(() => {});
+    const err = await ensureDaemon();
+    if (w.isDestroyed()) return;
+    if (err) { await splash(w, 'fail', err); return; }
+    // ?splash tells the UI the splash already covered the wait, so its boot screen adds no minimum time.
+    await w.loadURL(`${ORIGIN}/?splash`).catch(() => { /* did-fail-load retries */ });
+  } finally { booting = false; }
+}
+
 function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
     width: 1400, height: 900, minWidth: 900, minHeight: 600,
-    title: 'Plexus', icon: iconPath, show: false, backgroundColor: '#1f2430',
+    title: 'Plexus', icon: iconPath, show: false, backgroundColor: '#0f0f10',
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   w.setMenuBarVisibility(false);
@@ -104,10 +130,17 @@ function createWindow(): BrowserWindow {
     if (input.key === 'F5' || (input.control && input.key.toLowerCase() === 'r')) { e.preventDefault(); w.webContents.reload(); }
     if (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i')) { e.preventDefault(); w.webContents.toggleDevTools(); }
   });
-  // Daemon restarted or briefly unreachable: retry instead of leaving an error page.
+  // Daemon restarted or briefly unreachable: back to the splash and retry instead of leaving an error page.
   w.webContents.on('did-fail-load', (_e, code, _desc, url) => {
     if (code === -3 || !isInternal(url)) return; // -3 = aborted (e.g. a reload)
-    setTimeout(() => { void ensureDaemon().then(err => { if (!err && !w.isDestroyed()) void w.loadURL(ORIGIN); }); }, 1500);
+    setTimeout(() => void boot(w), 1500);
+  });
+  // The splash's buttons change the URL hash.
+  w.webContents.on('did-navigate-in-page', (_e, url) => {
+    if (!url.startsWith('file:')) return;
+    const hash = new URL(url).hash;
+    if (hash.startsWith('#retry')) void boot(w);
+    if (hash.startsWith('#log')) void shell.openPath(daemonLog());
   });
   w.once('ready-to-show', () => w.show());
   // Closing the window keeps the app (and Plexus) running in the tray.
@@ -121,20 +154,17 @@ function createWindow(): BrowserWindow {
     }
   });
   w.on('closed', () => { if (win === w) win = null; });
-  void w.loadURL(ORIGIN);
+  void boot(w);
   return w;
 }
 
+/** The window opens at once on the splash; the daemon is started behind it. */
 async function showWindow(): Promise<void> {
-  const err = await ensureDaemon();
-  if (err) { dialog.showErrorBox('Plexus', err); return; }
-  if (!win || win.isDestroyed()) win = createWindow();
-  else {
-    if (win.webContents.getURL() === '' || !isInternal(win.webContents.getURL())) void win.loadURL(ORIGIN);
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  }
+  if (!win || win.isDestroyed()) { win = createWindow(); return; }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (!isInternal(win.webContents.getURL())) void boot(win);
 }
 
 function quitApp(): void { quitting = true; app.quit(); }
@@ -147,7 +177,10 @@ function buildTray(): void {
     { label: 'Open Plexus', click: () => void showWindow() },
     { label: 'Open data folder', click: () => void shell.openPath(plexusHome()) },
     { type: 'separator' },
-    { label: 'Restart Plexus', click: async () => { await stopDaemon(); await showWindow(); win?.webContents.reload(); } },
+    { label: 'Restart Plexus', click: async () => {
+      await stopDaemon();
+      if (win && !win.isDestroyed()) { win.show(); void boot(win); } else await showWindow();
+    } },
     { type: 'separator' },
     { label: 'Quit (Plexus keeps running)', click: quitApp },
     { label: 'Stop Plexus and quit', click: async () => { await stopDaemon(); quitApp(); } },

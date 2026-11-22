@@ -2,10 +2,17 @@
 // See docs/02-quota-monitoring-feasibility.md §3.5 for the evidence behind each rule.
 import type { Classification } from './types.ts';
 import type { QuotaSnapshot, QuotaWindow } from '../../shared/types.ts';
+import { appConfig } from '../config.ts';
 
+// Defaults; the values in use come from Settings → Quota.
 export const WARN_UTILIZATION = 0.9;
 export const UNKNOWN_RESET_BACKOFF_MS = 15 * 60 * 1000;
 export const TRANSIENT_BACKOFF_MS = 60 * 1000;
+export const warnUtilization = () => appConfig().warnPercent / 100;
+export const unknownResetBackoffMs = () => appConfig().unknownResetBackoffMin * 60_000;
+export const transientBackoffMs = () => appConfig().transientBackoffSec * 1000;
+/** Is a window at or past the "spent" percent? */
+export const spentPercent = (pct: number | null | undefined) => (pct ?? 0) >= appConfig().exhaustedPercent;
 
 const LIMIT_TEXT = /you'?ve hit your (?:(session|weekly|fast|monthly(?: spend)?|opus|sonnet)\s+)?limit|usage limit reached/i;
 const LOGIN_ERRORS = new Set(['authentication_failed', 'oauth_org_not_allowed', 'verification_required']);
@@ -104,7 +111,7 @@ export function classifyClaudeRun(run: { stdout: string; stderr?: string; exitCo
   }
 
   if (assistantError === 'rate_limit' || (assistantError && TRANSIENT_ERRORS.has(assistantError)) || (/overloaded|529|rate_limit_error/i.test(text) && result?.is_error)) {
-    return { ...base, state: 'transient', reason: assistantError ?? 'api_error', cooldownUntil: new Date(now + TRANSIENT_BACKOFF_MS).toISOString(), evidence };
+    return { ...base, state: 'transient', reason: assistantError ?? 'api_error', cooldownUntil: new Date(now + transientBackoffMs()).toISOString(), evidence };
   }
 
   if (result?.is_error || exitCode !== 0 || assistantError || !result) {
@@ -113,7 +120,7 @@ export function classifyClaudeRun(run: { stdout: string; stderr?: string; exitCo
   }
 
   const maxUtil = Math.max(0, ...Object.values(windows).map(w => w.utilization ?? 0));
-  if (rl?.status === 'allowed_warning' || maxUtil >= WARN_UTILIZATION) {
+  if (rl?.status === 'allowed_warning' || maxUtil >= warnUtilization()) {
     evidence.push(rl?.status === 'allowed_warning' ? 'rate_limit_event status=allowed_warning' : `utilization ${Math.round(maxUtil * 100)}%`);
     return { ...base, state: 'warning', reason: 'near_limit', limitedWindow: rl?.rateLimitType ?? null, evidence };
   }
@@ -126,7 +133,7 @@ function limited(win: string | null, resetsAt: string | null, now: number, evide
   if (!known) evidence.push('reset time unknown → re-probe after backoff');
   return {
     state: 'limited', reason: 'quota_exhausted', limitedWindow: win ?? null, resetsAt: resetsAt ?? null,
-    cooldownUntil: known ? resetsAt : new Date(now + UNKNOWN_RESET_BACKOFF_MS).toISOString(), evidence,
+    cooldownUntil: known ? resetsAt : new Date(now + unknownResetBackoffMs()).toISOString(), evidence,
   };
 }
 

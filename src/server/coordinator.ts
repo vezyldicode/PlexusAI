@@ -1,28 +1,49 @@
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CoordinatorOutputSchema, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
-import { applyClassification, listAccounts, runningByAccount } from './accounts.ts';
+import { AgentResultSchema, CoordinatorOutputSchema, type ChatActivity, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
+import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
+import type { McpServerSpec } from './adapters/types.ts';
+import { parsePlan } from './adapters/plan.ts';
+import { plexusMcp } from './mcp/spec.ts';
+import { addUsage } from './usage.ts';
 import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
 import { now } from './db.ts';
 import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
-import { ensure, paths } from './paths.ts';
-import { appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, updateMessageMeta, updateProject } from './projects.ts';
+import { appRoot, ensure, paths } from './paths.ts';
+import {
+  appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
+} from './projects.ts';
 import { buildCoordinatorPrompt, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
-import { countByStatus, createTask, findTask, listTasks, shortId, updateTask } from './tasks.ts';
+import { runtime } from './runtime.ts';
+import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, updateTask } from './tasks.ts';
 import { orchestrator, pickAccount } from './orchestrator.ts';
+import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit } from './util/git.ts';
+import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
+import { appConfig } from './config.ts';
+import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
 
-export function statusDigest(projectId: string): StatusDigest {
+/**
+ * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
+ * changed: active tasks (short), tasks that finished since, and new events; the rest is already in its conversation.
+ */
+export function statusDigest(projectId: string, since?: string | null): StatusDigest {
   const tasks = listTasks(projectId);
   const active = tasks.filter(t => !['done', 'cancelled'].includes(t.status));
-  const doneRecent = tasks.filter(t => t.status === 'done').slice(-15);
-  const fmt = (t: Task) => `${shortId(t)} [${t.status}] (${t.role}${t.accountId ? ` @${t.accountId}` : ''}) ${t.title}${t.deps.length ? ` deps:${t.deps.map(d => d.split('-').pop()).join(',')}` : ''}${t.error ? ` — ${t.error.slice(0, 150)}` : ''}`;
+  const fmt = (t: Task) => `${shortId(t)} [${t.status}] (${t.role}${t.accountId ? ` @${t.accountId}` : ''}${t.pinnedAccountId ? ` pin:${t.pinnedAccountId}` : ''}) ${t.title}` +
+    `${t.deps.length ? ` deps:${t.deps.map(d => d.split('-').pop()).join(',')}` : ''}${t.paths.length ? ` paths:${t.paths.slice(0, 4).join(',')}` : ''}${t.error ? ` — ${t.error.slice(0, 150)}` : ''}`;
   const accounts = listAccounts().map(a => `${a.id} (${a.provider}) ${a.enabled ? a.state : 'disabled'}${a.cooldownUntil ? ` until ${a.cooldownUntil}` : ''}` +
     `${a.quota?.primary ? ` 5h:${a.quota.primary.usedPercent ?? '?'}%` : ''}${a.quota?.secondary ? ` week:${a.quota.secondary.usedPercent ?? '?'}%` : ''} running:${a.running ?? 0}`).join('\n');
-  const events = recentEvents(projectId, 30).map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
+  const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !since || e.createdAt > since);
+  const events = evs.map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
+  const finished = tasks.filter(t => ['done', 'cancelled'].includes(t.status) && (!since || t.updatedAt > since));
+  const nDone = appConfig().digestDone;
+  const done = since ? finished : nDone ? finished.filter(t => t.status === 'done').slice(-nDone) : [];
+  const doneLine = done.length ? `(${since ? 'finished since' : 'recently done'}) ${done.map(t => `${shortId(t)} [${t.status}] ${t.title}${t.result?.summary ? ` — ${t.result.summary.slice(0, 200)}` : ''}`).join('; ')}` : '';
   return {
-    tasks: [...active.map(fmt), doneRecent.length ? `(recently done) ${doneRecent.map(t => `${shortId(t)} ${t.title}`).join('; ')}` : ''].filter(Boolean).join('\n') || '(no tasks yet)',
+    tasks: [...active.map(fmt), doneLine].filter(Boolean).join('\n') || '(no tasks yet)',
     accounts: accounts || '(no accounts)',
     events: events || '(none)',
     counts: JSON.stringify(countByStatus(projectId)),
@@ -44,8 +65,49 @@ export function parseCoordinatorOutput(text: string): CoordinatorOutput | null {
   return null;
 }
 
+/** The single agent a new chat request can continue: the last solo task, if its conversation is still cheap to resume. */
+function soloLane(projectId: string): Task | null {
+  const last = listTasks(projectId).filter(t => t.kind === 'solo' && t.status === 'done' && t.cliSessionId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  return last && resumeWorthIt(last.cliCtxTokens, last.cliUsedAt) ? last : null;
+}
+
+/**
+ * The coordinator conversation a new single agent can fork (Claude only: Codex cannot copy a thread): the agent then
+ * starts with everything the coordinator read and discussed instead of re-reading the code. Only while that conversation
+ * is still cheap to continue. `turn` is the turn that just ended (its reply is not posted yet when its actions run).
+ */
+function coordinatorFork(projectId: string, sessionId: string | null | undefined, turn?: { ctx: number; at: string }): Partial<Task> | null {
+  if (!sessionId) return null;
+  const p = mustProject(projectId);
+  if (!p.settings.resumeSessions) return null;
+  let s; try { s = mustSession(sessionId); } catch { return null; }
+  if (!s.cliSessionId || !s.cliAccountId) return null;
+  const acct = getAccount(s.cliAccountId);
+  if (!acct || acct.provider !== 'claude') return null;
+  const last = turn ?? (() => {
+    const m = listMessages(projectId, 60, sessionId).filter(x => x.author === 'coordinator' && x.meta?.cli).at(-1);
+    return m ? { ctx: Number((m.meta?.tokens as any)?.lastCtx ?? 0), at: m.createdAt } : null;
+  })();
+  if (!last || !resumeWorthIt(last.ctx, last.at)) return null;
+  return { cliSessionId: s.cliSessionId, cliAccountId: acct.id, cliCtxTokens: last.ctx, cliUsedAt: last.at, cliForkCwd: p.path, lastAccountId: acct.id };
+}
+
+const accountRef = (ref: string) => {
+  if (!ref || ref === 'auto') return null;
+  const a = getAccount(ref) ?? listAccounts().find(x => x.label === ref);
+  if (!a) throw new Error(`unknown account ${ref}`);
+  return a.id;
+};
+
+const RESUME_HELD = 'resume held';
+
+/** Pipeline work a resume would continue: unfinished tasks that are not chat requests. */
+function unfinishedPipeline(projectId: string): Task[] {
+  return listTasks(projectId).filter(t => !t.adhoc && ['pending', 'interrupted', 'blocked', 'in_review'].includes(t.status));
+}
+
 /** Apply coordinator / user actions. Returns human-readable summaries. */
-export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null): string[] {
+export function applyActions(projectId: string, actions: CoordinatorAction[], by = 'coordinator', sessionId?: string | null, turn?: { ctx: number; at: string }): string[] {
   const p = mustProject(projectId);
   const done: string[] = [];
   const task = (ref: string) => { const t = findTask(projectId, ref); if (!t) throw new Error(`unknown task ${ref}`); return t; };
@@ -53,13 +115,61 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
     try {
       switch (a.type) {
         case 'pause': orchestrator.pause(projectId, sessionId); done.push('paused'); break;
-        case 'resume': void orchestrator.resume(projectId, sessionId); done.push('resumed'); break;
+        case 'resume': {
+          // The coordinator never restarts the user's unfinished pipeline on its own: that needs the user's approval.
+          const left = by === 'coordinator' ? unfinishedPipeline(projectId) : [];
+          if (left.length) { done.push(`${RESUME_HELD}: ${left.length} unfinished pipeline task(s) would continue (${left.slice(0, 8).map(shortId).join(', ')}); the user approves it as a proposal`); break; }
+          void orchestrator.resume(projectId, sessionId); done.push('resumed'); break;
+        }
         case 'stop': orchestrator.stop(projectId, sessionId); done.push('stopped'); break;
         case 'add_task': {
-          const deps = a.depends_on.map(d => findTask(projectId, d)?.id).filter((x): x is string => !!x);
-          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps, priority: a.priority ?? 70, originSessionId: sessionId });
-          done.push(`added ${shortId(t)} "${t.title}"`);
-          if (mustProject(projectId).status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
+          const status = mustProject(projectId).status;
+          // The pipeline is paused / stopped / not started: the task is part of this chat request. It runs now (with its
+          // review, fixes and merge) and the rest of the pipeline stays as it is. It can only wait for finished work or
+          // for other tasks of a request: a paused pipeline task would never run.
+          const request = status !== 'running' && status !== 'completed';
+          const refs = a.depends_on.map(d => findTask(projectId, d)).filter((x): x is Task => !!x);
+          const kept = request ? refs.filter(d => d.adhoc || d.status === 'done') : refs;
+          const dropped = refs.filter(d => !kept.includes(d));
+          const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps: kept.map(d => d.id), priority: a.priority ?? 70, originSessionId: sessionId, adhoc: request });
+          done.push(`added ${shortId(t)} "${t.title}"${request ? ` (runs now for this request; the ${status} pipeline is not touched)` : ''}` +
+            (dropped.length ? `; not waiting for ${dropped.map(shortId).join(', ')} (paused pipeline work)` : ''));
+          if (request) void orchestrator.tick();
+          else if (status === 'completed') { void orchestrator.resume(projectId, sessionId); done.push('project resumed'); }
+          break;
+        }
+        case 'solo_task': {
+          // One agent on the coordinator's model, outside the project pipeline. It forks the coordinator's conversation when
+          // it can (it knows what was just investigated and agreed); otherwise it continues the last single agent when that
+          // one is still cheap to resume (it knows the code already), unless asked for a fresh one.
+          const pin = a.account ? accountRef(a.account) : null;
+          const fork = a.fresh ? null : coordinatorFork(projectId, sessionId, turn);
+          const forkOk = fork && (!pin || pin === fork.cliAccountId);
+          const lane = a.fresh || forkOk ? null : soloLane(projectId);
+          const t = createTask(projectId, { title: a.title, description: a.description, role: 'solo', kind: 'solo', priority: 75, originSessionId: sessionId, adhoc: true, laneFrom: lane, pinnedAccountId: pin });
+          if (forkOk) updateTask(t.id, fork!, true);
+          done.push(`${shortId(t)} "${t.title}" started (single agent${forkOk ? ', continuing from this conversation' : t.laneFrom && lane ? `, continuing ${shortId(lane)}'s conversation` : ''})`);
+          void orchestrator.tick();
+          break;
+        }
+        case 'continue_task': {
+          const prev = task(a.task_id);
+          const t = orchestrator.continueTask(prev.id, a.instructions, a.title, sessionId);
+          done.push(t.id === prev.id ? `message queued for ${shortId(prev)} (still active)` : `${shortId(t)} continues ${shortId(prev)}${t.laneFrom ? ' in its conversation' : ''}`);
+          break;
+        }
+        case 'send_message': { const t = task(a.task_id); orchestrator.sendMessage(t.id, a.text); done.push(`message for ${shortId(t)} queued`); break; }
+        case 'assign_account': {
+          const t = task(a.task_id);
+          const id = accountRef(a.account);
+          updateTask(t.id, { pinnedAccountId: id });
+          done.push(id ? `${shortId(t)} pinned to ${id}` : `${shortId(t)} unpinned`);
+          void orchestrator.tick();
+          break;
+        }
+        case 'remove_directive': {
+          const gone = removeDirectives(p, a.match);
+          done.push(gone.length ? `removed ${gone.length} directive(s)` : `no directive matched "${a.match}"`);
           break;
         }
         case 'cancel_task': { const t = task(a.task_id); orchestrator.cancelTask(t.id); done.push(`cancelled ${shortId(t)}`); break; }
@@ -71,7 +181,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
         case 'set_goal': updateProject(projectId, { goal: a.goal }); done.push('goal updated'); break;
         case 'replan': {
           let n = 0;
-          for (const t of listTasks(projectId)) if (['pending', 'interrupted'].includes(t.status) && ['build', 'custom'].includes(t.kind)) { orchestrator.cancelTask(t.id); n++; }
+          for (const t of listTasks(projectId)) if (['pending', 'interrupted', 'blocked'].includes(t.status) && ['build', 'custom'].includes(t.kind)) { orchestrator.cancelTask(t.id); n++; }
           appendMemory(p, 'directives.md', `- Replan requested: ${a.reason} _(${now().slice(0, 16)})_`);
           createTask(projectId, { title: 'Re-plan remaining work', role: 'planner', kind: 'plan', priority: 95, originSessionId: sessionId, description: `Re-plan the remaining work. Reason: ${a.reason}\nInspect what is already built on the main branch and plan only what is missing or must change.` });
           updateProject(projectId, { phase: 'plan' });
@@ -83,6 +193,102 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
   }
   return done;
 }
+
+// ---------------- the coordinator's own edits ----------------
+
+/**
+ * Work the coordinator did itself (a main-checkout edit or a merged workspace) becomes a finished task of kind
+ * `coordinator`, so it shows up with the other tasks: title = message, paths = files changed, linked to its chat session.
+ */
+export function recordCoordinatorWork(projectId: string, how: 'main' | 'workspace', message: string, files: string[], sessionId?: string | null): Task | null {
+  const msg = message.trim() || (how === 'main' ? 'Coordinator edit' : 'Coordinator change');
+  if (!files.length) return null;
+  const where = how === 'main' ? 'Edited in the project folder' : 'Merged from the coordinator worktree';
+  const t = createTask(projectId, {
+    title: msg.split(/\r?\n/)[0].slice(0, 120), description: msg, role: 'coordinator', kind: 'coordinator', adhoc: true,
+    priority: 0, paths: files, originSessionId: sessionId ?? null,
+  });
+  return setStatus(t.id, 'done', { result: AgentResultSchema.parse({ status: 'done', summary: `${where}: ${files.length} file${files.length === 1 ? '' : 's'} changed.` }) });
+}
+
+/** Snapshot of the project folder when the coordinator started editing it, to list the files it changed. */
+const mainSnaps = new Map<string, { snap: string; at: number }>();
+const folderSnapshot = async (p: Project) =>
+  snapshotCommit(p.path, await revParse(p.path, 'HEAD'), 'plexus: folder before coordinator edit (not on any branch)').catch(() => null);
+const changedFiles = async (repo: string, ...range: string[]) =>
+  (await git(repo, 'diff', '--name-only', '--no-renames', ...range)).stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+
+/** Start editing the main checkout: merges wait until plexus_main_commit (or 10 minutes). */
+export async function beginMainEdit(projectId: string): Promise<string> {
+  const p = mustProject(projectId);
+  await orchestrator.holdMain(p.id);
+  // A second begin within the same hold keeps the first snapshot; an old one (the hold timed out) is replaced.
+  const held = mainSnaps.get(p.id);
+  if (!held || Date.now() - held.at > appConfig().mainHoldMin * 60_000) {
+    const snap = await folderSnapshot(p);
+    if (snap) mainSnaps.set(p.id, { snap, at: Date.now() }); else mainSnaps.delete(p.id);
+  }
+  const st = (await git(p.path, 'status', '--short')).stdout.trim();
+  return `Merges are held until plexus_main_commit (10 min at most). You may edit ${p.path} now.` +
+    (autoCommit() ? '' : ' Do not run git commit there: your edits stay uncommitted for the user to review and commit.') +
+    (st ? `
+Already uncommitted there (the user's own work or earlier Plexus changes: leave it alone):
+${st}` : '');
+}
+
+/**
+ * The coordinator finished editing the main checkout: let merges continue. Without auto-commit nothing is committed; the
+ * folder (with the edits) becomes the base later tasks start from. With auto-commit the edits are committed on the branch.
+ */
+export async function commitMainEdit(projectId: string, message: string, sessionId?: string | null): Promise<string> {
+  const p = mustProject(projectId);
+  const before = mainSnaps.get(p.id)?.snap;
+  mainSnaps.delete(p.id);
+  try {
+    const after = before ? await folderSnapshot(p) : null;
+    if (before && after) recordCoordinatorWork(p.id, 'main', message, await changedFiles(p.path, before, after), sessionId);
+    if (!autoCommit()) {
+      const notice = await absorbCheckout(p);
+      return notice || 'Done. Your edits are left uncommitted in the project folder (the user commits them); tasks started from now on see them.';
+    }
+    const ok = await commitAll(p.path, message.trim() || 'chore: coordinator edit');
+    return ok ? `Committed on ${p.mainBranch}: ${(await git(p.path, 'log', '--oneline', '-1')).stdout.trim()}` : 'Nothing to commit.';
+  } finally { orchestrator.releaseMain(p.id); }
+}
+
+const COORD_BRANCH = 'plexus/coordinator';
+const coordWorktree = (p: Project) => join(ensure(join(paths.worktrees, p.id)), 'coordinator');
+
+/** The coordinator's own worktree for larger edits, on its branch, fresh from the base when nothing is pending. */
+export async function coordinatorWorkspace(projectId: string): Promise<string> {
+  const p = mustProject(projectId);
+  await ensureBase(p);
+  const base = baseRef(p);
+  const wt = coordWorktree(p);
+  if (!existsSync(wt)) await addWorktree(p.path, wt, { branch: COORD_BRANCH, newBranchFrom: base });
+  else if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base)) && !(await git(wt, 'status', '--porcelain')).stdout.trim()) {
+    await git(wt, 'reset', '--hard', base);
+  }
+  return `Your worktree: ${wt} (branch ${COORD_BRANCH}, Plexus-internal). Edit and test there, then call plexus_workspace_merge.` +
+    (autoCommit() ? '' : ' The result reaches the project folder as uncommitted changes; the user commits them.');
+}
+
+/** Merge the coordinator's worktree into the base through the merge queue (its branch is internal to Plexus). */
+export async function mergeCoordinatorWorkspace(projectId: string, message: string, sessionId?: string | null): Promise<string> {
+  const p = mustProject(projectId);
+  const wt = coordWorktree(p);
+  if (!existsSync(wt)) return 'No coordinator worktree: call plexus_workspace first.';
+  const base = baseRef(p);
+  await commitAll(wt, message.trim() || 'chore: coordinator change');
+  if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base))) return 'Nothing to merge.';
+  const files = await changedFiles(p.path, `${base}...${COORD_BRANCH}`).catch(() => [] as string[]);
+  const r = await orchestrator.mergeCoordinatorBranch(p, COORD_BRANCH, `merge coordinator: ${message.trim() || 'change'}`);
+  if (r.ok) { await git(wt, 'reset', '--hard', base); recordCoordinatorWork(p.id, 'workspace', message, files, sessionId); }
+  const done = autoCommit() ? `Merged into ${p.mainBranch}.` : 'Merged; the changes are in the project folder, uncommitted (the user commits them).';
+  return r.ok ? done : `Not merged (${r.detail.slice(0, 800)}). Resolve it in your worktree (git merge ${base}) and try again.`;
+}
+
+// ---------------- chat ----------------
 
 /** One answer at a time per chat session: a resumed CLI conversation must not get two turns at once. */
 const chatLocks = new Map<string, Promise<unknown>>();
@@ -101,7 +307,7 @@ export async function handleChat(projectId: string, text: string, sessionId?: st
 /** The account the coordinator would answer the next message on, and with which model/effort setting. */
 export function coordinatorTarget(p: Project) {
   const role = getRole('coordinator');
-  const fake = { role: 'coordinator', kind: 'custom', status: 'pending', authorAccountId: null, lastAccountId: null } as unknown as Task;
+  const fake = { role: 'coordinator', kind: 'custom', status: 'pending', authorAccountId: null, lastAccountId: null, pinnedAccountId: null, cliAccountId: null } as unknown as Task;
   // Chat must stay responsive: the coordinator may share an account with a running worker
   // (a CLI account can run several sessions; they just share its quota).
   const accounts = listAccounts().map(a => ({ ...a, running: 0 }));
@@ -110,8 +316,28 @@ export function coordinatorTarget(p: Project) {
   const pinned = pinnedId ? pickAccount(p, fake, accounts.filter(a => a.id === pinnedId)) : null;
   const account = pinned ?? pickAccount(p, fake, accounts);
   const model = account ? p.settings.coordinatorModels?.[account.provider] || role.models[account.provider] : undefined;
-  const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] : undefined;
+  const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] || ROLE_EFFORT.coordinator : undefined;
   return { role, accounts, pinnedId, pinned, account, model, effort };
+}
+
+/** Tool calls kept with one coordinator reply (the rest are in its log). */
+const MAX_ACTIVITY = 200;
+
+/**
+ * The words of a coordinator message worth showing while it works: its JSON answer (bare or in a ```json block) is
+ * left out, since it becomes the reply and its actions. Empty when the message is only that JSON.
+ */
+export function chatProse(text: string): string {
+  const t = text.replace(/```json\s*\n[\s\S]*?(```|$)/g, '').trim();
+  if (t.startsWith('{') && parseCoordinatorOutput(t)) return '';
+  const brace = t.search(/\n\s*\{\s*"reply"/);
+  return (brace >= 0 ? t.slice(0, brace) : t).trim();
+}
+
+/** The `plexus` MCP server the coordinator's CLI starts (it calls back into this daemon's API). */
+export function coordinatorMcp(projectId: string, sessionId: string): McpServerSpec | undefined {
+  if (!runtime.port || !runtime.token) return undefined;
+  return plexusMcp({ PLEXUS_API: `http://127.0.0.1:${runtime.port}`, PLEXUS_TOKEN: runtime.token, PLEXUS_PROJECT: projectId, PLEXUS_SESSION: sessionId });
 }
 
 async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
@@ -129,42 +355,86 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const eff = await effortForRun(account, model, effort);
   if (eff.warning) say('system', `Coordinator: ${eff.warning}.`);
 
-  // Continue the provider CLI conversation when it belongs to this very account (its history lives in the account's home);
-  // otherwise start one with the chat history of this session in the prompt.
+  // Continue the provider CLI conversation when it belongs to this very account (its history lives in the account's home)
+  // and has not grown too large; otherwise start one with the recent chat history of this session in the prompt.
   const session = mustSession(sessionId);
-  const status = statusDigest(projectId);
-  const fullPrompt = () => buildCoordinatorPrompt(p, role, status, listMessages(projectId, 40, sessionId).filter(m => m.id < userMsgId), text);
-  const deltaPrompt = () => buildCoordinatorTurnPrompt(p, status,
-    messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text);
-  const attempt = (resumeId: string | undefined, tag: string) => adapterFor(account.provider).run({
-    account, cwd: p.path, prompt: resumeId ? deltaPrompt() : fullPrompt(), resumeId, model, effort: eff.effort, readOnly: true,
-    timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: 5 * 60_000,
-    logPath: join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`),
-  });
+  const mcp = coordinatorMcp(projectId, sessionId);
+  const tools = !!mcp;
+  const lastReply = listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);
+  const lastCtx = Number((lastReply?.meta?.tokens as any)?.lastCtx ?? 0);
+  const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text, tools);
+  const deltaPrompt = () => buildCoordinatorTurnPrompt(p, statusDigest(projectId, lastReply?.createdAt ?? null),
+    messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
+  const activity: ChatActivity = { tools: [], plan: null };
+  const attempt = (resumeId: string | undefined, tag: string) => {
+    const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`);
+    const prompt = resumeId ? deltaPrompt() : fullPrompt();
+    // The prompt heads the log (the CLI's stream follows), and the user's message points to it: the chat shows it on demand.
+    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${prompt}\n\n# output\n`);
+    const um = getMessage(userMsgId);
+    if (um) updateMessageMeta(userMsgId, { ...(um.meta ?? {}), promptLog: logPath, promptChars: prompt.length, promptResumed: !!resumeId });
+    // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
+    // Its tool calls and checklist stream to the chat while it works and stay with its reply (its text is the reply).
+    activity.tools = []; activity.plan = null; activity.steps = [];
+    bus.emitEvent('chat.activity', projectId, { sessionId, reset: true }, false);
+    return adapterFor(account.provider).run({
+      account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
+      mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: appConfig().chatIdleTimeoutMin * 60_000, logPath,
+      onEvent: e => {
+        let text: string;
+        if (e.kind === 'plan') { activity.plan = parsePlan(e.text); text = e.text; }
+        else if (e.kind === 'tool' && activity.steps!.length < MAX_ACTIVITY) {
+          text = e.text.slice(0, 300);
+          activity.tools.push(text); activity.steps!.push({ kind: 'tool', text });
+        } else if (e.kind === 'text' && activity.steps!.length < MAX_ACTIVITY && (text = chatProse(e.text).slice(0, 4000))) {
+          activity.steps!.push({ kind: 'text', text });
+        } else return;
+        bus.emitEvent('chat.activity', projectId, { sessionId, kind: e.kind, text }, false);
+      },
+    });
+  };
 
   runningByAccount.set(account.id, (runningByAccount.get(account.id) ?? 0) + 1);
   bus.emitEvent('chat.thinking', projectId, { account: account.id, thinking: true, sessionId }, false);
   try {
-    const resumeId = session.cliSessionId && session.cliAccountId === account.id ? session.cliSessionId : undefined;
+    const sameCli = session.cliSessionId && session.cliAccountId === account.id;
+    const tooBig = lastCtx > appConfig().chatCtxMaxK * 1000;
+    const resumeId = sameCli && !tooBig ? session.cliSessionId! : undefined;
     let out = await attempt(resumeId, resumeId ? '-resume' : '');
     // The CLI no longer knows the conversation (purged, other machine...): start over from this session's history.
     const lostCli = !!resumeId && out.classification.state === 'task_error';
-    if (lostCli) out = await attempt(undefined, '');
+    if (lostCli) { const failed = out.usage; out = await attempt(undefined, ''); out.usage = addUsage(failed, out.usage); }
     applyClassification(account.id, out.classification, out.quota);
     const usable = ['ok', 'warning'].includes(out.classification.state);
     if (usable && out.sessionId) setCliSession(sessionId, { sessionId: out.sessionId, accountId: account.id, syncedMessageId: userMsgId });
     else if (lostCli) setCliSession(sessionId, null);
 
     const parsed = parseCoordinatorOutput(out.finalText);
-    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli };
+    // The words after the last tool call are the answer itself (posted as the reply): the kept steps end at that call.
+    const steps = activity.steps ?? [];
+    const lastTool = steps.map(x => x.kind).lastIndexOf('tool');
+    activity.steps = steps.slice(0, lastTool + 1);
+    if (!activity.steps.length) delete activity.steps;
+    const meta: Record<string, unknown> = { account: account.id, model, effort: eff.effort ?? null, tokens: out.usage, cli: usable && !!out.sessionId, resumed: !!resumeId && !lostCli, tools, ...(tooBig && sameCli ? { freshContext: true } : {}),
+      ...(activity.tools.length || activity.plan ? { activity } : {}) };
     if (!parsed) {
       const why = !usable ? ` (${account.id}: ${out.classification.state})` : '';
       say('coordinator', out.finalText.trim() || `I could not produce an answer${why}. Please try again.`, meta);
       return;
     }
-    const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId);
+    const turn = usable && out.sessionId ? { ctx: out.usage?.lastCtx ?? 0, at: now() } : undefined;
+    const applied = applyActions(projectId, parsed.actions, 'coordinator', sessionId, turn);
     meta.applied = applied;
-    if (parsed.proposal?.actions.length) meta.proposal = { ...parsed.proposal, status: 'pending' };
+    let proposal = parsed.proposal?.actions.length ? parsed.proposal : null;
+    // A held resume becomes a proposal: the user sees which unfinished tasks would continue and decides.
+    const held = applied.find(x => x.startsWith(RESUME_HELD));
+    if (held && !proposal?.actions.some(x => x.type === 'resume')) {
+      const why = `Resume the project: ${held.slice(RESUME_HELD.length + 2).replace(/; the user approves it as a proposal$/, '')}.`;
+      proposal = proposal
+        ? { summary: `${proposal.summary}\n${why}`, actions: [...proposal.actions, { type: 'resume' }] }
+        : { summary: why, actions: [{ type: 'resume' }] };
+    }
+    if (proposal) meta.proposal = { ...proposal, status: 'pending' };
     say('coordinator', parsed.reply, meta);
   } finally {
     runningByAccount.set(account.id, Math.max(0, (runningByAccount.get(account.id) ?? 1) - 1));

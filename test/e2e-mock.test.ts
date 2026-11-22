@@ -1,9 +1,9 @@
-// End-to-end run of all of Plexus with mock agents (no quota spent):
+// End-to-end run of the full team pipeline with mock agents (no quota spent; every optional step switched on):
 // ingest → architect → plan → build (parallel, with review + fix cycle) → merge → QA → evaluate → complete,
 // while one account hits its quota limit mid-run and its task is handed off to another account.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -38,13 +38,13 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
 
     const a1 = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-a' });
     const a2 = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-b' });
-    writeFileSync(join(a1.home, 'mock.json'), JSON.stringify({ limitAfterRuns: 5, delayMs: 30 }));
-    writeFileSync(join(a2.home, 'mock.json'), JSON.stringify({ delayMs: 30, rejectReviewOnce: true }));
+    writeFileSync(join(a1.home, 'mock.json'), JSON.stringify({ limitAfterRuns: 5, delayMs: 30, architectNoPlan: true }));
+    writeFileSync(join(a2.home, 'mock.json'), JSON.stringify({ delayMs: 30, rejectReviewOnce: true, architectNoPlan: true }));
 
     const proj = join(root, 'proj');
     mkdirSync(join(proj, 'docs'), { recursive: true });
     writeFileSync(join(proj, 'docs', 'README.md'), '# Demo\nCreate alpha.txt and beta.txt.\n');
-    const p = await call('POST', '/api/projects', { path: proj, goal: 'Create alpha.txt and beta.txt', settings: { maxParallel: 2, independentReviewWaitMin: 0 } });
+    const p = await call('POST', '/api/projects', { path: proj, goal: 'Create alpha.txt and beta.txt', settings: { maxParallel: 2, independentReviewWaitMin: 0, pipeline: 'team', reviewPolicy: 'always', qaPhase: true } });
     await call('POST', `/api/projects/${p.id}/start`);
 
     const final = await waitFor(async () => {
@@ -66,8 +66,12 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
     for (const k of ['ingest', 'architect', 'plan', 'build', 'review', 'fix', 'qa', 'evaluate']) assert.ok(kinds.includes(k), `has ${k} task`);
     assert.ok(final.tasks.every((t: any) => ['done', 'cancelled'].includes(t.status)), 'all tasks done: ' + JSON.stringify(final.tasks.map((t: any) => [t.seq, t.kind, t.status, t.error])));
 
-    // product merged into main
-    const files = execFileSync('git', ['ls-tree', '--name-only', 'HEAD'], { cwd: proj, encoding: 'utf8' });
+    // the product is in the folder, uncommitted: Plexus made no commit on any branch of the user's
+    const files = readdirSync(proj).sort().join('\n');
+    const userBranches = execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/heads'], { cwd: proj, encoding: 'utf8' })
+      .split('\n').filter(r => r && !r.startsWith('refs/heads/plexus/'));
+    assert.deepEqual(userBranches, [], 'no commit on the user\'s branches');
+    assert.match(execFileSync('git', ['status', '--porcelain'], { cwd: proj, encoding: 'utf8' }), /\?\? alpha\.txt/);
     assert.match(files, /alpha\.txt/);
     assert.match(files, /beta\.txt/);
     assert.match(files, /ARCHITECTURE\.md/);
@@ -91,6 +95,14 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
       if (runs.length && runs.at(-1).accountId !== t.authorAccountId) independent++;
     }
     assert.ok(independent >= 1, 'at least one review ran on an account other than the author');
+
+    // token usage: every successful run reports the mock's 10 + 5 tokens, summed per task and per project
+    const done = final.tasks.filter((t: any) => t.status === 'done');
+    for (const t of done) assert.ok(final.usage.tasks[t.id]?.total >= 15, `T${t.seq} has its tokens`);
+    const taskSum = Object.values<any>(final.usage.tasks).reduce((a, u) => a + u.total, 0);
+    assert.equal(final.usage.total.total, taskSum + (final.usage.coordinator?.total ?? 0));
+    const roleSum = Object.values<any>(final.usage.byRole).reduce((a, u) => a + u.total, 0);
+    assert.equal(roleSum, taskSum);
 
     // chat → coordinator applies an action
     await call('POST', `/api/projects/${p.id}/messages`, { text: 'add task: gamma' });

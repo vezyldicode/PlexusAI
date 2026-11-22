@@ -3,7 +3,10 @@ import { Pause, Play, Square } from 'lucide-react';
 import { api, clock, timeAgo } from './api.ts';
 import type { LogLine, ProjectDetail, Plexus } from './store.ts';
 import type { Project, Role, Task } from './types.ts';
-import { Dot, Ic, label } from './ui.tsx';
+import { Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens, usageTitle } from './ui.tsx';
+import { originOf } from './network/layout.ts';
+import { dropAction } from './board.ts';
+import { Markdown } from './markdown.tsx';
 
 export type View = 'network' | 'tasks' | 'activity' | 'memory' | 'report' | 'status';
 export const VIEWS: View[] = ['network', 'tasks', 'activity', 'memory', 'report', 'status'];
@@ -15,7 +18,7 @@ export function ProjectHeader({ s, detail, view, onView, trailing }: { s: Plexus
   const act = (a: string) => api('POST', `/api/projects/${p.id}/${a}`, { sessionId: s.sessionId }).then(() => { s.loadDetail(); s.loadProjects(); }).catch(e => s.setError(e.message));
   const running = detail.tasks.filter(t => t.status === 'running').length;
   const acc = detail.acceptance;
-  const passed = acc.filter(a => a.pass).length;
+  const passed = acc.filter(a => a.pass === true).length;
   return (
     <header className="phead">
       <div className="phead-row">
@@ -53,6 +56,7 @@ export function ProjectHeader({ s, detail, view, onView, trailing }: { s: Plexus
 // ---------------------------------------------------------------- tasks
 
 const COLUMNS: { title: string; statuses: Task['status'][] }[] = [
+  { title: 'Waiting for you', statuses: ['blocked'] },
   { title: 'Queued', statuses: ['pending', 'interrupted'] },
   { title: 'Running', statuses: ['running'] },
   { title: 'In review', statuses: ['in_review'] },
@@ -60,27 +64,53 @@ const COLUMNS: { title: string; statuses: Task['status'][] }[] = [
   { title: 'Failed or cancelled', statuses: ['failed', 'cancelled'] },
 ];
 
-export function TasksView({ detail, active, onOpen }: { detail: ProjectDetail; active: string; onOpen: (id: string) => void }) {
+export function TasksView({ detail, active, onOpen, onError, reload }: {
+  detail: ProjectDetail; active: string; onOpen: (id: string) => void; onError: (e: string) => void; reload: () => void;
+}) {
   const bySeq = useMemo(() => new Map(detail.tasks.map(t => [t.id, t.seq])), [detail.tasks]);
+  // The card being dragged, and the column under the pointer.
+  const [drag, setDrag] = useState<Task | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const drop = (t: Task, column: string) => {
+    const action = dropAction(t.status, column);
+    if (!action) return;
+    if (action === 'cancel' && t.status === 'running' && !confirm(`T${t.seq} is running. Stop and cancel it?`)) return;
+    api('POST', `/api/tasks/${t.id}/${action}`).then(reload).catch(e => onError(e.message));
+  };
   return (
-    <div className="board">
+    <div className={`board ${drag ? 'dragging' : ''}`}>
       {COLUMNS.map(c => {
         const list = detail.tasks.filter(t => c.statuses.includes(t.status)).sort((a, b) => (c.title === 'Done' ? b.seq - a.seq : b.priority - a.priority || a.seq - b.seq));
+        const accepts = !!drag && !!dropAction(drag.status, c.title);
         return (
-          <section key={c.title} className="col">
-            <div className="col-title">{c.title}<span className="num">{list.length}</span></div>
-            {list.map(t => (
-              <button key={t.id} className={`card s-${t.status} ${active === t.id ? 'sel' : ''}`} onClick={() => onOpen(t.id)}>
-                <div className="card-top"><Dot state={t.status} /><span className="num">T{t.seq}</span><span className="card-role">{t.role}</span></div>
-                <div className="card-title">{t.title}</div>
-                <div className="card-meta">
-                  {t.accountId ? t.accountId : t.lastAccountId ? `last ${t.lastAccountId}` : ''}
-                  {t.attempts > 0 ? ` · attempt ${t.attempts}` : ''}
-                  {t.deps.length ? ` · after ${t.deps.map(d => 'T' + bySeq.get(d)).join(', ')}` : ''}
-                </div>
-                {t.error && t.status !== 'done' && <div className="card-err">{t.error.slice(0, 140)}</div>}
-              </button>
-            ))}
+          <section key={c.title} className={`col ${drag ? (accepts ? 'drop-ok' : 'drop-no') : ''} ${accepts && over === c.title ? 'drop-over' : ''}`}
+            onDragOver={e => { if (!accepts) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOver(c.title); }}
+            onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(o => (o === c.title ? null : o)); }}
+            onDrop={e => { e.preventDefault(); const t = drag; setDrag(null); setOver(null); if (t) drop(t, c.title); }}>
+            <div className="col-title"><Dot state={c.statuses[0]} /><span className="col-name" title={c.title}>{c.title}</span><span className="num">{list.length}</span></div>
+            <div className="col-list">
+              {!list.length && <div className="col-empty">{accepts ? 'Drop here' : 'No tasks'}</div>}
+              {list.map(t => (
+                <button key={t.id} className={`card s-${t.status} ${active === t.id ? 'sel' : ''} ${drag?.id === t.id ? 'lifted' : ''}`} onClick={() => onOpen(t.id)}
+                  draggable={originOf(t) !== 'coordinator'}
+                  onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', t.id); setDrag(t); }}
+                  onDragEnd={() => { setDrag(null); setOver(null); }}>
+                  <div className="card-top">
+                    <Dot state={t.status} /><span className="num">T{t.seq}</span>
+                    {originOf(t) === 'chat' && <span className="tag" title="Asked for in the coordinator chat">chat</span>}
+                    <span className="card-role">{originOf(t) === 'coordinator' ? 'coordinator edit' : t.role}</span><Tokens u={detail.usage.tasks[t.id]} className="card-tok" />
+                  </div>
+                  <div className="card-title">{t.title}</div>
+                  <div className="card-meta">
+                    {(originOf(t) === 'coordinator'
+                      ? [`${t.paths.length} file${t.paths.length === 1 ? '' : 's'}`, timeAgo(t.updatedAt)]
+                      : [t.accountId ?? (t.lastAccountId ? `last ${t.lastAccountId}` : ''), t.attempts > 0 ? `attempt ${t.attempts}` : '', t.deps.length ? `after ${t.deps.map(d => 'T' + bySeq.get(d)).join(', ')}` : '']
+                    ).filter(Boolean).join(' · ')}
+                  </div>
+                  {t.error && t.status !== 'done' && <div className="card-err">{t.error.slice(0, 140)}</div>}
+                </button>
+              ))}
+            </div>
           </section>
         );
       })}
@@ -153,7 +183,7 @@ export function ActivityView({ logs, activity, detail, onOpen }: { logs: LogLine
 
 // ---------------------------------------------------------------- memory
 
-const MEMORY_FILES = ['goal.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'];
+const MEMORY_FILES = ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'planning-notes.md'];
 
 export function MemoryView({ project, onError }: { project: Project; onError: (e: string) => void }) {
   const [files, setFiles] = useState<Record<string, string>>({});
@@ -187,7 +217,7 @@ export function MemoryView({ project, onError }: { project: Project; onError: (e
 export function ReportView({ project }: { project: Project }) {
   const [r, setR] = useState('');
   useEffect(() => { api('GET', `/api/projects/${project.id}/report`).then(d => setR(d.report)); }, [project.id, project.status]);
-  return <div className="report">{r ? <pre className="pre prose">{r}</pre> : <div className="stream-empty">The final report appears here when Plexus finishes</div>}</div>;
+  return <div className="report">{r ? <Markdown className="prose" text={r} /> : <div className="stream-empty">The final report appears here when Plexus finishes</div>}</div>;
 }
 
 // ---------------------------------------------------------------- status
@@ -225,21 +255,57 @@ function RoleLoad({ detail }: { detail: ProjectDetail }) {
   );
 }
 
-export function StatusView({ detail }: { detail: ProjectDetail }) {
+/** Where the project's tokens went: the split by kind, then by role, then the tasks that used the most. */
+function TokenPanel({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: string) => void }) {
+  const u = detail.usage;
+  const roles = Object.entries(u.byRole).sort((a, b) => b[1].total - a[1].total);
+  if (u.coordinator) roles.push(['coordinator chat', u.coordinator]);
+  const max = Math.max(1, ...roles.map(([, r]) => r.total));
+  const top = detail.tasks.filter(t => u.tasks[t.id]).sort((a, b) => u.tasks[b.id].total - u.tasks[a.id].total).slice(0, 5);
+  return (
+    <section className="panel">
+      <div className="panel-head"><span>Tokens</span><span className="num muted">{fmtTokens(u.total!.total)} in all</span></div>
+      <UsageBreakdown u={u.total!} />
+      <div className="tok-group">By role</div>
+      {roles.map(([name, r]) => (
+        <div key={name} className="tok-row" title={usageTitle(r)}>
+          <span className="tok-name">{name}</span>
+          <span className="tok-track"><span className="tok-fill" style={{ transform: `scaleX(${r.total / max})` }} /></span>
+          <span className="tok-fig num">{fmtTokens(r.total)}</span>
+        </div>
+      ))}
+      <div className="tok-group">Most tokens</div>
+      {top.map(t => (
+        <button key={t.id} className="tok-task" onClick={() => onOpen(t.id)} title={usageTitle(u.tasks[t.id])}>
+          <Dot state={t.status} /><span className="num muted">T{t.seq}</span><span className="tok-task-title">{t.title}</span><span className="tok-fig num">{fmtTokens(u.tasks[t.id].total)}</span>
+        </button>
+      ))}
+    </section>
+  );
+}
+
+export function StatusView({ detail, onOpen }: { detail: ProjectDetail; onOpen: (id: string) => void }) {
   const acc = detail.acceptance;
-  const passed = acc.filter(a => a.pass).length;
+  const passed = acc.filter(a => a.pass === true).length;
   const failed = acc.filter(a => a.pass === false).length;
   const c = detail.counts;
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const order = ['running', 'pending', 'interrupted', 'in_review', 'done', 'failed', 'cancelled'];
+  const order = ['running', 'blocked', 'pending', 'interrupted', 'in_review', 'done', 'failed', 'cancelled'];
+  const u = detail.usage;
   return (
     <div className="status">
       <section className="stat-row">
         <div className="stat"><div className="stat-label">Acceptance criteria</div><div className="stat-fig num">{passed}<span>/{acc.length}</span></div><div className="stat-sub">{failed ? `${failed} failing` : acc.length ? 'none failing' : 'set after analysis'}</div></div>
         <div className="stat"><div className="stat-label">Tasks</div><div className="stat-fig num">{total}</div><div className="stat-sub num">{c.done ?? 0} done · {c.running ?? 0} running</div></div>
         <div className="stat"><div className="stat-label">Evaluation rounds</div><div className="stat-fig num">{detail.project.evalRounds}<span>/{detail.project.settings.maxEvalRounds}</span></div><div className="stat-sub">phase {detail.project.phase}</div></div>
+        <div className="stat" title={u.total ? usageTitle(u.total) : undefined}>
+          <div className="stat-label">Tokens</div>
+          <div className="stat-fig num">{u.total ? fmtTokens(u.total.total) : '–'}</div>
+          <div className="stat-sub num">{u.total ? `${fmtTokens(u.total.output)} output${u.coordinator ? ` · coordinator ${fmtTokens(u.coordinator.total)}` : ''}` : 'counted as agents finish'}</div>
+        </div>
       </section>
       <RoleLoad detail={detail} />
+      {u.total && <TokenPanel detail={detail} onOpen={onOpen} />}
       <section className="panel">
         <div className="panel-head"><span>Tasks by status</span></div>
         <div className="share">
@@ -251,7 +317,7 @@ export function StatusView({ detail }: { detail: ProjectDetail }) {
         <div className="panel-head"><span>Acceptance criteria</span><span className="num muted">{passed}/{acc.length}</span></div>
         {acc.map(a => (
           <div key={a.id} className="crit" title={a.evidence ?? ''}>
-            <Dot state={a.pass ? 'done' : a.pass === false ? 'failed' : 'pending'} />
+            <Dot state={a.pass === true ? 'done' : a.pass === false ? 'failed' : a.pass === 'blocked' ? 'blocked' : 'pending'} />
             <span className="crit-id mono">{a.id}</span><span>{a.criterion}</span>
           </div>
         ))}

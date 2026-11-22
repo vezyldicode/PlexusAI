@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from 'react';
-import { Copy, FolderOpen, LogIn, PanelLeftClose, Pencil, Plus, Power, RefreshCw, Settings, Trash2 } from 'lucide-react';
+import { Copy, FolderOpen, LogIn, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Power, RefreshCw, Settings, Trash2 } from 'lucide-react';
 import { api, timeAgo } from '../api.ts';
 import type { Account, Project } from '../types.ts';
 import { ContextMenu, Dot, Ic, Meter, type MenuItem } from '../ui.tsx';
+import { Mark } from '../onboarding.tsx';
 
 interface Props {
   projects: Project[];
@@ -13,6 +14,12 @@ interface Props {
   collapsed: boolean;
   /** Full sidebar drawn over the content (narrow windows). */
   overlay: boolean;
+  /** This instance is the hover overlay that slides in over the icon rail. */
+  hovered?: boolean;
+  /** Hover overlay is slid in. */
+  shown?: boolean;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
   onCollapse: () => void;
   onExpand: () => void;
   onProject: (id: string) => void;
@@ -25,9 +32,6 @@ interface Props {
   resizer?: ReactNode;
 }
 
-const Mark = () => (
-  <svg className="mark" viewBox="0 0 16 16" aria-hidden><circle cx="8" cy="8" r="2" /><circle cx="2.5" cy="3.5" r="1.25" /><circle cx="13.5" cy="4" r="1.25" /><circle cx="12" cy="13" r="1.25" /><path d="M3.5 4.3 6.4 7M12.4 4.7 9.6 7M11.2 12.1 9.4 9.4" /></svg>
-);
 
 /** Right-click menu on a project: rename in place, open its folder, copy the path, remove it from Plexus. */
 function useProjectMenu(reload: () => void, onError: (e: string) => void, beforeRename: () => void) {
@@ -81,8 +85,8 @@ export function Sidebar(p: Props) {
   const conn = <span className={`conn ${p.connected ? 'ok' : 'bad'}`} title={p.connected ? 'Connected to the daemon' : 'Daemon not reachable'} />;
 
   if (p.collapsed) return (
-    <aside className="sidebar rail" aria-label="Navigation">
-      <button className="rail-brand" title="Expand sidebar" aria-label="Expand sidebar" onClick={p.onExpand}><Mark /></button>
+    <aside className="sidebar rail" aria-label="Navigation" onMouseEnter={p.onMouseEnter} onMouseLeave={p.onMouseLeave}>
+      <button className="rail-brand" title="Expand sidebar" aria-label="Expand sidebar" onClick={p.onExpand}><Mark size={18} /></button>
       <div className="rail-list">
         {p.projects.map(pr => (
           <button key={pr.id} className={`rail-btn ${p.selected === pr.id ? 'active' : ''} ${pm.menuFor === pr.id ? 'menu-open' : ''}`} title={`${pr.name}\n${pr.path}`} aria-label={pr.name}
@@ -102,13 +106,15 @@ export function Sidebar(p: Props) {
   );
 
   return (
-    <aside className={`sidebar ${p.overlay ? 'overlay' : ''}`} aria-label="Navigation">
+    <aside className={`sidebar ${p.overlay ? 'overlay' : ''} ${p.hovered ? 'hover-overlay' : ''} ${p.hovered && p.shown ? 'shown' : ''}`} aria-label="Navigation"
+      aria-hidden={p.hovered && !p.shown ? true : undefined} onMouseEnter={p.hovered ? p.onMouseEnter : undefined} onMouseLeave={p.hovered ? p.onMouseLeave : undefined}>
       <div className="brand">
-        <button className={`brand-btn ${refresh.busy ? 'busy' : ''}`} title="Refresh status and quota of all accounts" aria-busy={refresh.busy} onClick={refreshAll}><Mark /><span>Plexus</span></button>
+        <button className={`brand-btn ${refresh.busy ? 'busy' : ''}`} title="Refresh status and quota of all accounts" aria-busy={refresh.busy} onClick={refreshAll}><Mark size={18} loading={refresh.busy} /><span>Plexus</span></button>
         {refresh.note && <span className="brand-note" role="status">{refresh.note}</span>}
         {conn}
         <span className="spacer" />
-        <button className="icon-btn" title="Collapse sidebar" aria-label="Collapse sidebar" onClick={p.onCollapse}><Ic i={PanelLeftClose} /></button>
+        <button className="icon-btn" title={p.hovered ? 'Keep sidebar open' : 'Collapse sidebar'} aria-label={p.hovered ? 'Keep sidebar open' : 'Collapse sidebar'}
+          onClick={p.hovered ? p.onExpand : p.onCollapse}><Ic i={p.hovered ? PanelLeftOpen : PanelLeftClose} /></button>
       </div>
 
       <div className="side-group projects">

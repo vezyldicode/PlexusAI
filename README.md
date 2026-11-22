@@ -74,8 +74,10 @@ Bản cài không cần Node.js (app có Node riêng). Vẫn cần git, Claude C
 1. **Accounts → Add account.** Chọn Claude hoặc Codex. Mỗi account có thư mục đăng nhập riêng, nên thêm được nhiều account cùng loại.
 2. Bấm **Log in**. Một cửa sổ terminal mở ra; bạn đăng nhập trên trình duyệt một lần là xong.
 3. **＋ New project.** Chọn thư mục chứa documentation (ví dụ `docs/`, `README`, `GOAL.md`), ghi mục tiêu, bấm **Create**.
+   - Plexus kiểm tra tài liệu trước. Nếu không có goal và docs, hoặc docs chưa nói rõ cần xây gì, Plexus dừng lại hỏi bạn trong Chat thay vì tự đoán.
+   - **How to build**: `Auto` (mặc định) để analyst chọn. Project vừa và nhỏ do **một agent** làm từ đầu tới cuối; chỉ việc lớn, tách được thành nhiều phần độc lập mới chạy theo team song song.
 4. Theo dõi tiến độ ở các tab:
-   - **Chat**: hỏi tiến độ hoặc đưa chỉ đạo mới cho Plexus.
+   - **Chat**: hỏi tiến độ hoặc đưa chỉ đạo mới cho Plexus. Yêu cầu xây/sửa gì đó trong Chat được Coordinator tự làm như một agent (model của Coordinator), kể cả khi project chưa Start.
    - **Tasks**: bảng công việc.
    - **Activity**: output trực tiếp của các agent.
    - **Memory**: bộ nhớ chung mà mọi agent đọc.
@@ -109,11 +111,13 @@ Các lệnh chính:
 npm test
 ```
 
-Có 27 test, gồm:
+Có 66 test, gồm:
 - Bộ phân loại trạng thái quota của Claude và Codex.
 - Chọn account.
 - Một project chạy trọn vòng đời bằng agent giả lập (provider `mock`, không tốn quota), có bàn giao khi hết quota và review → sửa → merge.
 - Dừng giữa chừng, khởi động lại daemon rồi chạy tiếp.
+- Pipeline thích ứng: hỏi trước khi thiếu docs, một agent cho project nhỏ và cho yêu cầu từ Chat, fix sau review tiếp tục phiên của người viết.
+- Tiết kiệm token: task `blocked` chờ thay vì retry, vòng gap tiếp tục phiên cũ và dừng hỏi khi không tiến triển, ghim account có fallback, Coordinator dùng tool `plexus` (MCP). Xem [docs/06-efficiency-and-coordinator-research.md](docs/06-efficiency-and-coordinator-research.md).
 
 ```bash
 npm run typecheck

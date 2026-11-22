@@ -1,7 +1,7 @@
 // Models and efforts offered by the accounts' CLIs (GET /api/models), shared by every model picker.
 import { useEffect, useState } from 'react';
 import { api } from './api.ts';
-import type { ModelCatalog, ModelCatalogEntry, Provider } from './types.ts';
+import type { ModelCatalog, ModelCatalogEntry, Provider, TaskModelInfo } from './types.ts';
 
 /** Used until the daemon answers, or when no account could list its models. */
 export const FALLBACK: Record<Provider, string[]> = { claude: ['opus', 'sonnet', 'haiku'], codex: [], mock: [] };
@@ -72,4 +72,14 @@ export function EffortSelect({ catalog, provider, model, value, onChange, fallba
       {value && !efforts.includes(value) && <option value={value}>{value} (unsupported)</option>}
     </select>
   );
+}
+
+/**
+ * The model to name for a task: while it runs, the one its run started with; otherwise the next run's choice. A CLI
+ * default is named by the model the last run reported, when there is one.
+ */
+export function shownModel(info: TaskModelInfo | undefined): { model: string | undefined; effort: string | undefined } {
+  if (!info) return { model: undefined, effort: undefined };
+  if (info.ran?.running) return { model: info.ran.model ?? info.ran.reported ?? undefined, effort: info.ran.effort ?? undefined };
+  return { model: info.model ?? info.ran?.reported ?? undefined, effort: info.effort ?? info.ran?.effort ?? undefined };
 }

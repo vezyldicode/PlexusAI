@@ -4,8 +4,8 @@
 import type { Account, ModelCatalog, ModelCatalogEntry, ModelInfo, Provider } from '../shared/types.ts';
 import { adapterFor } from './adapters/index.ts';
 import { getSetting, setSetting } from './db.ts';
+import { appConfig } from './config.ts';
 
-const TTL_MS = 12 * 3600_000;
 const EFFORT_RE = /^[a-z][a-z0-9_-]{0,19}$/;
 
 interface Cached { at: number; models: ModelInfo[] }
@@ -36,7 +36,7 @@ export function forgetModels(accountId: string): void {
 /** Models of one account; refreshed from the CLI when older than 12 h (or on `refresh`). Stale data beats none on error. */
 export async function modelsFor(a: Account, refresh = false): Promise<ModelInfo[]> {
   const hit = cached(a);
-  if (hit && !refresh && Date.now() - hit.at < TTL_MS) return hit.models;
+  if (hit && !refresh && Date.now() - hit.at < appConfig().modelCacheHours * 3600_000) return hit.models;
   let p = inflight.get(a.id);
   if (!p) {
     p = adapterFor(a.provider).listModels(a).then(m => { rememberModels(a.id, m); return m; }).finally(() => inflight.delete(a.id));
