@@ -380,6 +380,13 @@ body.resizing .net { pointer-events: none; }
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .stream { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 .stream-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+/* Something new arrived below what the reader is looking at: one tap brings the end of the stream into view. */
+.stream-jump {
+  position: sticky; bottom: 0; align-self: center; flex: none; margin-top: -8px;
+  display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 12px; border-radius: 14px;
+  font-size: 12px; color: var(--text); background: var(--raised); border: 1px solid var(--line-strong);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
 
 .msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
 .msg-head { display: flex; gap: 8px; align-items: baseline; }

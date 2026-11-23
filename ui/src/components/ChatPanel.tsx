@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api, clock, timeAgo } from '../api.ts';
 import type { LiveActivity, ProjectDetail, Plexus } from '../store.ts';
@@ -173,13 +173,56 @@ function Conversations({ project, s, tabs, byId, active, viewing, onActivate, on
 
 // ---------------------------------------------------------------- coordinator
 
-function useFollow(dep: unknown) {
+/**
+ * Keeps a stream scrolled to its end while the reader is there. `dep` changes when something new arrives; `scope`
+ * names the conversation (a new one starts at its end). Sizes also change without anything new arriving: a long reply
+ * lays out its code blocks, a font loads, the plan dock or the prompt toggle appears. Following only on `dep` left the
+ * view parked at the top of a long reply, its heading at the bottom edge and the rest below it, until a reload
+ * scrolled it to the end. A ResizeObserver on the box and on every item keeps the end in view through all of these.
+ * `below` is set when something new arrives while the reader is scrolled up, so the stream can say so.
+ */
+function useFollow(dep: unknown, scope: unknown) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  useEffect(() => { const el = ref.current; if (el && stick.current) el.scrollTop = el.scrollHeight; }, [dep]);
-  const onScroll = () => { const el = ref.current; if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; };
-  return { ref, onScroll };
+  const [below, setBelow] = useState(false);
+  const toEnd = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    stick.current = true;
+    setBelow(false);
+    el.scrollTop = el.scrollHeight;
+  }, []);
+  // A new conversation opens at its end.
+  useLayoutEffect(() => { stick.current = true; setBelow(false); }, [scope]);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (stick.current) el.scrollTop = el.scrollHeight;
+    else if (el.scrollHeight - el.scrollTop - el.clientHeight > 48) setBelow(true);
+  }, [dep, scope]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const pin = () => { if (stick.current) el.scrollTop = el.scrollHeight; };
+    const ro = new ResizeObserver(pin);
+    const watch = () => { ro.disconnect(); ro.observe(el); for (const c of el.children) ro.observe(c); };
+    const mo = new MutationObserver(watch);
+    watch();
+    mo.observe(el, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    if (stick.current) setBelow(false);
+  };
+  return { ref, onScroll, below, toEnd };
 }
+
+/** Shown at the bottom of a stream when something new arrived below the part the reader is looking at. */
+const JumpToEnd = ({ follow }: { follow: ReturnType<typeof useFollow> }) =>
+  follow.below ? <button className="stream-jump" onClick={follow.toEnd}><Ic i={ChevronDown} size={14} />New messages below</button> : null;
 
 const AUTHOR: Record<ChatMessage['author'], string> = { user: 'You', coordinator: 'Coordinator', agent: 'Agent', system: 'Plexus' };
 
@@ -310,7 +353,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
   const [picking, setPicking] = useState(false);
   const closePicker = useCallback(() => setPicking(false), []);
   const opts = useCoordinatorOptions(project, accounts, onError, reload, messages.length);
-  const follow = useFollow(`${sessionId}:${messages.length}:${thinking}:${live?.steps.length}`);
+  const follow = useFollow(`${messages.length}:${thinking}:${live?.steps.length}`, sessionId);
   // The checklist of the turn in progress, else of the last answer to your last message.
   const lastUser = messages.findLastIndex(m => m.author === 'user');
   const answered = messages.slice(lastUser + 1).find(m => m.author === 'coordinator')?.meta?.activity as ChatActivity | undefined;
@@ -319,6 +362,8 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
     const t = text.trim();
     if (!t) return;
     setText('');
+    // Sending is reading along: the answer should come into view as it arrives.
+    follow.toEnd();
     await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId }).catch(e => onError(e.message));
   };
   const decide = (id: number, approve: boolean) => api('POST', `/api/messages/${id}/proposal`, { approve }).catch(e => onError(e.message));
@@ -368,8 +413,9 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
             <div className="typing live"><span /><span /><span /></div>
           </div>
         )}
+        <JumpToEnd follow={follow} />
       </div>
-      {plan && <div className="agent-dock"><PlanCard items={plan} live={!!thinking} /></div>}
+      {plan &&<div className="agent-dock"><PlanCard items={plan} live={!!thinking} /></div>}
       <div className="composer">
         {picking && <CoordinatorPicker o={opts} accounts={accounts} onClose={closePicker} />}
         <textarea value={text} rows={3} placeholder="Message the coordinator" onChange={e => setText(e.target.value)}
@@ -540,7 +586,7 @@ function AgentChat({ task, origin, info, accounts, logTick, onError, reload }: {
     return () => clearTimeout(h);
   }, [task.id, isRunning ? logTick : 0, task.status, task.attempts]);
 
-  const follow = useFollow(`${task.id}:${runs?.length}:${runs?.at(-1)?.turns.reduce((n, x) => n + x.events.length, 0)}`);
+  const follow = useFollow(`${runs?.length}:${runs?.at(-1)?.turns.reduce((n, x) => n + x.events.length, 0)}`, task.id);
   const act = (a: string) => api('POST', `/api/tasks/${task.id}/${a}`).then(reload).catch(e => onError(e.message));
   // Finished: more work for this same agent (its conversation and worktree). Otherwise: a message for its next run.
   const finished = ['done', 'failed', 'cancelled'].includes(task.status);
@@ -548,6 +594,7 @@ function AgentChat({ task, origin, info, accounts, logTick, onError, reload }: {
     const t = text.trim();
     if (!t) return;
     setText('');
+    follow.toEnd();
     const req = finished ? api('POST', `/api/tasks/${task.id}/continue`, { instructions: t }) : api('POST', `/api/tasks/${task.id}/message`, { text: t });
     req.then(reload).catch(e => { setText(t); onError(e.message); });
   };
@@ -631,6 +678,7 @@ function AgentChat({ task, origin, info, accounts, logTick, onError, reload }: {
           </div>
         ))}
         {isRunning && <div className="typing live" aria-label="Working"><span /><span /><span /></div>}
+        <JumpToEnd follow={follow} />
       </div>
 
       {(report || plan) && (
