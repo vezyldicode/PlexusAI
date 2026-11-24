@@ -1,5 +1,6 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
+import { gitIdentityEnv } from '../util/git.ts';
 import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.ts';
 import { invocationUsage } from '../usage.ts';
 import { codexMcpOverrides, withSystem } from './mcp-config.ts';
@@ -116,7 +117,7 @@ export const codexAdapter: ProviderAdapter = {
     const timer = createRunTimer('codex', since);
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
-      env: { ...process.env, ...this.accountEnv(spec.account) },
+      env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },
     });

@@ -232,20 +232,15 @@ plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) · plexus_ac
 plexus_main_begin / plexus_main_commit(message: what you changed) · plexus_workspace / plexus_workspace_merge(message).
 For a request of several steps, keep a checklist with plexus_plan(items) (the user watches it): the whole list each time
 a step starts or finishes.
-- Look before you answer: read logs, results, files and git history yourself instead of guessing or asking the user to paste them.
-- Small change (one or two files, no long test run): do it yourself. Call plexus_main_begin first (it holds merges back so you
-  never edit the main checkout while a task merges), edit, then plexus_main_commit. Larger change: plexus_workspace gives you
-  your own worktree; work there and finish with plexus_workspace_merge. Never edit files that a running task lists in its paths.
-- Bigger work: one agent with solo_task; to give more work to an agent that already has the context, continue_task (same
-  conversation and worktree, no re-reading). Talk to an agent with send_message. A solo_task on your own Claude account
-  continues a copy of this conversation, so what you read here is not read again: look at the relevant code before you
-  hand the work over, and keep the description short.`
+- Editing yourself: plexus_main_begin first (it holds merges back so you never edit the main checkout while a task merges),
+  then plexus_main_commit; plexus_workspace / plexus_workspace_merge for your own worktree. Never edit files that a running
+  task lists in its paths.
+- A solo_task on your own Claude account continues a copy of this conversation, so what you read here is not read again:
+  look at the relevant code before you hand the work over, and keep the description short.`
     : `The plexus tools are not available in this run: act through the JSON actions below. You may still read files and logs.`;
   return `# HOW YOU WORK
 ${where}
-${how}
-- Which account runs a task is Plexus's job: use assign_account. Never put account or provider names in directives or task
-  descriptions (agents would read them as limits on their work). Remove a wrong directive with remove_directive.`;
+${how}`;
 }
 
 /**
@@ -308,9 +303,6 @@ Action types:
 {"type":"record_decision","title":"...","decision":"...","rationale":"..."}
 {"type":"add_directive","text":"instruction all agents must follow from now on"} {"type":"remove_directive","match":"text in it"}
 {"type":"set_goal","goal":"..."} {"type":"replan","reason":"..."}
-Use "actions" only for what the user clearly asked; put large or destructive changes in "proposal".
-Prefer doing small things yourself, then continue_task, then one solo_task, over several add_task: every new agent re-reads the context.
 Project paused, stopped or idle: do what the user asks with the actions above; they run without the pipeline. Never
 resume (and never tell the user to resume) just to get a request done: resume continues every unfinished pipeline task.
-Resume only when the user wants the project itself to continue; with unfinished tasks it goes to the user as a proposal.
-Phase needs_input / waiting: the user is answering; record it (set_goal / add_directive / send_message), then resume.`;
+Resume only when the user wants the project itself to continue; with unfinished tasks it goes to the user as a proposal.`;

@@ -380,13 +380,21 @@ body.resizing .net { pointer-events: none; }
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .stream { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 .stream-empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+/* Something new arrived below what the reader is looking at: one tap brings the end of the stream into view. */
+.stream-jump {
+  position: sticky; bottom: 0; align-self: center; flex: none; margin-top: -8px;
+  display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 12px; border-radius: 14px;
+  font-size: 12px; color: var(--text); background: var(--raised); border: 1px solid var(--line-strong);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
 
 .msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
 .msg-head { display: flex; gap: 8px; align-items: baseline; }
 .msg-who { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .msg-meta { font-size: 12px; color: var(--muted); }
 .msg-text { white-space: pre-wrap; word-break: break-word; line-height: 22px; }
-.m-user { align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 12px; background: var(--raised); border: 1px solid var(--line); }
+/* --user-bg / --user-line come from Settings > Appearance (appearance.ts); unset means graphite */
+.m-user { align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 12px; background: var(--user-bg, var(--raised)); border: 1px solid var(--user-line, var(--line)); }
 .m-user .msg-head { display: none; }
 .m-system { padding-left: 12px; border-left: 2px solid var(--line-strong); font-size: 13px; color: var(--text-2); }
 .m-system .msg-text { line-height: 20px; }
@@ -829,6 +837,15 @@ select.effort.bad { border-color: var(--warn, #b7791f); }
 .cfg-zero { display: inline-flex; align-items: center; width: 152px; height: 28px; padding: 0 8px; font-size: 12px; color: var(--text-2); border: 1px dashed var(--line-strong); border-radius: 8px; cursor: pointer; }
 .cfg-text { height: 28px; max-width: 320px; font-size: 12px; }
 .cfg-slider { display: flex; align-items: center; gap: 16px; width: 100%; max-width: 440px; }
+/* Appearance: each swatch shows the bubble tint over the chat panel surface; the preview is a real user message */
+/* Colour only; the name shows in the tooltip. The selected one gets a text-coloured ring. */
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatches button { width: 32px; height: 32px; padding: 0; border-radius: 10px; background: transparent; border: 1px solid transparent; box-shadow: none; }
+.swatches button:hover { border-color: var(--line-strong); }
+.swatches button[aria-checked="true"] { border-color: var(--text); }
+.swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid var(--line-strong); background-color: var(--raised); flex: none; }
+.swatch[style] { background-color: var(--deep); }
+.swatch-preview { display: flex; justify-content: flex-end; background: var(--deep); }
 
 input[type=range] {
   --p: 50%; flex: 1; min-width: 80px; height: 20px; padding: 0; margin: 0; border: none; background: transparent; appearance: none; cursor: pointer;

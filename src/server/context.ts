@@ -17,7 +17,12 @@ export interface ContextProfile {
   brief: 'full' | 'summary' | 'none';
   acceptance: 'full' | 'task' | 'none';
   decisions: 'full' | 'relevant';
-  issues: 'full' | 'task' | 'none';
+  /** 'index': only how many are recorded and where (the coordinator reads the file when a question needs it). */
+  issues: 'full' | 'task' | 'index' | 'none';
+  /** Where the pointers to full copies lead, relative to the agent's folder (default: the worktree's CONTEXT_DIR). */
+  memoryDir?: string;
+  /** Leave out sections that have nothing in them instead of writing "(none yet)". */
+  skipEmpty?: boolean;
   /** The code map (modules, entry points, how to test) so the agent does not re-explore the code to find its way. */
   codemap?: boolean;
 }
@@ -41,7 +46,8 @@ export const PROFILES: Record<TaskKind | 'coordinator' | 'gap', ContextProfile> 
   solo: FULL,
   // A later round of a single-agent build: only the criteria still open (its acIds) and what concerns them.
   gap: WORKER,
-  coordinator: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'full' },
+  // The coordinator runs in the project folder, where the memory is .plexus/memory (no .plexus-task/context copies).
+  coordinator: { brief: 'summary', acceptance: 'full', decisions: 'relevant', issues: 'index', memoryDir: '.plexus/memory', skipEmpty: true },
 };
 
 /** The profile of a task: chat requests and gap rounds (a solo task with the open criteria as acIds) get the worker profile. */
@@ -61,7 +67,7 @@ const limits = () => {
 const head = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '\n…(truncated)' : s);
 const tail = (s: string, n: number) => (s.length > n ? '…(earlier entries omitted)\n' + s.slice(-n) : s);
 const orNone = (s: string, none = '(none yet)') => s.trim() || none;
-const file = (name: string) => `\`${CONTEXT_DIR}/${name}\``;
+const file = (name: string, prof?: ContextProfile) => `\`${prof?.memoryDir ?? CONTEXT_DIR}/${name}\``;
 
 /** The task and its ancestors (fix → review → build), nearest first. */
 function chain(t: Task): Task[] {
@@ -78,7 +84,7 @@ export function taskAcIds(t: Task): string[] {
 }
 
 /** Short project summary: summary.md from the analyst, else the start of the brief. */
-export function projectSummary(p: Project): string {
+export function projectSummary(p: Project, prof?: ContextProfile): string {
   const s = readMemory(p, 'summary.md').trim();
   if (s) return head(s, limits().summary);
   const brief = readMemory(p, 'brief.md').trim();
@@ -86,7 +92,7 @@ export function projectSummary(p: Project): string {
   if (brief.length <= limits().summary) return brief;
   const cut = brief.slice(0, limits().summary);
   const para = cut.lastIndexOf('\n\n');
-  return (para > limits().summary / 2 ? cut.slice(0, para) : cut) + `\n…(full brief in ${file('brief.md')})`;
+  return (para > limits().summary / 2 ? cut.slice(0, para) : cut) + `\n…(full brief in ${file('brief.md', prof)})`;
 }
 
 /** One criterion for a prompt: no evidence (that stays in acceptance.md; the agent re-checks anyway). */
@@ -108,12 +114,12 @@ export function relevantDecisions(all: DecisionEntry[], t: Task | null): Decisio
 function decisionsSection(p: Project, prof: ContextProfile, t: Task | null): string {
   if (prof.decisions === 'full') return `## Decisions so far\n${orNone(tail(readMemory(p, 'decisions.md'), limits().decisionsFull))}`;
   const all = readDecisions(p);
-  if (!all.length) return '## Decisions so far\n(none yet)';
+  if (!all.length) return prof.skipEmpty ? '' : '## Decisions so far\n(none yet)';
   const rel = relevantDecisions(all, t);
   const relSet = new Set(rel);
   const n = limits().indexTitles;
   const others = n ? all.filter(d => !relSet.has(d)).slice(-n) : [];
-  const parts = [`## Decisions so far\n${all.length} recorded. Full text: ${file('decisions.md')}. Read it before making a design choice that could conflict with one of the titles below.`];
+  const parts = [`## Decisions so far\n${all.length} recorded. Full text: ${file('decisions.md', prof)}. Read it before making a design choice that could conflict with one of the titles below.`];
   if (rel.length) parts.push(`### Decisions that concern this task\n${head(rel.map(decisionText).join('\n'), limits().decisionsRelevant)}`);
   if (others.length) parts.push(`### Other decisions (titles only)\n${others.map(d => `- ${d.title}`).join('\n')}`);
   return parts.join('\n\n');
@@ -122,19 +128,25 @@ function decisionsSection(p: Project, prof: ContextProfile, t: Task | null): str
 function acceptanceSection(p: Project, prof: ContextProfile, t: Task | null): string {
   if (prof.acceptance === 'none') return '';
   const all = readAcceptance(p);
+  if (prof.skipEmpty && !all.length && !readMemory(p, 'acceptance.md').trim()) return '';
   if (prof.acceptance === 'full') {
     return `## Acceptance criteria\n${all.length ? head(all.map(acLine).join('\n'), limits().acceptance) : orNone(head(readMemory(p, 'acceptance.md'), limits().acceptance))}`;
   }
   if (!all.length) return `## Acceptance criteria\n${orNone(head(readMemory(p, 'acceptance.md'), limits().acceptance))}`;
   const ids = new Set(t ? taskAcIds(t) : []);
   const mine = all.filter(a => ids.has(a.id.toUpperCase()));
-  const pointer = `All ${all.length} criteria: ${file('acceptance.md')}.`;
+  const pointer = `All ${all.length} criteria: ${file('acceptance.md', prof)}.`;
   return `## Acceptance criteria\n${mine.length ? `Criteria this task serves:\n${mine.map(acLine).join('\n')}\n\n${pointer}` : `${pointer} This task names none; read the file if you need them.`}`;
 }
 
 function issuesSection(p: Project, prof: ContextProfile, t: Task | null): string {
   if (prof.issues === 'none') return '';
   const md = readMemory(p, 'known-issues.md');
+  if (prof.issues === 'index') {
+    const n = md.split('\n').filter(l => l.trim()).length;
+    return n || !prof.skipEmpty ? `## Known issues\n${n} recorded: ${file('known-issues.md', prof)}. Read it when a question concerns them.` : '';
+  }
+  if (prof.skipEmpty && !md.trim()) return '';
   if (prof.issues === 'full' || !t) return `## Known issues\n${orNone(tail(md, limits().issues))}`;
   const ids = chain(t).map(shortId);
   if (t.laneFrom) ids.push(shortId({ seq: Number(t.laneFrom.split('-T').pop()) || 0 }));
@@ -142,13 +154,15 @@ function issuesSection(p: Project, prof: ContextProfile, t: Task | null): string
   const lines = md.split('\n').filter(l => l.trim());
   const mine = lines.filter(l => re.test(l));
   if (!lines.length) return '';
-  return `## Known issues\n${mine.length ? tail(mine.join('\n'), limits().taskIssues) + '\n' : ''}${lines.length} recorded in total: ${file('known-issues.md')}.`;
+  return `## Known issues\n${mine.length ? tail(mine.join('\n'), limits().taskIssues) + '\n' : ''}${lines.length} recorded in total: ${file('known-issues.md', prof)}.`;
 }
 
 function briefSection(p: Project, prof: ContextProfile): string {
   if (prof.brief === 'none') return '';
+  const hasBrief = !!readMemory(p, 'brief.md').trim();
+  if (prof.skipEmpty && !hasBrief && !readMemory(p, 'summary.md').trim()) return '';
   if (prof.brief === 'full') return `## Project brief\n${orNone(head(readMemory(p, 'brief.md'), limits().brief), '(not written yet; read the documentation in the repository)')}`;
-  return `## Project summary\n${orNone(projectSummary(p), '(not written yet; read the documentation in the repository)')}\nFull brief: ${file('brief.md')}.`;
+  return `## Project summary\n${orNone(projectSummary(p, prof), '(not written yet; read the documentation in the repository)')}${hasBrief || !prof.skipEmpty ? `\nFull brief: ${file('brief.md', prof)}.` : ''}`;
 }
 
 function codemapSection(p: Project, prof: ContextProfile): string {
@@ -171,10 +185,11 @@ export function laneNotes(p: Project, t: Task): string {
  * providers that cache by prefix can reuse it), `task` depends on the task itself.
  */
 export function projectContext(p: Project, prof: ContextProfile, t: Task | null): { shared: string; task: string } {
+  const goal = (readMemory(p, 'goal.md') || p.goal || '').trim(), directives = readMemory(p, 'directives.md').trim();
   const shared = [
     `# PROJECT: ${p.name}`,
-    `## Goal\n${orNone(readMemory(p, 'goal.md') || p.goal, '(see documentation in the repository)')}`,
-    `## Directives from the user (must be followed)\n${orNone(readMemory(p, 'directives.md'))}`,
+    goal || !prof.skipEmpty ? `## Goal\n${orNone(goal, '(see documentation in the repository)')}` : '',
+    directives || !prof.skipEmpty ? `## Directives from the user (must be followed)\n${orNone(directives)}` : '',
     briefSection(p, prof),
     prof.decisions === 'full' ? decisionsSection(p, prof, t) : '',
   ];

@@ -2,21 +2,23 @@
 // Engine: quota checks, scheduler, context sizes, coordinator chat. Edits that can be changed back save on their own;
 // only things that cannot be undone (remove, delete, reset) ask first. Right-click a tab to reset all of it.
 import { useEffect, useRef, useState } from 'react';
-import { Blocks, Check, ChevronDown, FolderCog, Gauge, GripVertical, Layers, MessagesSquare, Plus, RotateCcw, Timer, UserCog, Users, Wrench, X } from 'lucide-react';
+import { Blocks, Check, ChevronDown, FolderCog, Gauge, GripVertical, Layers, MessagesSquare, Palette, Plus, RotateCcw, Timer, UserCog, Users, Wrench, X } from 'lucide-react';
 import { api, clock } from './api.ts';
 import type { Account, ModelCatalog, Project, Provider, Role, Skill } from './types.ts';
 import { ContextMenu, Dot, Ic, Meter, type MenuItem } from './ui.tsx';
 import { FALLBACK, effortsFor, useModels } from './models.tsx';
 import { accountItems } from './components/Sidebar.tsx';
+import { USER_COLORS, readUserColor, saveUserColor } from './appearance.ts';
 import { EngineSettings, ProjectSettingsPanel, TooltipLayer, engineKeys, resetProjectTab, useConfig, type EngineTab } from './engine-settings.tsx';
 
-export type SettingsTab = 'accounts' | 'roles' | 'skills' | 'project' | EngineTab;
+export type SettingsTab = 'accounts' | 'roles' | 'skills' | 'appearance' | 'project' | EngineTab;
 type TabDef = { id: SettingsTab; label: string; icon: typeof Users; tip: string };
 const SECTIONS: { title: string; tabs: TabDef[] }[] = [
   { title: 'Workspace', tabs: [
     { id: 'accounts', label: 'Accounts', icon: Users, tip: 'Claude and Codex accounts, their quota and how many tasks each runs' },
     { id: 'roles', label: 'Roles', icon: UserCog, tip: 'What each kind of agent does, and the model it runs on' },
     { id: 'skills', label: 'Skills', icon: Blocks, tip: 'Instruction folders copied into the workspace of the roles that use them' },
+    { id: 'appearance', label: 'Appearance', icon: Palette, tip: 'The background of your own messages in chat, on this device' },
   ] },
   { title: 'Project', tabs: [
     { id: 'project', label: 'Pipeline', icon: FolderCog, tip: 'How a project is built, reviewed and spread over accounts' },
@@ -56,6 +58,7 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
         void api<Role[]>('GET', '/api/roles').then(rs => Promise.allSettled(rs.map(r => api('POST', `/api/roles/${r.name}/reset`)))).then(() => setEpoch(x => x + 1)).catch(e => onError(e.message));
       })];
       case 'skills': return [item('Skills have no defaults', () => {}, true)];
+      case 'appearance': return [item('Reset message background to Graphite', () => { saveUserColor('graphite'); setEpoch(x => x + 1); }, readUserColor() === 'graphite')];
       case 'project': return [
         item(project ? `Reset ${project.name} to new-project defaults` : 'Reset the open project', () => resetProjectTab('project', project, store, reloadProject, onError), !project),
         item('Reset new-project defaults', () => resetProjectTab('defaults', project, store, reloadProject, onError)),
@@ -99,6 +102,7 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
             {tab === 'accounts' && <AccountsSettings accounts={accounts} reload={reloadAccounts} onError={onError} />}
             {tab === 'roles' && <RolesSettings onError={onError} />}
             {tab === 'skills' && <SkillsSettings onError={onError} />}
+            {tab === 'appearance' && <AppearanceSettings />}
             {tab === 'project' && <ProjectSettingsPanel project={project} reloadProject={reloadProject} store={store} scope={scope} onScope={setScope} onError={onError} />}
             {ENGINE_TABS.includes(tab) && <EngineSettings tab={tab as EngineTab} title={cur.label} store={store} />}
             {tab === 'advanced' && onRunSetup && (
@@ -114,6 +118,39 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
         {menu && <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={resetItems(menu.tab)} />}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- appearance
+
+function AppearanceSettings() {
+  const [color, setColor] = useState(readUserColor);
+  const pick = (id: string) => { setColor(id); saveUserColor(id); };
+  return (
+    <section className="cfg">
+      <div className="settings-head"><h2>Appearance</h2></div>
+      <p className="lead">Saved on this device</p>
+      <div className="cfg-group">
+        <div className="cfg-group-head"><h3>Your messages</h3></div>
+        <div className="cfg-rows">
+          <div className="cfg-row">
+            <div className="cfg-label"><span className="cfg-name">Background</span></div>
+            <div className="cfg-control">
+              <div className="swatches" role="radiogroup" aria-label="Message background">
+                {USER_COLORS.map(c => (
+                  <button key={c.id} role="radio" aria-checked={color === c.id} aria-label={c.label} data-tip={c.label} onClick={() => pick(c.id)}>
+                    <span className="swatch" style={c.fill ? { backgroundImage: `linear-gradient(${c.fill}, ${c.fill})`, borderColor: c.line } : undefined} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="cfg-row swatch-preview">
+            <div className="msg m-user"><div className="msg-text">Add a Browse button next to the project folder field</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

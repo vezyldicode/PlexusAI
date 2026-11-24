@@ -29,6 +29,8 @@ import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
  * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
  * changed: active tasks (short), tasks that finished since, and new events; the rest is already in its conversation.
  */
+const TASK_LIFECYCLE = new Set(['task.created', 'task.updated', 'task.started', 'task.result', 'task.merged']);
+
 export function statusDigest(projectId: string, since?: string | null): StatusDigest {
   const tasks = listTasks(projectId);
   const active = tasks.filter(t => !['done', 'cancelled'].includes(t.status));
@@ -36,7 +38,8 @@ export function statusDigest(projectId: string, since?: string | null): StatusDi
     `${t.deps.length ? ` deps:${t.deps.map(d => d.split('-').pop()).join(',')}` : ''}${t.paths.length ? ` paths:${t.paths.slice(0, 4).join(',')}` : ''}${t.error ? ` — ${t.error.slice(0, 150)}` : ''}`;
   const accounts = listAccounts().map(a => `${a.id} (${a.provider}) ${a.enabled ? a.state : 'disabled'}${a.cooldownUntil ? ` until ${a.cooldownUntil}` : ''}` +
     `${a.quota?.primary ? ` 5h:${a.quota.primary.usedPercent ?? '?'}%` : ''}${a.quota?.secondary ? ` week:${a.quota.secondary.usedPercent ?? '?'}%` : ''} running:${a.running ?? 0}`).join('\n');
-  const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !since || e.createdAt > since);
+  // Task lifecycle events repeat what the task lines below already say (status, result summary), so they stay out.
+  const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !TASK_LIFECYCLE.has(e.type) && (!since || e.createdAt > since));
   const events = evs.map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
   const finished = tasks.filter(t => ['done', 'cancelled'].includes(t.status) && (!since || t.updatedAt > since));
   const nDone = appConfig().digestDone;

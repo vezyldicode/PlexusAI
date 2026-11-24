@@ -1,5 +1,6 @@
 import type { Account } from '../../shared/types.ts';
 import { resolveCli, runStreaming } from '../util/proc.ts';
+import { gitIdentityEnv } from '../util/git.ts';
 import { classifyClaudeRun, claudeQuota, parseEvents } from './claude-limits.ts';
 import { readClaudeStatus } from './claude-control.ts';
 import { invocationUsage } from '../usage.ts';
@@ -85,7 +86,7 @@ export const claudeAdapter: ProviderAdapter = {
     const timer = createRunTimer('claude');
     const r = await runStreaming({
       cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
-      env: { ...process.env, ...this.accountEnv(spec.account) },
+      env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); for (const d of describeClaudeEvents(line)) spec.onEvent?.(d); },
       stopWhen: () => !!spec.maxCompactions && timer.compactions >= spec.maxCompactions,
