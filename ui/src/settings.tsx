@@ -136,10 +136,10 @@ function AppearanceSettings() {
           <div className="cfg-row">
             <div className="cfg-label"><span className="cfg-name">Background</span></div>
             <div className="cfg-control">
-              <div className="seg swatches" role="radiogroup" aria-label="Message background">
+              <div className="swatches" role="radiogroup" aria-label="Message background">
                 {USER_COLORS.map(c => (
-                  <button key={c.id} role="radio" aria-checked={color === c.id} onClick={() => pick(c.id)}>
-                    <span className="swatch" style={c.fill ? { backgroundImage: `linear-gradient(${c.fill}, ${c.fill})`, borderColor: c.line } : undefined} />{c.label}
+                  <button key={c.id} role="radio" aria-checked={color === c.id} aria-label={c.label} data-tip={c.label} onClick={() => pick(c.id)}>
+                    <span className="swatch" style={c.fill ? { backgroundImage: `linear-gradient(${c.fill}, ${c.fill})`, borderColor: c.line } : undefined} />
                   </button>
                 ))}
               </div>
