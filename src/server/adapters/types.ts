@@ -20,8 +20,10 @@ export interface RunSpec {
   /** Reasoning effort, already checked against the model's supported efforts (see models.ts). */
   effort?: string;
   readOnly: boolean;
-  /** Text for the CLI's system prompt (same for every task of a role, so it is cached); prepended to the prompt where unsupported. Not sent on resume. */
+  /** Text for the CLI's system prompt (same for every task of a role, so it is cached); prepended to the prompt where unsupported. Not sent on resume unless systemOnResume. */
   system?: string;
+  /** Send `system` on a resume too, where the CLI has a system-prompt option (Claude does not keep it across --resume). */
+  systemOnResume?: boolean;
   /** An MCP server the agent gets (the coordinator's `plexus` tools). */
   mcp?: McpServerSpec;
   /** Compact the conversation once its context passes this many tokens (0/undefined: the CLI's default). */

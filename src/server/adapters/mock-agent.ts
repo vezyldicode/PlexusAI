@@ -158,7 +158,7 @@ switch (meta.kind) {
     // `soloFirstFiles`: what the first round writes; `soloNoProgress`: later rounds change nothing (a stalled agent).
     const gapRound = /# TASK T\d+: Close the remaining gaps/.test(prompt);
     const named = [...new Set([...prompt.matchAll(/FILE:\s*(\S+)/g)].map(m => m[1]))];
-    const files = gapRound && cfg.soloNoProgress ? [] : !gapRound && cfg.soloFirstFiles ? cfg.soloFirstFiles : named.length ? named : ['alpha.txt', 'beta.txt'];
+    const files: string[] = gapRound && cfg.soloNoProgress ? [] : !gapRound && cfg.soloFirstFiles ? cfg.soloFirstFiles : named.length ? named : ['alpha.txt', 'beta.txt'];
     const todo = ['Read the task and the code map', ...files.map(f => `Write ${f}`), 'Commit and evaluate'];
     plan(todo, 0);
     tool('Read', { file_path: '.plexus-task/contract.md' });

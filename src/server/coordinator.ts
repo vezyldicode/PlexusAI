@@ -15,7 +15,7 @@ import { appRoot, ensure, paths } from './paths.ts';
 import {
   appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
 } from './projects.ts';
-import { buildCoordinatorPrompt, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
+import { buildCoordinatorPrompt, buildCoordinatorSystem, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { runtime } from './runtime.ts';
 import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, updateTask } from './tasks.ts';
@@ -24,6 +24,15 @@ import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit 
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
 import { appConfig } from './config.ts';
 import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
+
+/** One short line per event: time, task, what happened, title (details are in plexus_task / plexus_task_log). */
+export function eventLine(e: { type: string; data: any; createdAt: string }): string {
+  const d = e.data ?? {};
+  const task = d.seq != null ? `T${d.seq}` : typeof d.task === 'string' ? d.task.split('-').pop() : '';
+  const text = String(d.title ?? d.message ?? d.file ?? '').split('\n')[0];
+  return [e.createdAt.slice(11, 16), task, e.type.replace(/^task\./, ''), d.status ?? '', text.length > 60 ? `${text.slice(0, 59)}…` : text]
+    .filter(Boolean).join(' ');
+}
 
 /**
  * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
@@ -40,7 +49,7 @@ export function statusDigest(projectId: string, since?: string | null): StatusDi
     `${a.quota?.primary ? ` 5h:${a.quota.primary.usedPercent ?? '?'}%` : ''}${a.quota?.secondary ? ` week:${a.quota.secondary.usedPercent ?? '?'}%` : ''} running:${a.running ?? 0}`).join('\n');
   // Task lifecycle events repeat what the task lines below already say (status, result summary), so they stay out.
   const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !TASK_LIFECYCLE.has(e.type) && (!since || e.createdAt > since));
-  const events = evs.map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
+  const events = evs.map(eventLine).join('\n');
   const finished = tasks.filter(t => ['done', 'cancelled'].includes(t.status) && (!since || t.updatedAt > since));
   const nDone = appConfig().digestDone;
   const done = since ? finished : nDone ? finished.filter(t => t.status === 'done').slice(-nDone) : [];
@@ -365,7 +374,9 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const tools = !!mcp;
   const lastReply = listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);
   const lastCtx = Number((lastReply?.meta?.tokens as any)?.lastCtx ?? 0);
-  const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text, tools);
+  // Role, how it works and the output format: the system prompt, sent every turn (a Claude resume does not keep it).
+  const system = buildCoordinatorSystem(p, role, tools);
+  const fullPrompt = () => buildCoordinatorPrompt(p, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text);
   const deltaPrompt = () => buildCoordinatorTurnPrompt(p, statusDigest(projectId, lastReply?.createdAt ?? null),
     messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
   const activity: ChatActivity = { tools: [], plan: null };
@@ -373,7 +384,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`);
     const prompt = resumeId ? deltaPrompt() : fullPrompt();
     // The prompt heads the log (the CLI's stream follows), and the user's message points to it: the chat shows it on demand.
-    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${prompt}\n\n# output\n`);
+    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${system}\n\n${prompt}\n\n# output\n`);
     const um = getMessage(userMsgId);
     if (um) updateMessageMeta(userMsgId, { ...(um.meta ?? {}), promptLog: logPath, promptChars: prompt.length, promptResumed: !!resumeId });
     // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
@@ -381,7 +392,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     activity.tools = []; activity.plan = null; activity.steps = [];
     bus.emitEvent('chat.activity', projectId, { sessionId, reset: true }, false);
     return adapterFor(account.provider).run({
-      account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
+      account, cwd: p.path, prompt, system, systemOnResume: true, resumeId, model, effort: eff.effort, readOnly: false,
       mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: appConfig().chatIdleTimeoutMin * 60_000, logPath,
       onEvent: e => {
         let text: string;

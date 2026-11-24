@@ -2,10 +2,12 @@
   "//": "Hashes (sha256 of the trimmed instructions, first 16 hex) of earlier built-in role instructions. A role whose instructions still match one of them was never edited by the user and is upgraded to the current default on start.",
   "coordinator": [
     "7b97c7be84bd865d",
-    "bcfbdd0d1a422066"
+    "bcfbdd0d1a422066",
+    "7332782e06384b2f"
   ],
   "analyst": [
-    "e9401a24127319ce"
+    "e9401a24127319ce",
+    "e5f4b330fe1d50a5"
   ],
   "architect": [
     "1aef5ac33daae667"
@@ -15,7 +17,8 @@
   ],
   "solo": [
     "fb8e623f917a7369",
-    "b02a3f44c0955ef5"
+    "b02a3f44c0955ef5",
+    "193cd77615d4e108"
   ],
   "implementer": [
     "184818cd820fa5c5"

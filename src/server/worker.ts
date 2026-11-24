@@ -8,7 +8,8 @@ import { effortForRun } from './models.ts';
 import { bus } from './events.ts';
 import { ensure, paths } from './paths.ts';
 import { writeContextFiles } from './context.ts';
-import { buildCheckpointPrompt, buildForkPrompt, buildResumePrompt, buildTaskParts, CONTRACT_FILE, contractText, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
+import { runtime } from './runtime.ts';
+import { buildCheckpointPrompt, buildCoordinatorSystem, buildForkPrompt, buildResumePrompt, buildTaskParts, CONTRACT_FILE, contractText, PROGRESS_FILE, RESULT_FILE, TASK_DIR } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { materializeSkills } from './skills.ts';
 import { finishRun, getTask, listRuns, setRunModel, shortId, startRun, updateTask } from './tasks.ts';
@@ -240,7 +241,7 @@ export async function runAttempt(p: Project, task: Task, account: Account): Prom
     setRunModel(runId, model ?? null, eff.effort ?? null);
     if (eff.warning) bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: 'status', text: eff.warning }, false);
 
-    const run = (prompt: string, resumeId: string | undefined, note: string, system?: string, opts: { fork?: boolean; budget?: boolean } = {}) => {
+    const run = (prompt: string, resumeId: string | undefined, note: string, system?: string, opts: { fork?: boolean; budget?: boolean; systemOnResume?: boolean } = {}) => {
       appendFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})
 ${system ? `${system}\n\n` : ''}${prompt}
 
@@ -248,7 +249,7 @@ ${system ? `${system}\n\n` : ''}${prompt}
 ${note}`);
       return adapter.run({
         account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, autocompact: p.settings.autocompactTokens, mcp: taskMcp(),
-        forkSession: opts.fork, maxCompactions: opts.budget === false ? 0 : p.settings.maxCompactions,
+        forkSession: opts.fork, systemOnResume: opts.systemOnResume, maxCompactions: opts.budget === false ? 0 : p.settings.maxCompactions,
         timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: idleTimeoutMin(role.maxRuntimeMin) * 60_000,
         logPath, signal: ctl.signal,
         onEvent: e => bus.emitEvent('task.log', p.id, { id: task.id, seq: task.seq, account: account.id, kind: e.kind, text: e.kind === 'plan' ? e.text : e.text.slice(0, 2000) }, false),
@@ -272,8 +273,10 @@ ${note}`);
     let out: Awaited<ReturnType<typeof run>>;
     if (fork && resumeId) {
       const parts = buildTaskParts(p, task, role, account, progress, skills);
+      // The coordinator's system prompt, unchanged, keeps the forked conversation's cached prefix valid.
+      const coordSystem = buildCoordinatorSystem(p, getRole('coordinator'), !!(runtime.port && runtime.token));
       out = await run(buildForkPrompt(p, task, role, parts.system), resumeId, `${warn}[plexus] continuing the coordinator's conversation (forked)
-`, undefined, { fork: true });
+`, coordSystem, { fork: true, systemOnResume: true });
     } else if (resumeId) out = await run(buildResumePrompt(p, task, role, progress), resumeId, warn);
     else { const c = cold(); out = await run(c.prompt, undefined, warn, c.system); }
     if (delivered) updateTask(task.id, { inbox: getTask(task.id)!.inbox.slice(delivered) }, true);

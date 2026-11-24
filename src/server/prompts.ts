@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Account, ChatMessage, Project, Role, Task } from '../shared/types.ts';
 import { appRoot, paths } from './paths.ts';
-import { CONTEXT_DIR, laneNotes, profileFor, PROFILES, projectContext } from './context.ts';
+import { laneNotes, profileFor, PROFILES, projectContext } from './context.ts';
 import { readDecisions, readMemory } from './projects.ts';
 import { getTask, isUserFollowUp, shortId } from './tasks.ts';
 import { appConfig } from './config.ts';
@@ -116,7 +116,7 @@ export function buildTaskParts(p: Project, t: Task, role: Role, account: Account
   const prompt = [
     ctx.shared,
     skills.length ? `# SKILLS\nThese skills are installed in this repository (.claude/skills or .agents/skills); use them when relevant: ${skills.join(', ')}` : '',
-    ctx.task ? `# PROJECT CONTEXT FOR THIS TASK\nFull copies of the project memory are in \`${CONTEXT_DIR}/\` (earlier agents' notes in \`${CONTEXT_DIR}/handoff/\`).\n\n${ctx.task}` : '',
+    ctx.task ? `# PROJECT CONTEXT FOR THIS TASK\n${ctx.task}` : '',
     laneNotes(p, t),
     taskSection(p, t),
     inboxSection(t),
@@ -184,7 +184,8 @@ export function buildForkPrompt(p: Project, t: Task, role: Role, system: string)
   return [
     `# YOU ARE NOW THE AGENT DOING THE WORK
 The conversation above was the coordinator's chat with the user. You continue it as a separate agent: you are no longer
-the coordinator, your only plexus tool is plexus_plan (your checklist), and your reply is not shown in the chat. You work in a new git worktree (the
+the coordinator (its instructions in your system prompt no longer apply), your only plexus tool is plexus_plan (your
+checklist), and your reply is not shown in the chat. You work in a new git worktree (the
 current directory, branch ${t.branch ?? '(see TASK)'}, created from ${baseRef(p)}); the project folder you saw above is
 not yours to edit. Use what you already learned above (files, causes, decisions) instead of searching again.`,
     system,
@@ -227,24 +228,34 @@ function coordinatorGuide(p: Project, tools: boolean): string {
 - Task logs (prompt + agent stream, one file per run): ${join(paths.logs, p.id)}
 - Task worktrees: ${join(paths.worktrees, p.id)} · project memory: ${join(p.path, '.plexus', 'memory')} (hand-off notes in handoff/)`;
   const how = tools
-    ? `You have full permissions in the project: read and edit files, run commands (git, tests), and the \`plexus\` tools:
-plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) · plexus_action(action) (any action listed under OUTPUT) ·
-plexus_main_begin / plexus_main_commit(message: what you changed) · plexus_workspace / plexus_workspace_merge(message).
-For a request of several steps, keep a checklist with plexus_plan(items) (the user watches it): the whole list each time
-a step starts or finishes.
-- Editing yourself: plexus_main_begin first (it holds merges back so you never edit the main checkout while a task merges),
-  then plexus_main_commit; plexus_workspace / plexus_workspace_merge for your own worktree. Never edit files that a running
-  task lists in its paths.
-- A solo_task on your own Claude account continues a copy of this conversation, so what you read here is not read again:
-  look at the relevant code before you hand the work over, and keep the description short.`
-    : `The plexus tools are not available in this run: act through the JSON actions below. You may still read files and logs.`;
+    ? `- Tools: read and edit files, run commands (git, tests), and plexus_status · plexus_task(id) · plexus_task_log(id, tail, grep) ·
+  plexus_action(action) (any action under OUTPUT) · plexus_main_begin / plexus_main_commit(message: what you changed) ·
+  plexus_workspace / plexus_workspace_merge(message) · plexus_plan(items): a checklist the user watches, for a request of
+  several steps; send the whole list each time a step starts or finishes.
+- Doing it yourself: plexus_main_begin first (it holds merges back so you never edit the main checkout while a task
+  merges), edit, then plexus_main_commit. For a larger edit, plexus_workspace gives you your own worktree; finish with
+  plexus_workspace_merge. Never edit files that a running task lists in its paths.
+- A solo_task on your own Claude account continues a copy of this conversation: look at the relevant code before you
+  hand the work over, and keep the description short.`
+    : `- The plexus tools are not available in this run: act through the JSON actions under OUTPUT. You may still read files and logs.`;
   return `# HOW YOU WORK
 ${where}
-${how}`;
+${how}
+- "Give X to account Y" means assign_account (or \`account\` on solo_task): which account runs a task is Plexus's job. Never
+  put account or provider names in directives or task descriptions (agents read them as limits on their work); remove a
+  wrong directive with remove_directive.`;
 }
 
 /**
- * A turn of a resumed CLI conversation: the role, project context and earlier chat are already in it, so send only what
+ * The static part of the coordinator's instructions (role, how it works, output format). Sent as the CLI's system prompt
+ * where it has one (the same text every turn, so it is cached), else at the head of the first prompt.
+ */
+export function buildCoordinatorSystem(p: Project, role: Role, tools = false): string {
+  return [`# YOUR ROLE: coordinator\n${role.instructions.trimEnd()}`, coordinatorGuide(p, tools), coordinatorOutput(tools)].join('\n\n');
+}
+
+/**
+ * A turn of a resumed CLI conversation: the project context and earlier chat are already in it, so send only what
  * changed since the last reply (status delta, new chat notices) and the new message.
  */
 export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, news: ChatMessage[], userText: string, tools = false): string {
@@ -253,56 +264,46 @@ export function buildCoordinatorTurnPrompt(p: Project, status: StatusDigest, new
     statusSection(p, status, 'STATUS (changes since your last reply)'),
     news.length ? `# NEW SINCE YOUR LAST REPLY\n${news.slice(-appConfig().chatHistoryMessages).map(fmtMsg).join('\n')}` : '',
     `USER MESSAGE:\n${userText}\n---`,
-    tools ? 'Use the plexus tools to look things up and act; answer with the OUTPUT JSON as before.' : COORDINATOR_OUTPUT,
+    tools ? 'Use the plexus tools only where the answer needs them; answer with the OUTPUT JSON as before.' : 'Answer with the OUTPUT JSON as before.',
   ].filter(Boolean).join('\n\n');
 }
 
-export function buildCoordinatorPrompt(p: Project, role: Role, status: StatusDigest, history: ChatMessage[], userText: string, tools = false): string {
+/** The first turn of a coordinator conversation: the variable part (context, status, chat); the rest is in the system prompt. */
+export function buildCoordinatorPrompt(p: Project, status: StatusDigest, history: ChatMessage[], userText: string): string {
   const hist = history.slice(-appConfig().chatHistoryMessages).map(fmtMsg).join('\n');
   const ctx = projectContext(p, PROFILES.coordinator, null);
   return [
     COORDINATOR_META,
-    `# YOUR ROLE: coordinator\n${role.instructions}`,
-    coordinatorGuide(p, tools),
     ctx.shared,
     ctx.task,
     statusSection(p, status),
     `# CHAT HISTORY\n${hist || '(empty)'}`,
     `USER MESSAGE:\n${userText}\n---`,
-    COORDINATOR_OUTPUT,
-  ].join('\n\n');
+    'Answer with the JSON described under OUTPUT in your instructions.',
+  ].filter(Boolean).join('\n\n');
 }
 
-const COORDINATOR_OUTPUT = `# OUTPUT
+/** The reply format and the actions, one per line (with the plexus tools any of them also goes through plexus_action). */
+function coordinatorOutput(tools: boolean): string {
+  return `# OUTPUT
 End with ONLY one JSON object (no prose after it):
-{ "reply": "your answer to the user",
-  "actions": [ ... ],
-  "proposal": null | { "summary": "what will change and why", "actions": [ ... ] } }
-"actions" are applied after your reply. Do not repeat here what you already did with the plexus tools.
-Action types:
-{"type":"pause"} {"type":"resume"} {"type":"stop"}
-{"type":"solo_task","title":"...","description":"what to change, where (files, functions, the cause you found), and 2-5 checks that say it is done","account":"optional account id"}
-  → ONE agent (your model, own worktree, tests, self-review, merge). Runs even when the project is idle, paused or finished.
-  Scope = exactly what the user asked. Never add features, platforms, formats or verification steps the user did not ask
-  for (they multiply the time and quota of the run); offer them in "reply" as optional follow-ups instead. Checks are
-  commands the repo already runs (build, typecheck, tests): never require screenshots, demo data, a running server or new
-  test infrastructure unless the user asked for them. Do not add data models, records or endpoints the request does not
-  need. A broad or
-  ambiguous request ("remove all limits", "make it better"): say how you read it and put the narrow reading in "proposal".
-  When the work is clearly larger than one session, start a first slice and name the rest.
-{"type":"continue_task","task_id":"T5","instructions":"what to do next"}
-  → more work for the agent that did T5, in its conversation and worktree: cheapest when it already knows the code.
+{ "reply": "your answer to the user", "actions": [ ... ], "proposal": null | { "summary": "what will change and why", "actions": [ ... ] } }
+"actions" are applied after your reply${tools ? '; do not repeat what you already did with the plexus tools' : ''}. Action types:
+{"type":"pause"}
+{"type":"stop"}
+{"type":"resume"} → continues every unfinished pipeline task: only when the user wants the project itself to continue (with unfinished tasks, as a proposal); never to get a request done, which the other actions do while the project is paused, stopped or idle.
+{"type":"solo_task","title":"...","description":"what to change, where (files, functions, the cause you found), and 2-5 checks that say it is done","account":"optional account id"} → ONE agent (your model, own worktree, tests, self-review, merge); runs even when the project is idle, paused or finished. Checks are commands the repo already runs (build, typecheck, tests), never screenshots, demo data, a running server, new test infrastructure, data models or endpoints the request does not need. Work larger than one session: a first slice, and name the rest.
+{"type":"continue_task","task_id":"T5","instructions":"what to do next"} → more work for the agent that did T5, in its conversation and worktree.
 {"type":"send_message","task_id":"T5","text":"..."} → delivered to that agent at the start of its next run.
-{"type":"add_task","title":"...","description":"...","role":"implementer","depends_on":["T3"],"priority":50}
-  → a task for the team pipeline. Only for large work that splits into parallel parts. While the project is paused,
-  stopped or idle it runs right away as part of this request (with its review, fixes and merge); it can then only depend
-  on finished tasks or other tasks of the request.
-{"type":"assign_account","task_id":"T5","account":"claude-01"} ("auto" clears it; another account takes over while it cannot run)
-{"type":"cancel_task","task_id":"T5"} {"type":"retry_task","task_id":"T5"} {"type":"reprioritize","task_id":"T5","priority":90}
+{"type":"add_task","title":"...","description":"...","role":"implementer","depends_on":["T3"],"priority":50} → a team-pipeline task; while the project is paused, stopped or idle it runs right away with its review, fixes and merge, and can only depend on finished tasks or tasks of the same request.
+{"type":"assign_account","task_id":"T5","account":"claude-01"} → "auto" clears it; another account takes over while it cannot run.
+{"type":"cancel_task","task_id":"T5"}
+{"type":"retry_task","task_id":"T5"}
+{"type":"reprioritize","task_id":"T5","priority":90}
 {"type":"update_task","task_id":"T5","description":"new description"}
 {"type":"record_decision","title":"...","decision":"...","rationale":"..."}
-{"type":"add_directive","text":"instruction all agents must follow from now on"} {"type":"remove_directive","match":"text in it"}
-{"type":"set_goal","goal":"..."} {"type":"replan","reason":"..."}
-Project paused, stopped or idle: do what the user asks with the actions above; they run without the pipeline. Never
-resume (and never tell the user to resume) just to get a request done: resume continues every unfinished pipeline task.
-Resume only when the user wants the project itself to continue; with unfinished tasks it goes to the user as a proposal.`;
+{"type":"add_directive","text":"instruction all agents must follow from now on"}
+{"type":"remove_directive","match":"text in it"}
+{"type":"set_goal","goal":"..."}
+{"type":"replan","reason":"..."}`;
+}

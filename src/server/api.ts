@@ -8,6 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
+import { syncBranch, unwatchBranch } from './branch.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
 import { applyActions, beginMainEdit, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
@@ -143,7 +144,8 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
 
   // ---- projects
   app.post('/api/folder-picker', async () => ({ path: await (hooks.chooseFolder ?? chooseFolder)() }));
-  app.get('/api/projects', async () => listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })));
+  // Both loads read the folder's branch first, so a reload shows the branch that is checked out now.
+  app.get('/api/projects', async () => { for (const p of listProjects()) syncBranch(p.id); return listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })); });
   app.post('/api/projects', async req => {
     const b = body(req);
     if (!b.path) throw new Error('path is required');
@@ -152,6 +154,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return getProject(p.id);
   });
   app.get('/api/projects/:id', async req => {
+    syncBranch(id(req));
     const p = mustProject(id(req));
     const tasks = listTasks(p.id);
     return {
@@ -177,7 +180,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.get('/api/config', async () => configView());
   app.patch('/api/config', async req => { updateConfig(body(req)); return configView(); });
   app.patch('/api/config/project-defaults', async req => { updateProjectDefaults(body(req)); return configView(); });
-  app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); deleteProject(id(req)); return { ok: true }; });
+  app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); unwatchBranch(id(req)); deleteProject(id(req)); return { ok: true }; });
   // Open the project folder in the system file manager (the daemon runs on the user's own machine).
   app.post('/api/projects/:id/reveal', async req => {
     const p = mustProject(id(req));
