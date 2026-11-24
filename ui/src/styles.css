@@ -393,7 +393,8 @@ body.resizing .net { pointer-events: none; }
 .msg-who { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .msg-meta { font-size: 12px; color: var(--muted); }
 .msg-text { white-space: pre-wrap; word-break: break-word; line-height: 22px; }
-.m-user { align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 12px; background: var(--raised); border: 1px solid var(--line); }
+/* --user-bg / --user-line come from Settings > Appearance (appearance.ts); unset means graphite */
+.m-user { align-self: flex-end; max-width: 88%; padding: 8px 12px; border-radius: 12px; background: var(--user-bg, var(--raised)); border: 1px solid var(--user-line, var(--line)); }
 .m-user .msg-head { display: none; }
 .m-system { padding-left: 12px; border-left: 2px solid var(--line-strong); font-size: 13px; color: var(--text-2); }
 .m-system .msg-text { line-height: 20px; }
@@ -836,6 +837,10 @@ select.effort.bad { border-color: var(--warn, #b7791f); }
 .cfg-zero { display: inline-flex; align-items: center; width: 152px; height: 28px; padding: 0 8px; font-size: 12px; color: var(--text-2); border: 1px dashed var(--line-strong); border-radius: 8px; cursor: pointer; }
 .cfg-text { height: 28px; max-width: 320px; font-size: 12px; }
 .cfg-slider { display: flex; align-items: center; gap: 16px; width: 100%; max-width: 440px; }
+/* Appearance: each swatch shows the bubble tint over the chat panel surface; the preview is a real user message */
+.swatch { width: 14px; height: 14px; margin-right: 2px; border-radius: 4px; border: 1px solid var(--line-strong); background-color: var(--raised); flex: none; }
+.swatch[style] { background-color: var(--deep); }
+.swatch-preview { display: flex; justify-content: flex-end; background: var(--deep); }
 
 input[type=range] {
   --p: 50%; flex: 1; min-width: 80px; height: 20px; padding: 0; margin: 0; border: none; background: transparent; appearance: none; cursor: pointer;
