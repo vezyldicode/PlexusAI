@@ -28,6 +28,17 @@ const identity = () => {
 };
 
 /**
+ * The same author for the commits agents make themselves (task branches, or a commit the user asks for in chat), passed
+ * in their environment: without it git would use the user's global name and email. GitHub links a commit to the account
+ * that owns its author email, so a GitHub noreply email here shows the commits as that account's.
+ */
+export function gitIdentityEnv(): Record<string, string> {
+  const c = appConfig();
+  const name = c.gitName || 'Plexus', email = c.gitEmail || 'plexus@localhost';
+  return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+}
+
+/**
  * Make sure `dir` is the root of a git repo; returns the checked-out branch name. With auto-commit on (Settings →
  * Advanced) a repo without commits also gets an initial commit; otherwise Plexus never commits there.
  */

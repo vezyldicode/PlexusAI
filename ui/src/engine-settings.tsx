@@ -134,8 +134,8 @@ export const ENGINE_GROUPS: Record<EngineTab, { lead: string; groups: Group<CK>[
       ] },
       { title: 'Git', fields: [
         { key: 'autoCommit', label: 'Commit to my branches', kind: 'toggle', tip: 'Off: Plexus never commits on your branches. Finished work appears in the project folder as uncommitted changes and you commit it yourself. On: Plexus commits a snapshot of your uncommitted work before a run and commits every merge on the checked-out branch' },
-        { key: 'gitName', label: 'Commit author name', kind: 'text', placeholder: 'Plexus', tip: 'Name on the commits Plexus makes (its internal merges, and on your branch when "Commit to my branches" is on)' },
-        { key: 'gitEmail', label: 'Commit author email', kind: 'text', placeholder: 'plexus@localhost', tip: 'Email on the commits Plexus makes' },
+        { key: 'gitName', label: 'Commit author name', kind: 'text', placeholder: 'Plexus', tip: 'Name on the commits Plexus and its agents make (its internal merges, task branches, a commit you ask for in chat, and on your branch when "Commit to my branches" is on)' },
+        { key: 'gitEmail', label: 'Commit author email', kind: 'text', placeholder: 'plexus@localhost', tip: 'Email on the commits Plexus and its agents make. GitHub shows a commit as the account that owns this email: use the noreply email of a Plexus GitHub account (Settings → Emails, like 12345678+plexus-bot@users.noreply.github.com) to have its avatar on the commits and Plexus listed as a contributor' },
       ] },
     ],
   },
