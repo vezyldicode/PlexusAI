@@ -5,6 +5,7 @@ import type { ChatSession } from '../shared/types.ts';
 import { getDb, now } from './db.ts';
 import { bus } from './events.ts';
 import { getTask } from './tasks.ts';
+import { deleteSessionImages } from './attachments.ts';
 
 const rowToSession = (r: any): ChatSession => ({
   id: r.id, projectId: r.project_id, title: r.title, archived: !!r.archived, unread: r.unread ?? 0,
@@ -58,6 +59,7 @@ export function updateSession(id: string, patch: { title?: string; archived?: bo
 
 export function deleteSession(id: string): void {
   const s = mustSession(id);
+  deleteSessionImages(id);
   const db = getDb();
   db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
   db.prepare('DELETE FROM chat_sessions WHERE id = ?').run(id);
@@ -68,6 +70,7 @@ export function deleteSession(id: string): void {
 }
 
 export function deleteProjectSessions(projectId: string): void {
+  for (const s of listSessions(projectId, true)) deleteSessionImages(s.id);
   getDb().prepare('DELETE FROM chat_sessions WHERE project_id = ?').run(projectId);
 }
 

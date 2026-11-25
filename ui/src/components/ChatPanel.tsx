@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
-import { api, clock, timeAgo } from '../api.ts';
+import { ArrowUp, Check, ChevronDown, ChevronRight, Paperclip, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
+import { api, clock, timeAgo, token } from '../api.ts';
 import type { LiveActivity, ProjectDetail, Plexus } from '../store.ts';
 import type { Account, ChatActivity, ChatMessage, ChatStep, ChatSession, Project, Provider, Role, RunTiming, Task, TaskModelInfo, TokenUsage } from '../types.ts';
 import { ContextMenu, Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens } from '../ui.tsx';
@@ -55,7 +55,7 @@ export function ChatPanel({ s, detail, visible, mode, tabs, active, onActivate, 
           {mode === 'overlay' && <button className="icon-btn" title="Close chat" aria-label="Close chat" onClick={onHide}><Ic i={X} /></button>}
         </>} />
       {onCoordinator
-        ? <CoordinatorChat project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null}
+        ? <CoordinatorChat key={s.sessionId ?? ''} project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null}
             live={s.sessionId ? s.live[s.sessionId] ?? null : null} onError={s.setError} reload={s.loadDetail} />
         : byId.get(active)!.kind === 'coordinator'
           ? <CoordinatorRecord key={active} task={byId.get(active)!} origin={origin(byId.get(active))} />
@@ -350,6 +350,16 @@ function Elapsed({ since }: { since: number }) {
 
 function CoordinatorChat({ project, accounts, sessionId, messages, thinking, live, onError, reload }: { project: Project; accounts: Account[]; sessionId: string | null; messages: ChatMessage[]; thinking: string | null; live: LiveActivity | null; onError: (e: string) => void; reload: () => void }) {
   const [text, setText] = useState('');
+  const [images, setImages] = useState<{ file: File; url: string }[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const previewUrls = useRef(new Set<string>());
+  useEffect(() => () => { previewUrls.current.forEach(url => URL.revokeObjectURL(url)); }, []);
+  const addImages = (files: File[]) => {
+    const valid = files.filter(f => ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(f.type) && f.size <= 10 * 1024 * 1024);
+    if (valid.length !== files.length) onError('Only PNG, JPG, GIF or WebP images up to 10 MB are allowed');
+    if (images.length + valid.length > 5) { onError('Up to 5 images are allowed'); return; }
+    setImages(old => [...old, ...valid.map(file => { const url = URL.createObjectURL(file); previewUrls.current.add(url); return { file, url }; })]);
+  };
   const [picking, setPicking] = useState(false);
   const closePicker = useCallback(() => setPicking(false), []);
   const opts = useCoordinatorOptions(project, accounts, onError, reload, messages.length);
@@ -360,11 +370,19 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
   const plan = thinking ? live?.plan ?? null : answered?.plan ?? null;
   const send = async () => {
     const t = text.trim();
-    if (!t) return;
-    setText('');
-    // Sending is reading along: the answer should come into view as it arrives.
-    follow.toEnd();
-    await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId }).catch(e => onError(e.message));
+    if (!t && !images.length) return;
+    try {
+      const encoded = await Promise.all(images.map(({ file }) => new Promise<{ name: string; mime: string; dataBase64: string }>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ name: file.name, mime: file.type, dataBase64: String(reader.result).split(',')[1] });
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })));
+      follow.toEnd();
+      await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId, images: encoded });
+      setText(''); images.forEach(x => { URL.revokeObjectURL(x.url); previewUrls.current.delete(x.url); }); setImages([]);
+    }
+    catch (e: any) { onError(e.message); }
   };
   const decide = (id: number, approve: boolean) => api('POST', `/api/messages/${id}/proposal`, { approve }).catch(e => onError(e.message));
   return (
@@ -377,7 +395,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
           // Your message, and under it the prompt Plexus turned it into (when that turn's log exists).
           if (m.author === 'user' && typeof m.meta?.promptChars === 'number') return (
             <div key={m.id} className="ask">
-              <div className="msg m-user"><div className="msg-text">{m.text}</div></div>
+              <div className="msg m-user"><div className="msg-text">{m.text}</div><MessageImages message={m} /></div>
               <PromptToggle url={`/api/messages/${m.id}/prompt`} chars={m.meta.promptChars as number} note={m.meta.promptResumed ? 'resumed' : 'new conversation'} />
             </div>
           );
@@ -389,6 +407,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
                 return a?.steps?.length ? <Steps steps={a.steps} /> : a?.tools.length ? <ToolGroup lines={toolLines(a.tools)} /> : null;
               })()}
               {m.author === 'coordinator' || m.author === 'agent' ? <Markdown className="msg-text" text={m.text} /> : <div className="msg-text">{m.text}</div>}
+              {m.author === 'user' && <MessageImages message={m} />}
               {Array.isArray(m.meta?.applied) && (m.meta!.applied as string[]).length > 0 && <div className="msg-applied">Applied: {(m.meta!.applied as string[]).join(', ')}</div>}
               {prop && (
                 <div className="proposal">
@@ -416,11 +435,15 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
         <JumpToEnd follow={follow} />
       </div>
       {plan &&<div className="agent-dock"><PlanCard items={plan} live={!!thinking} /></div>}
-      <div className="composer">
+      <div className="composer" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }} onDrop={e => { e.preventDefault(); addImages(Array.from(e.dataTransfer.files)); }}>
         {picking && <CoordinatorPicker o={opts} accounts={accounts} onClose={closePicker} />}
+        {!!images.length && <div className="chat-images">{images.map(x => <div className="chat-image" key={x.url}><img src={x.url} alt={x.file.name} /><button aria-label={`Remove ${x.file.name}`} onClick={() => { URL.revokeObjectURL(x.url); previewUrls.current.delete(x.url); setImages(old => old.filter(y => y !== x)); }}><Ic i={X} size={14} /></button></div>)}</div>}
         <textarea value={text} rows={3} placeholder="Message the coordinator" onChange={e => setText(e.target.value)}
+          onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); addImages(files); } }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
         <div className="composer-bar">
+          <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={e => { addImages(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+          <button aria-label="Attach images" title="Attach images" onClick={() => fileInput.current?.click()}><Ic i={Paperclip} size={16} /></button>
           <button className="coord-chip" aria-expanded={picking} onClick={() => setPicking(v => !v)} title="Choose the account, model and effort the coordinator uses">
             {opts.summary.state && <Dot state={opts.summary.state} />}
             <span className="coord-chip-acct">{opts.summary.account}</span>
@@ -428,11 +451,16 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
             {opts.summary.effort && <span className="coord-chip-effort">{opts.summary.effort}</span>}
             <Ic i={ChevronDown} size={14} />
           </button>
-          <button className="primary icon-send" disabled={!text.trim() || !sessionId} onClick={send} title="Send (Enter). Shift + Enter for a new line"><Ic i={ArrowUp} /></button>
+          <button className="primary icon-send" disabled={(!text.trim() && !images.length) || !sessionId} onClick={send} title="Send (Enter). Shift + Enter for a new line"><Ic i={ArrowUp} /></button>
         </div>
       </div>
     </div>
   );
+}
+
+function MessageImages({ message }: { message: ChatMessage }) {
+  const images = message.meta?.images as { id: string; name: string }[] | undefined;
+  return images?.length ? <div className="chat-images">{images.map(x => <a key={x.id} href={`/api/messages/${message.id}/images/${x.id}?token=${encodeURIComponent(token)}`} target="_blank" rel="noreferrer"><img src={`/api/messages/${message.id}/images/${x.id}?token=${encodeURIComponent(token)}`} alt={x.name} /></a>)}</div> : null;
 }
 
 // ---------------------------------------------------------------- sub-agent

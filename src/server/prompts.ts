@@ -286,6 +286,7 @@ export function buildCoordinatorPrompt(p: Project, status: StatusDigest, history
 /** The reply format and the actions, one per line (with the plexus tools any of them also goes through plexus_action). */
 function coordinatorOutput(tools: boolean): string {
   return `# OUTPUT
+When work depends on an image (matching a UI, fixing a screenshot, following a design), include its chat image id in the task action's optional "images" array. Omit it only if the image merely selected an option and the final choice is fully written in the description. If unsure, include it.
 End with ONLY one JSON object (no prose after it):
 { "reply": "your answer to the user", "actions": [ ... ], "proposal": null | { "summary": "what will change and why", "actions": [ ... ] } }
 "actions" are applied after your reply${tools ? '; do not repeat what you already did with the plexus tools' : ''}. Action types:

@@ -1,7 +1,7 @@
 // Coordinator chat sessions: isolation, unread marks, routing of system/agent notices, and CLI conversation resume.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,8 @@ const { startDaemon } = await import('../src/server/main.ts');
 const chat = await import('../src/server/chat.ts');
 const { postMessage } = await import('../src/server/projects.ts');
 const { createTask } = await import('../src/server/tasks.ts');
+const { taskImagePaths, sessionImages } = await import('../src/server/attachments.ts');
+const { mockAdapter } = await import('../src/server/adapters/mock.ts');
 
 async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms: number, label: string): Promise<T> {
   const end = Date.now() + ms;
@@ -79,6 +81,36 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 120_0
     assert.ok(inA.every((m: any) => m.sessionId === A) && inB.every((m: any) => m.sessionId === B));
     assert.ok(!inB.some((m: any) => /hello there|what now/.test(m.text)));
 
+    // An image-only message is stored outside the repo and exposed through its authenticated URL.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lZkAAAAASUVORK5CYII=';
+    await call('POST', `/api/projects/${p.id}/messages`, { text: '', sessionId: B, images: [{ name: 'screen.png', mime: 'image/png', dataBase64: png }] });
+    await replies(B, 2);
+    const imageMessage = (await call('GET', `/api/projects/${p.id}/messages?session=${B}`)).find((m: any) => m.author === 'user' && m.meta?.images?.length);
+    const image = imageMessage.meta.images[0];
+    assert.equal(image.name, 'screen.png');
+    assert.ok(existsSync(image.path));
+    const served = await fetch(`http://127.0.0.1:${d.port}/api/messages/${imageMessage.id}/images/${image.id}`, { headers: { 'x-plexus-token': d.token } });
+    assert.equal(served.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), readFileSync(image.path));
+    await assert.rejects(call('POST', `/api/projects/${p.id}/messages`, { text: 'bad', sessionId: B, images: [{ name: 'fake.png', mime: 'image/png', dataBase64: Buffer.from('not a png').toString('base64') }] }), /image content does not match mime type/);
+
+    // A chat task gets its own copy and the worker passes that path to its adapter.
+    const seen: string[][] = [];
+    const originalRun = mockAdapter.run.bind(mockAdapter);
+    mockAdapter.run = async spec => { if (spec.images?.length) seen.push(spec.images); return originalRun(spec); };
+    const beforeTasks = (await call('GET', `/api/projects/${p.id}`)).tasks.length;
+    const rejected = await call('POST', `/api/projects/${p.id}/actions`, { sessionId: B, actions: [{ type: 'solo_task', title: 'Bad image', description: '', images: ['missing'] }] });
+    assert.match(rejected.applied[0], /unknown image/);
+    assert.equal((await call('GET', `/api/projects/${p.id}`)).tasks.length, beforeTasks);
+    const applied = await call('POST', `/api/projects/${p.id}/actions`, { sessionId: B, actions: [{ type: 'solo_task', title: 'Inspect screenshot', description: 'Use screenshot', images: [image.id] }] });
+    assert.match(applied.applied[0], /started/);
+    const taskWithImage = (await call('GET', `/api/projects/${p.id}`)).tasks.find((t: any) => t.title === 'Inspect screenshot');
+    const copied = taskImagePaths(taskWithImage.id)[0];
+    assert.ok(copied && copied !== image.path && existsSync(copied));
+    await waitFor(() => Promise.resolve(seen.length ? seen[0] : null), 30_000, 'task image RunSpec');
+    assert.deepEqual(seen[0], [copied]);
+    mockAdapter.run = originalRun;
+
     // Notices raise an unread mark on the session they belong to, and only there; opening it clears the mark.
     const unread = async () => Object.fromEntries((await call('GET', `/api/projects/${p.id}/chat-sessions`)).map((s: any) => [s.id, s.unread]));
     await call('POST', `/api/chat-sessions/${A}/read`);
@@ -119,6 +151,8 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 120_0
     // Rename / archive / delete; the last chat cannot be deleted.
     assert.equal((await call('PATCH', `/api/chat-sessions/${B}`, { title: 'Ideas' })).title, 'Ideas');
     await call('DELETE', `/api/chat-sessions/${B}`);
+    assert.ok(!existsSync(sessionImages(B)));
+    assert.ok(existsSync(copied));
     assert.ok(!(await call('GET', `/api/projects/${p.id}/messages`)).some((m: any) => m.sessionId === B));
     sessions = await call('GET', `/api/projects/${p.id}/chat-sessions`);
     assert.deepEqual(sessions.map((s: any) => s.id), [A]);

@@ -274,3 +274,16 @@ export async function mergeDetached(repo: string, wt: string, base: string, bran
   await git(wt, 'merge', '--abort');
   return { ok: false, conflict, detail: (r.stdout + r.stderr).slice(0, 2000) };
 }
+
+/**
+ * Three-way merge of two commits without any worktree (`git merge-tree`, their merge base found by git). Clean: a merge
+ * commit (parents `ours`, `theirs`) no ref points to yet. Conflicting: the files with conflicts, nothing created.
+ */
+export async function mergeTrees(repo: string, ours: string, theirs: string, message: string): Promise<{ ok: boolean; commit?: string; conflicts: string[] }> {
+  const r = await gitBuf(repo, ['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', ours, theirs]);
+  if (r.code !== 0 && r.code !== 1) throw new Error(`git merge-tree failed: ${r.stderr}`);
+  const [tree, ...rest] = r.stdout.toString('utf8').split('\0').filter(Boolean);
+  if (r.code === 1) return { ok: false, conflicts: [...new Set(rest)] };
+  const commit = await gitOk(repo, ...identity(), 'commit-tree', tree, '-p', ours, '-p', theirs, '-m', message);
+  return { ok: true, commit, conflicts: [] };
+}

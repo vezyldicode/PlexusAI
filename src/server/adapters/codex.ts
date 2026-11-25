@@ -49,6 +49,8 @@ export function codexThreadId(stdout: string): string | undefined {
   return undefined;
 }
 
+export const codexImageArgs = (images: string[] = []): string[] => images.flatMap(path => ['-i', path]);
+
 export interface CodexRunAnalysis extends Classification { finalText: string; usage?: Record<string, number> }
 
 /** Classify a `codex exec --json` run. Limit texts taken from the Codex 0.157 binary. */
@@ -112,11 +114,12 @@ export const codexAdapter: ProviderAdapter = {
     args.push(...codexMcpOverrides(spec));
     if (spec.autocompact && spec.autocompact > 0) args.push('-c', `model_auto_compact_token_limit=${Math.floor(spec.autocompact)}`);
     if (spec.resumeId) args.push(spec.resumeId);
+    args.push(...codexImageArgs(spec.images));
     args.push('-');
     const since = Date.now();
     const timer = createRunTimer('codex', since);
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: withSystem(spec) + (spec.images?.length ? `\n\nAttached images: ${spec.images.join(', ')}` : ''), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },

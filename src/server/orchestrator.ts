@@ -12,10 +12,11 @@ import {
 import { getRole } from './roles.ts';
 import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask, USER_FOLLOW_UP } from './tasks.ts';
 import { changedLines, git, hasCommitsAhead, removeWorktree } from './util/git.ts';
-import { baseRef, commitsSince, conflictNotice, mergeIntoBase, prepareProjectRepo, type MergeOutcome } from './checkout.ts';
+import { baseRef, commitsSince, conflictNotice, FOLDER_SYNC_BRANCH, mergeIntoBase, onFolderConflict, prepareProjectRepo, type MergeOutcome, type SyncResult } from './checkout.ts';
 import { CONTEXT_DIR } from './context.ts';
 import { running, runAttempt, writesCode, type AttemptOutcome } from './worker.ts';
 import { appConfig } from './config.ts';
+import { copyTaskImages, validateTaskImages } from './attachments.ts';
 
 const UNAVAILABLE = new Set(['limited', 'transient', 'needs_login', 'blocked', 'disabled']);
 const INDEPENDENT_KINDS = new Set(['review', 'evaluate']);
@@ -107,6 +108,8 @@ export class Orchestrator {
   /** Fixed interval for tests; otherwise Settings → Scheduler, read before every pass. */
   private intervalMs: number | null = null;
   private stopped = false;
+
+  constructor() { onFolderConflict((p, r) => this.folderConflict(p, r)); }
 
   private loop() {
     if (this.stopped) return;
@@ -240,18 +243,21 @@ export class Orchestrator {
    * More work for the agent that did `id`: a new task that continues its CLI conversation in the same worktree path
    * (a lane), so the agent does not re-read the project. Code-writing kinds continue as single-agent work.
    */
-  continueTask(id: string, instructions: string, title = '', sessionId?: string | null, fromUser = false): Task {
+  continueTask(id: string, instructions: string, title = '', sessionId?: string | null, fromUser = false, images?: string[]): Task {
     const prev = getTask(id);
     if (!prev) throw new Error('no such task');
+    validateTaskImages(sessionId, images);
     if (ACTIVE.includes(prev.status) && prev.status !== 'blocked') {
       // Still running or queued: the instructions go to its inbox instead.
-      return this.sendMessage(prev.id, instructions);
+      const copied = copyTaskImages(sessionId, images, prev.id);
+      return this.sendMessage(prev.id, [instructions, copied.length ? `Attached images: ${copied.join(', ')}` : ''].filter(Boolean).join('\n'));
     }
     const t = createTask(prev.projectId, {
       title: title || `${fromUser ? USER_FOLLOW_UP : 'Continue '}${shortId(prev)}: ${instructions.split('\n')[0].slice(0, 60)}`, description: instructions,
       role: 'solo', kind: 'solo', priority: 80, adhoc: true, originSessionId: sessionId ?? prev.originSessionId, laneFrom: prev,
       paths: prev.paths, pinnedAccountId: prev.pinnedAccountId,
     });
+    copyTaskImages(sessionId, images, t.id);
     // The model and effort chosen for that agent carry over to its continuation.
     if (Object.keys(prev.models).length || Object.keys(prev.efforts).length) updateTask(t.id, { models: prev.models, efforts: prev.efforts }, true);
     void this.tick();
@@ -287,10 +293,36 @@ export class Orchestrator {
     return true;
   }
 
-  /** A merge landed on the base but could not be written into the project folder (the user edits those files). */
+  /**
+   * A merge landed on the base but the folder did not receive it yet. A conflict with the folder already has its own
+   * notice and integrator task (folderConflict); a write that raced with the user's typing is retried by itself.
+   */
   private reportSync(p: Project, r: MergeOutcome, t?: Task) {
-    // With the task id the notice goes to the chat the request came from, next to the task's "finished" message.
-    if (r.ok && r.sync && !r.sync.ok) postMessage(p.id, 'system', conflictNotice(r.sync), { level: 'attention', ...(t ? { taskId: t.id } : {}) });
+    if (r.ok && r.sync && !r.sync.ok && r.sync.busy) bus.emitEvent('checkout.busy', p.id, { task: t?.id ?? null, files: r.sync.conflicts.slice(0, 20) });
+  }
+
+  /**
+   * The project folder and the base changed the same lines: an integrator merges the base into the folder's snapshot
+   * (branch FOLDER_SYNC_BRANCH); its merge then reaches the folder like any task's. One such task at a time: edits made
+   * while it runs are taken in by the reconcile after it lands.
+   */
+  async folderConflict(p: Project, r: SyncResult) {
+    if (!r.folder) return;
+    const mine = listTasks(p.id).filter(x => x.branch === FOLDER_SYNC_BRANCH);
+    if (mine.some(x => !['done', 'failed', 'cancelled'].includes(x.status))) return;
+    // A branch left by an earlier attempt (failed or cancelled) restarts at the folder as it is now.
+    for (const x of mine) if (x.worktree) await removeWorktree(p.path, x.worktree).catch(() => {});
+    await git(p.path, 'branch', '-f', FOLDER_SYNC_BRANCH, r.folder);
+    const base = baseRef(p);
+    const t = createTask(p.id, {
+      title: "Merge your folder edits with Plexus's finished work", role: 'integrator', kind: 'integrate', adhoc: true,
+      branch: FOLDER_SYNC_BRANCH, priority: 99, paths: r.conflicts,
+      description: `Branch ${FOLDER_SYNC_BRANCH} is the project folder exactly as the user has it now (their edits, committed or not). ` +
+        `Plexus's finished work on ${base} changes the same lines in: ${r.conflicts.slice(0, 40).join(', ')}.\n` +
+        `Merge ${base} into this branch (\`git merge ${base}\`), resolve every conflict keeping the intent of both sides ` +
+        `(the user's edits are the newer ones), run the typecheck and tests, and commit. Plexus then writes the result into the project folder.`,
+    });
+    postMessage(p.id, 'system', `${conflictNotice(r)} (${shortId(t)})`, { level: 'attention', taskId: t.id });
   }
 
   /** Merge a branch the coordinator worked on (its own worktree) through the same queue as task merges. */
@@ -515,6 +547,7 @@ export class Orchestrator {
         await this.finishNonCodeKeepWorktree(t);
         const target = t.parentId ? getTask(t.parentId) : null;
         if (target) await this.merge(p, target);
+        else if (t.branch === FOLDER_SYNC_BRANCH) await this.merge(p, getTask(t.id)!); // the folder's merge lands on the base
         break;
       }
       case 'evaluate': await this.onEvaluate(p, t, r); break;
@@ -789,7 +822,7 @@ export class Orchestrator {
     }
     setStatus(t.id, 'in_review', { error: 'merge conflict' });
     createTask(p.id, {
-      title: `Resolve merge conflicts for ${shortId(t)}`, role: 'integrator', kind: 'integrate', parentId: t.id,
+      title: `Resolve merge conflicts for ${shortId(t)}`, role: 'integrator', kind: 'integrate', parentId: t.id, adhoc: t.adhoc,
       branch: t.branch, worktree: t.worktree, priority: 98, paths: t.paths,
       description: `Branch ${t.branch} conflicts with ${baseRef(p)}:\n${r.detail.slice(0, 1500)}`,
       lastAccountId: t.authorAccountId, // the author's conversation knows this branch best

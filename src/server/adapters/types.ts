@@ -13,6 +13,7 @@ export interface Classification {
 }
 
 export interface RunSpec {
+  images?: string[];
   account: Account;
   cwd: string;
   prompt: string;

@@ -7,7 +7,11 @@ import { join } from 'node:path';
 
 process.env.PLEXUS_HOME = mkdtempSync(join(tmpdir(), 'plexus-unit-'));
 
-const { classifyCodexRun } = await import('../src/server/adapters/codex.ts');
+const { classifyCodexRun, codexImageArgs } = await import('../src/server/adapters/codex.ts');
+
+test('Codex image arguments work for initial and resumed prompts', () => {
+  assert.deepEqual(codexImageArgs(['/one.png', '/two.jpg']), ['-i', '/one.png', '-i', '/two.jpg']);
+});
 const { classifyClaudeRun } = await import('../src/server/adapters/claude-limits.ts');
 const { ensureRepo } = await import('../src/server/util/git.ts');
 const { pickAccount } = await import('../src/server/orchestrator.ts');

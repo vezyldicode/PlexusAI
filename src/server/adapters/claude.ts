@@ -92,7 +92,7 @@ export const claudeAdapter: ProviderAdapter = {
     args.push('--dangerously-skip-permissions');
     const timer = createRunTimer('claude');
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: spec.prompt + (spec.images?.length ? `\n\nAttached images (open each with the Read tool):\n${spec.images.join('\n')}` : ''), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); for (const d of describeClaudeEvents(line)) spec.onEvent?.(d); },

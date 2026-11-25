@@ -32,6 +32,7 @@ import { appConfig, configOverrides, projectDefaults, updateConfig, updateProjec
 import { DEFAULT_APP_CONFIG, CONFIG_BOUNDS } from '../shared/config.ts';
 import { DEFAULT_PROJECT_SETTINGS } from '../shared/types.ts';
 import { chooseFolder } from './folder-picker.ts';
+import { saveImages } from './attachments.ts';
 import { completeOnboarding, loginStatus, onboardingState, openInstall, setupChecks, INSTALL_COMMANDS, type InstallTool } from './setup.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
@@ -78,7 +79,7 @@ function runEvents(run: Run): { kind: string; text: string }[] {
 }
 
 export async function buildApi(token: string, hooks: { shutdown: () => Promise<void>; chooseFolder?: () => Promise<string | null> } = { shutdown: async () => {} }): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: 50 * 1024 * 1024 });
+  const app = Fastify({ logger: false, bodyLimit: 75 * 1024 * 1024 });
   await app.register(websocket);
   // Accept empty JSON bodies (POST /start etc. are sent with a JSON content type and no body).
   app.removeContentTypeParser('application/json');
@@ -266,12 +267,19 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   });
   app.post('/api/projects/:id/messages', async (req, reply) => {
     const text = String(body(req).text ?? '').trim();
-    if (!text) throw new Error('empty message');
     mustProject(id(req));
     const sid = body(req).sessionId ? String(body(req).sessionId) : defaultSession(id(req)).id;
     if (mustSession(sid).projectId !== id(req)) throw new Error('chat session belongs to another project');
-    void handleChat(id(req), text, sid).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
+    const images = saveImages(sid, body(req).images);
+    if (!text && !images.length) throw new Error('empty message');
+    void handleChat(id(req), text, sid, images).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
     return reply.code(202).send({ ok: true });
+  });
+  app.get('/api/messages/:id/images/:imageId', async (req, reply) => {
+    const m = getMessage(Number(id(req)));
+    const image = (m?.meta?.images as { id: string; mime: string; path: string }[] | undefined)?.find(x => x.id === (req.params as any).imageId);
+    if (!image || !existsSync(image.path)) return reply.code(404).send({ error: 'image not found' });
+    return reply.type(image.mime).send(readFileSync(image.path));
   });
   app.post('/api/messages/:id/proposal', async req => ({ applied: resolveProposal(Number(id(req)), !!body(req).approve) }));
   // The prompt Plexus sent to the coordinator for this chat message (the last attempt of that turn).
