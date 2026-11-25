@@ -13,7 +13,7 @@ import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
 import { appRoot, ensure, paths } from './paths.ts';
 import {
-  appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
+  appendMemory, folderProblem, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
 } from './projects.ts';
 import { buildCoordinatorPrompt, buildCoordinatorSystem, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
@@ -361,6 +361,8 @@ export function coordinatorMcp(projectId: string, sessionId: string): McpServerS
 async function answer(projectId: string, sessionId: string, userMsgId: number, text: string, images: ImageRef[] = []): Promise<void> {
   const p = mustProject(projectId);
   const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
+  const missing = folderProblem(p);
+  if (missing) { say('system', missing, { level: 'attention' }); return; }
   const { role, accounts, pinnedId, pinned, account, model, effort } = coordinatorTarget(p);
   if (pinnedId && !pinned && account) {
     const a = accounts.find(x => x.id === pinnedId);

@@ -15,7 +15,7 @@ import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
 import {
-  createProject, deleteProject, getMessage, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
+  createProject, deleteProject, folderProblem, getMessage, moveProject, postMessage, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
   updateProject, writeMemory,
 } from './projects.ts';
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
@@ -146,7 +146,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   // ---- projects
   app.post('/api/folder-picker', async () => ({ path: await (hooks.chooseFolder ?? chooseFolder)() }));
   // Both loads read the folder's branch first, so a reload shows the branch that is checked out now.
-  app.get('/api/projects', async () => { for (const p of listProjects()) syncBranch(p.id); return listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })); });
+  app.get('/api/projects', async () => { for (const p of listProjects()) syncBranch(p.id); return listProjects().map(p => ({ ...p, counts: countByStatus(p.id), folderMissing: !!folderProblem(p) })); });
   app.post('/api/projects', async req => {
     const b = body(req);
     if (!b.path) throw new Error('path is required');
@@ -182,6 +182,16 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.patch('/api/config', async req => { updateConfig(body(req)); return configView(); });
   app.patch('/api/config/project-defaults', async req => { updateProjectDefaults(body(req)); return configView(); });
   app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); unwatchBranch(id(req)); deleteProject(id(req)); return { ok: true }; });
+  // Point the project at another folder (Edit project in the sidebar). Same project, same history: only the path changes.
+  app.post('/api/projects/:id/folder', async req => {
+    const r = moveProject(id(req), String(body(req).path ?? ''));
+    if (r.from === r.project.path) return r;
+    syncBranch(r.project.id);
+    const memory = r.memory === 'copied' ? ' Memory (.plexus) was copied from the old folder.'
+      : r.memory === 'not_found' ? ' The old folder is gone, so its memory (.plexus) could not be copied; the new folder starts with the goal only.' : '';
+    postMessage(r.project.id, 'system', `Project folder changed from ${r.from} to ${r.project.path}.${memory} The coordinator starts a fresh conversation in the new folder.`);
+    return { ...r, project: mustProject(r.project.id) };
+  });
   // Open the project folder in the system file manager (the daemon runs on the user's own machine).
   app.post('/api/projects/:id/reveal', async req => {
     const p = mustProject(id(req));

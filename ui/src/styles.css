@@ -154,10 +154,9 @@ body.resizing .net { pointer-events: none; }
 .nav-row.active .nav-ic { color: var(--text-2); }
 .nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-meta { font-size: 12px; color: var(--muted); flex: none; }
+.nav-meta.missing { color: var(--warn); }
 
 .nav-row.menu-open { background: var(--card); color: var(--text); }
-.nav-row.editing { padding: 0 4px 0 8px; background: var(--card); border-color: var(--line); }
-.nav-input { height: 26px; padding: 0 6px; margin: 0; }
 
 /* collapsed sidebar: one column of icons */
 .rail { align-items: center; padding-bottom: 12px; }
@@ -659,6 +658,16 @@ textarea.tall { min-height: 320px; font-family: var(--mono); font-size: 13px; }
 .dialog { width: min(520px, 92vw); padding: 24px; border-radius: 16px; background: var(--card); border: 1px solid var(--line-strong); animation: rise 300ms var(--ease); }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .dialog-head h2 { margin: 0; }
+
+/* Edit project: the folder change asks first */
+.field-hint { margin: 8px 0 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.field-hint.warn { color: var(--warn); }
+.move-paths { display: grid; grid-template-columns: 40px 1fr; gap: 4px 12px; margin: 16px 0; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.move-paths dt { font-size: 12px; color: var(--muted); }
+.move-paths dd { margin: 0; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.move-gone { margin-left: 8px; font-family: var(--sans); color: var(--warn); }
+.dialog-points { margin: 0; padding-left: 16px; display: grid; gap: 8px; font-size: 13px; color: var(--text-2); }
+.callout.warn { margin: 16px 0 4px; padding: 8px 12px; border-left: 2px solid var(--warn); border-radius: 0 8px 8px 0; background: rgba(214, 162, 74, 0.08); font-size: 13px; color: var(--text); }
 .drawer { width: min(860px, 92vw); height: 100%; overflow: auto; padding: 24px; background: var(--card); border-left: 1px solid var(--line-strong); }
 
 /* ---------------------------------------------------------------- narrow windows */

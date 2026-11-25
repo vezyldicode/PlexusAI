@@ -131,6 +131,8 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  /** Set by the project list when `path` is gone (moved, renamed, deleted): the sidebar marks it. */
+  folderMissing?: boolean;
   goal: string;
   status: ProjectStatus;
   phase: string;
