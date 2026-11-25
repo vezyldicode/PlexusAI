@@ -24,6 +24,8 @@ interface Props {
   onExpand: () => void;
   onProject: (id: string) => void;
   onNew: () => void;
+  /** Open the Edit project dialog (name and folder). */
+  onEdit: (p: Project) => void;
   onSettings: (tab?: 'accounts') => void;
   reloadProjects: () => void;
   reloadAccounts: () => void;
@@ -33,38 +35,31 @@ interface Props {
 }
 
 
-/** Right-click menu on a project: rename in place, open its folder, copy the path, remove it from Plexus. */
-function useProjectMenu(reload: () => void, onError: (e: string) => void, beforeRename: () => void) {
+/** Right-click menu on a project: edit (name and folder), open its folder, copy the path, remove it from Plexus. */
+function useProjectMenu(reload: () => void, onError: (e: string) => void, onEdit: (p: Project) => void) {
   const [menu, setMenu] = useState<{ x: number; y: number; p: Project } | null>(null);
-  const [renaming, setRenaming] = useState<string | null>(null);
   const items = (p: Project): MenuItem[] => [
-    { label: 'Rename', icon: Pencil, onSelect: () => { beforeRename(); setRenaming(p.id); } },
-    { label: 'Open folder', icon: FolderOpen, onSelect: () => void api('POST', `/api/projects/${p.id}/reveal`).catch(e => onError(e.message)) },
+    { label: 'Edit project…', icon: Pencil, onSelect: () => onEdit(p) },
+    { label: 'Open folder', icon: FolderOpen, disabled: p.folderMissing, onSelect: () => void api('POST', `/api/projects/${p.id}/reveal`).catch(e => onError(e.message)) },
     { label: 'Copy path', icon: Copy, onSelect: () => void navigator.clipboard?.writeText(p.path).catch(() => onError('Could not copy to the clipboard')) },
     { label: 'Remove from Plexus', icon: Trash2, danger: true, onSelect: () => {
       if (confirm(`Remove ${p.name} from Plexus?\n\nIts tasks, chats and history are deleted. The files in ${p.path} stay on disk.`))
         void api('DELETE', `/api/projects/${p.id}`).then(reload).catch(e => onError(e.message));
     } },
   ];
-  const rename = (p: Project, name: string) => {
-    setRenaming(null);
-    const n = name.trim();
-    if (n && n !== p.name) void api('PATCH', `/api/projects/${p.id}`, { name: n }).then(reload).catch(e => onError(e.message));
-  };
   const bind = (p: Project) => ({
     onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, p }); },
     onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => {
       if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); setMenu({ x: r.left + 16, y: r.bottom, p }); }
-      if (e.key === 'F2') { e.preventDefault(); beforeRename(); setRenaming(p.id); }
+      if (e.key === 'F2') { e.preventDefault(); onEdit(p); }
     },
   });
   const node = menu && <ContextMenu x={menu.x} y={menu.y} items={items(menu.p)} onClose={() => setMenu(null)} />;
-  return { bind, node, renaming, rename, cancelRename: () => setRenaming(null), startRename: setRenaming, menuFor: menu?.p.id };
+  return { bind, node, menuFor: menu?.p.id };
 }
 
 export function Sidebar(p: Props) {
-  // Renaming happens in the full sidebar, so a rename picked from the rail opens it first.
-  const pm = useProjectMenu(p.reloadProjects, p.onError, () => { if (p.collapsed) p.onExpand(); });
+  const pm = useProjectMenu(p.reloadProjects, p.onError, p.onEdit);
   const [refresh, setRefresh] = useState<{ busy: boolean; note: string }>({ busy: false, note: '' });
   /** Re-probe every enabled account (state + 5h/weekly quota) on the daemon, then reload accounts and projects. */
   const refreshAll = async () => {
@@ -89,7 +84,7 @@ export function Sidebar(p: Props) {
       <button className="rail-brand" title="Expand sidebar" aria-label="Expand sidebar" onClick={p.onExpand}><Mark size={18} /></button>
       <div className="rail-list">
         {p.projects.map(pr => (
-          <button key={pr.id} className={`rail-btn ${p.selected === pr.id ? 'active' : ''} ${pm.menuFor === pr.id ? 'menu-open' : ''}`} title={`${pr.name}\n${pr.path}`} aria-label={pr.name}
+          <button key={pr.id} className={`rail-btn ${p.selected === pr.id ? 'active' : ''} ${pm.menuFor === pr.id ? 'menu-open' : ''}`} title={`${pr.name}\n${pr.folderMissing ? `Folder not found: ${pr.path}` : pr.path}`} aria-label={pr.name}
             onClick={() => p.onProject(pr.id)} {...pm.bind(pr)}>
             <span className="rail-initial">{pr.name.trim().charAt(0).toUpperCase() || '?'}</span>
             <Dot state={pr.status} />
@@ -120,19 +115,13 @@ export function Sidebar(p: Props) {
       <div className="side-group projects">
         <div className="side-label">Projects <button className="icon-btn" title="New project" onClick={p.onNew}><Ic i={Plus} /></button></div>
         <div className="project-list">
-          {p.projects.map(pr => pm.renaming === pr.id ? (
-            <div key={pr.id} className="nav-row editing">
-              <span className="nav-ic"><Dot state={pr.status} /></span>
-              <input className="nav-input" autoFocus defaultValue={pr.name} aria-label="Project name" onFocus={e => e.currentTarget.select()}
-                onBlur={e => pm.rename(pr, e.currentTarget.value)}
-                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') pm.cancelRename(); }} />
-            </div>
-          ) : (
-            <button key={pr.id} className={`nav-row ${p.selected === pr.id ? 'active' : ''} ${pm.menuFor === pr.id ? 'menu-open' : ''}`} onClick={() => p.onProject(pr.id)} title={pr.path}
-              onDoubleClick={() => pm.startRename(pr.id)} {...pm.bind(pr)}>
+          {p.projects.map(pr => (
+            <button key={pr.id} className={`nav-row ${p.selected === pr.id ? 'active' : ''} ${pm.menuFor === pr.id ? 'menu-open' : ''}`} onClick={() => p.onProject(pr.id)}
+              title={pr.folderMissing ? `Folder not found: ${pr.path}\nRight-click → Edit project to point it at its new location` : pr.path}
+              onDoubleClick={() => p.onEdit(pr)} {...pm.bind(pr)}>
               <span className="nav-ic"><Dot state={pr.status} /></span>
               <span className="nav-text">{pr.name}</span>
-              <span className="nav-meta">{pr.phase}</span>
+              {pr.folderMissing ? <span className="nav-meta missing">folder missing</span> : <span className="nav-meta">{pr.phase}</span>}
             </button>
           ))}
           {!p.projects.length && <div className="side-empty">No projects yet</div>}

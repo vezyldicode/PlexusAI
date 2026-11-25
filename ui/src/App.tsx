@@ -6,7 +6,8 @@ import { ChatPanel } from './components/ChatPanel.tsx';
 import { NetworkView } from './network/NetworkView.tsx';
 import { COORDINATOR } from './network/layout.ts';
 import { ActivityView, MemoryView, ProjectHeader, ReportView, StatusView, TasksView, VIEWS, type View } from './views.tsx';
-import { NewProjectDialog } from './pages.tsx';
+import { EditProjectDialog, NewProjectDialog } from './pages.tsx';
+import type { Project } from './types.ts';
 import { SettingsDialog, type SettingsTab } from './settings.tsx';
 import { Empty, Ic } from './ui.tsx';
 import { Resizer, clamp, useMedia, useStored } from './layout.tsx';
@@ -31,6 +32,8 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(() => stored('plexus.project'));
   const [view, setView] = useState<View>(() => (VIEWS as string[]).includes(stored('plexus.view') ?? '') ? stored('plexus.view') as View : 'network');
   const [showNew, setShowNew] = useState(false);
+  // The project in the Edit project dialog, by id so a reload of the list keeps it current.
+  const [editing, setEditing] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsTab | null>(null);
   const [tabs, setTabs] = useState<string[]>([]);
   const [active, setActive] = useState<string>(COORDINATOR);
@@ -115,12 +118,13 @@ export default function App() {
     return () => removeEventListener('keydown', key);
   }, [peek]);
 
+  const editingProject = editing ? s.projects.find(x => x.id === editing) ?? null : null;
   const isRail = tiny ? !tinyOpen : collapsed;
   const leftPeek = collapsed && !tiny && leftHover;
   const sideProps = {
     projects: s.projects, accounts: s.accounts, connected: s.connected, selected,
     onMouseEnter: leftHoverIn, onMouseLeave: leftHoverOut, onCollapse: collapse, onExpand: expand,
-    onProject: (id: string) => { setSelected(id); setTinyOpen(false); }, onNew: () => setShowNew(true),
+    onProject: (id: string) => { setSelected(id); setTinyOpen(false); }, onNew: () => setShowNew(true), onEdit: (pr: Project) => { setEditing(pr.id); setTinyOpen(false); },
     onSettings: (t?: SettingsTab) => { setSettings(t ?? 'accounts'); setTinyOpen(false); },
     reloadProjects: s.loadProjects, reloadAccounts: s.loadAccounts, onError: s.setError,
   };
@@ -169,6 +173,7 @@ export default function App() {
           resizer={<Resizer side="left" width={rw} min={RIGHT.min} max={RIGHT.max} onWidth={setRightW} onReset={() => setRightW(RIGHT.def)} label="Resize chat" />} />
       )}
       {showNew && <NewProjectDialog onClose={() => setShowNew(false)} onCreated={id => { setShowNew(false); setSelected(id); s.loadProjects(); }} onError={s.setError} />}
+      {editingProject && <EditProjectDialog project={editingProject} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); void s.loadProjects(); s.loadDetail(); }} onError={s.setError} />}
       {settings && <SettingsDialog tab={settings} onTab={setSettings} onClose={() => setSettings(null)} accounts={s.accounts} reloadAccounts={s.loadAccounts} onError={s.setError}
         project={d?.project ?? null} reloadProject={() => { s.loadDetail(); void s.loadProjects(); }} onRunSetup={() => { setSettings(null); setShowSetup(true); }} />}
       {showSetup && <Onboarding accounts={s.accounts} reloadAccounts={s.loadAccounts} onDone={finishSetup} onError={s.setError} />}

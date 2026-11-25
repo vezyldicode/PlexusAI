@@ -6,7 +6,7 @@ import { setControlSession } from './chat.ts';
 import { getDb, now } from './db.ts';
 import { bus } from './events.ts';
 import {
-  appendIssues, appendMemory, getProject, listProjects, mustProject, parseDecisions, postMessage, readAcceptance, readMemory, recordDecision, replaceDecisions,
+  appendIssues, appendMemory, folderProblem, getProject, mustFolder, listProjects, mustProject, parseDecisions, postMessage, readAcceptance, readMemory, recordDecision, replaceDecisions,
   setProjectStatus, plexusDir, updateProject, writeAcceptance, writeMemory,
 } from './projects.ts';
 import { getRole } from './roles.ts';
@@ -143,6 +143,7 @@ export class Orchestrator {
   async startProject(id: string, sessionId?: string | null): Promise<Project> {
     setControlSession(id, sessionId);
     let p = mustProject(id);
+    mustFolder(p);
     const repo = await prepareProjectRepo(p);
     if (repo.notice) postMessage(id, 'system', repo.notice, { level: 'attention' });
     p = updateProject(id, { mainBranch: repo.mainBranch });
@@ -197,6 +198,7 @@ export class Orchestrator {
   resume(id: string, sessionId?: string | null) {
     setControlSession(id, sessionId);
     const p = mustProject(id);
+    mustFolder(p);
     if (p.phase === 'new' || p.phase === 'needs_input' || !listTasks(id).some(t => !t.adhoc)) return this.startProject(id, sessionId);
     // Plexus stopped to ask (gaps that made no progress, or a blocked task): the user answered, continue from there.
     if (p.phase === 'waiting') { this.continueAfterWait(p); return; }
@@ -345,6 +347,15 @@ export class Orchestrator {
     try {
       releaseCooldowns();
       for (const p of listProjects()) {
+        // No folder, no agent can start there: a running pipeline pauses once with the reason, chat requests wait.
+        const missing = folderProblem(p);
+        if (missing) {
+          if (p.status === 'running') {
+            setProjectStatus(p.id, 'paused');
+            postMessage(p.id, 'system', `Paused: ${missing}`, { level: 'attention' });
+          }
+          continue;
+        }
         if (p.status === 'running') {
           await this.advance(p.id);
           this.schedule(mustProject(p.id));

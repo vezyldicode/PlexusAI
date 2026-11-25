@@ -68,6 +68,13 @@ export function systemArgs(spec: Pick<RunSpec, 'system' | 'resumeId' | 'systemOn
   return spec.system && (!spec.resumeId || spec.systemOnResume) ? ['--append-system-prompt', spec.system, '--exclude-dynamic-system-prompt-sections'] : [];
 }
 
+/**
+ * Claude Code adds a `Co-Authored-By: Claude …` trailer to the commits it makes (and a "Generated with Claude Code" line
+ * to PRs), which GitHub shows as a second author. Commits made through Plexus carry only Plexus's identity
+ * (gitIdentityEnv), so both are turned off: `attribution` on current CLIs, `includeCoAuthoredBy` on older ones.
+ */
+export const NO_ATTRIBUTION = { attribution: { commit: '', pr: '' }, includeCoAuthoredBy: false } as const;
+
 export const claudeAdapter: ProviderAdapter = {
   provider: 'claude',
 
@@ -89,6 +96,7 @@ export const claudeAdapter: ProviderAdapter = {
     if (mcp) args.push('--mcp-config', mcp);
     args.push('--strict-mcp-config');
     if (spec.autocompact && spec.autocompact >= 100_000) args.push('--autocompact', String(spec.autocompact));
+    args.push('--settings', JSON.stringify(NO_ATTRIBUTION));
     args.push('--dangerously-skip-permissions');
     const timer = createRunTimer('claude');
     const r = await runStreaming({

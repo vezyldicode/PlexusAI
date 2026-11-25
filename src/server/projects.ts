@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync, renameSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DEFAULT_PROJECT_SETTINGS, type ChatMessage, type Decision, type Project, type ProjectSettings, type ProjectStatus } from '../shared/types.ts';
@@ -31,6 +31,24 @@ export function mustProject(id: string): Project {
   return p;
 }
 
+/**
+ * Why the project's folder cannot be worked in, or null when it is there. Agents run with the folder as their working
+ * directory: a missing one makes the CLI fail to start with nothing in its log, so callers check first and say this instead.
+ */
+export function folderProblem(p: Pick<Project, 'path'>): string | null {
+  try {
+    if (statSync(p.path).isDirectory()) return null;
+    return `The project folder ${p.path} is a file, not a folder. Right-click the project in the sidebar and choose Edit project to pick the right folder.`;
+  } catch {
+    return `The project folder ${p.path} no longer exists (moved, renamed or deleted). Right-click the project in the sidebar and choose Edit project to point it at its new location.`;
+  }
+}
+
+export function mustFolder(p: Pick<Project, 'path'>): void {
+  const why = folderProblem(p);
+  if (why) throw new Error(why);
+}
+
 export function createProject(input: { path: string; name?: string; goal?: string; settings?: Partial<ProjectSettings> }): Project {
   const path = resolve(input.path);
   if (!existsSync(path)) mkdirSync(path, { recursive: true });
@@ -58,6 +76,43 @@ export function updateProject(id: string, patch: Partial<Pick<Project, 'name' | 
   const out = mustProject(id);
   bus.emitEvent('project.updated', id, out, patch.phase !== undefined && patch.phase !== p.phase);
   return out;
+}
+
+export interface MoveResult { project: Project; from: string; memory: 'kept' | 'copied' | 'not_found' }
+
+/**
+ * Point a project at another folder. Everything Plexus keeps (tasks, chats, history, settings) stays with the project.
+ * Memory lives in the folder (.plexus): when the new folder has none, the old folder's is copied over if it still exists.
+ * The coordinator's CLI conversations are forgotten, since they belong to the old working folder.
+ */
+export function moveProject(id: string, to: string): MoveResult {
+  const p = mustProject(id);
+  const path = resolve(to.trim());
+  if (!to.trim()) throw new Error('Choose a folder');
+  if (path === p.path) return { project: p, from: p.path, memory: 'kept' };
+  let isDir = false;
+  try { isDir = statSync(path).isDirectory(); } catch { throw new Error(`Folder not found: ${path}`); }
+  if (!isDir) throw new Error(`Not a folder: ${path}`);
+  const busy = listTasks(id).filter(t => t.status === 'running').length;
+  if (busy) throw new Error(`${busy} task${busy > 1 ? 's are' : ' is'} running in this project. Stop the project first, then change its folder.`);
+  const other = listProjects().find(x => x.id !== id && x.path.toLowerCase() === path.toLowerCase());
+  if (other) throw new Error(`${other.name} already uses ${path}`);
+
+  const oldDir = plexusDir(p), newDir = join(path, '.plexus');
+  let memory: MoveResult['memory'] = 'kept';
+  if (!existsSync(join(newDir, 'memory'))) {
+    if (existsSync(oldDir)) { cpSync(oldDir, newDir, { recursive: true, force: false }); memory = 'copied'; }
+    else memory = 'not_found';
+  }
+  const db = getDb();
+  db.prepare('UPDATE projects SET path = ? WHERE id = ?').run(path, id);
+  db.prepare('UPDATE chat_sessions SET cli_session_id = NULL, cli_account_id = NULL, cli_synced_message_id = 0 WHERE project_id = ?').run(id);
+  const out = mustProject(id);
+  mkdirSync(memoryDir(out), { recursive: true });
+  // The goal is also kept in the database: a project whose memory was lost still starts from it.
+  if (memory === 'not_found' && out.goal) writeMemory(out, 'goal.md', out.goal);
+  bus.emitEvent('project.updated', id, out);
+  return { project: out, from: p.path, memory };
 }
 
 export function setProjectStatus(id: string, status: ProjectStatus): Project {

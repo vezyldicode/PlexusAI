@@ -13,7 +13,8 @@ Rules every agent follows:
 4. Keep `.plexus-task/progress.md` up to date after every meaningful step (done, next, open problems, evidence). If you
    are interrupted (quota, crash), another agent continues from that file and your commits; Plexus keeps it after your
    worktree is gone.
-5. Commit early and often on the current branch with clear messages (roles that write code only).
+5. Commit early and often on the current branch with clear messages (roles that write code only). Keep git's configured
+   author; add no `Co-Authored-By` or "Generated with" lines to commit messages.
 6. Do not ask the user questions or wait for input. If something is ambiguous, choose the most reasonable option, state
    the assumption in `decisions` and continue; genuinely open questions go in `questions` with a default answer. Use
    status "blocked" only when you truly cannot do anything useful without the user, and say exactly what you need.

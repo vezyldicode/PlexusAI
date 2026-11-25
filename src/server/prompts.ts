@@ -225,6 +225,7 @@ function coordinatorGuide(p: Project, tools: boolean): string {
 - Plexus never commits on the user's branches: finished work is merged on Plexus's internal base (${baseRef(p)}) and
   written into the project folder as uncommitted changes, which the user reviews and commits. In the project folder never
   run git commit, merge, rebase, reset, checkout, stash or push, unless the user asks you to in this chat.`}
+- A commit you make keeps git's configured author (Plexus): add no Co-Authored-By or "Generated with" lines to its message.
 - Task logs (prompt + agent stream, one file per run): ${join(paths.logs, p.id)}
 - Task worktrees: ${join(paths.worktrees, p.id)} · project memory: ${join(p.path, '.plexus', 'memory')} (hand-off notes in handoff/)`;
   const how = tools
