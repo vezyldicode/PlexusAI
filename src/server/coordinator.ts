@@ -13,9 +13,9 @@ import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
 import { appRoot, ensure, paths } from './paths.ts';
 import {
-  appendMemory, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
+  appendMemory, folderProblem, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
 } from './projects.ts';
-import { buildCoordinatorPrompt, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
+import { buildCoordinatorPrompt, buildCoordinatorSystem, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { runtime } from './runtime.ts';
 import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, updateTask } from './tasks.ts';
@@ -24,6 +24,20 @@ import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit 
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
 import { appConfig } from './config.ts';
 import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
+import { attachmentNote, copyTaskAttachments, runFiles, sessionRefs, validateTaskAttachments } from './attachments.ts';
+import type { AttachmentRef } from './attachments.ts';
+
+/** The chat attachment ids an action names (`attachments`, or `images` as older prompts wrote it). */
+const attachedIds = (a: { attachments?: string[]; images?: string[] }) => [...(a.attachments ?? []), ...(a.images ?? [])];
+
+/** One short line per event: time, task, what happened, title (details are in plexus_task / plexus_task_log). */
+export function eventLine(e: { type: string; data: any; createdAt: string }): string {
+  const d = e.data ?? {};
+  const task = d.seq != null ? `T${d.seq}` : typeof d.task === 'string' ? d.task.split('-').pop() : '';
+  const text = String(d.title ?? d.message ?? d.file ?? '').split('\n')[0];
+  return [e.createdAt.slice(11, 16), task, e.type.replace(/^task\./, ''), d.status ?? '', text.length > 60 ? `${text.slice(0, 59)}…` : text]
+    .filter(Boolean).join(' ');
+}
 
 /**
  * The project state for the coordinator. With `since` (the time of its last reply in a resumed conversation) only what
@@ -40,7 +54,7 @@ export function statusDigest(projectId: string, since?: string | null): StatusDi
     `${a.quota?.primary ? ` 5h:${a.quota.primary.usedPercent ?? '?'}%` : ''}${a.quota?.secondary ? ` week:${a.quota.secondary.usedPercent ?? '?'}%` : ''} running:${a.running ?? 0}`).join('\n');
   // Task lifecycle events repeat what the task lines below already say (status, result summary), so they stay out.
   const evs = recentEvents(projectId, appConfig().digestEvents).filter(e => !TASK_LIFECYCLE.has(e.type) && (!since || e.createdAt > since));
-  const events = evs.map(e => `${e.createdAt.slice(11, 19)} ${e.type} ${JSON.stringify(e.data).slice(0, 160)}`).join('\n');
+  const events = evs.map(eventLine).join('\n');
   const finished = tasks.filter(t => ['done', 'cancelled'].includes(t.status) && (!since || t.updatedAt > since));
   const nDone = appConfig().digestDone;
   const done = since ? finished : nDone ? finished.filter(t => t.status === 'done').slice(-nDone) : [];
@@ -126,6 +140,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
         }
         case 'stop': orchestrator.stop(projectId, sessionId); done.push('stopped'); break;
         case 'add_task': {
+          validateTaskAttachments(sessionId, attachedIds(a));
           const status = mustProject(projectId).status;
           // The pipeline is paused / stopped / not started: the task is part of this chat request. It runs now (with its
           // review, fixes and merge) and the rest of the pipeline stays as it is. It can only wait for finished work or
@@ -135,6 +150,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           const kept = request ? refs.filter(d => d.adhoc || d.status === 'done') : refs;
           const dropped = refs.filter(d => !kept.includes(d));
           const t = createTask(projectId, { title: a.title, description: a.description, role: a.role, kind: a.role === 'implementer' ? 'build' : 'custom', deps: kept.map(d => d.id), priority: a.priority ?? 70, originSessionId: sessionId, adhoc: request });
+          copyTaskAttachments(sessionId, attachedIds(a), t.id);
           done.push(`added ${shortId(t)} "${t.title}"${request ? ` (runs now for this request; the ${status} pipeline is not touched)` : ''}` +
             (dropped.length ? `; not waiting for ${dropped.map(shortId).join(', ')} (paused pipeline work)` : ''));
           if (request) void orchestrator.tick();
@@ -142,6 +158,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           break;
         }
         case 'solo_task': {
+          validateTaskAttachments(sessionId, attachedIds(a));
           // One agent on the coordinator's model, outside the project pipeline. It forks the coordinator's conversation when
           // it can (it knows what was just investigated and agreed); otherwise it continues the last single agent when that
           // one is still cheap to resume (it knows the code already), unless asked for a fresh one.
@@ -150,6 +167,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           const forkOk = fork && (!pin || pin === fork.cliAccountId);
           const lane = a.fresh || forkOk ? null : soloLane(projectId);
           const t = createTask(projectId, { title: a.title, description: a.description, role: 'solo', kind: 'solo', priority: 75, originSessionId: sessionId, adhoc: true, laneFrom: lane, pinnedAccountId: pin });
+          copyTaskAttachments(sessionId, attachedIds(a), t.id);
           if (forkOk) updateTask(t.id, fork!, true);
           done.push(`${shortId(t)} "${t.title}" started (single agent${forkOk ? ', continuing from this conversation' : t.laneFrom && lane ? `, continuing ${shortId(lane)}'s conversation` : ''})`);
           void orchestrator.tick();
@@ -157,11 +175,11 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
         }
         case 'continue_task': {
           const prev = task(a.task_id);
-          const t = orchestrator.continueTask(prev.id, a.instructions, a.title, sessionId);
+          const t = orchestrator.continueTask(prev.id, a.instructions, a.title, sessionId, false, attachedIds(a));
           done.push(t.id === prev.id ? `message queued for ${shortId(prev)} (still active)` : `${shortId(t)} continues ${shortId(prev)}${t.laneFrom ? ' in its conversation' : ''}`);
           break;
         }
-        case 'send_message': { const t = task(a.task_id); orchestrator.sendMessage(t.id, a.text); done.push(`message for ${shortId(t)} queued`); break; }
+        case 'send_message': { const t = task(a.task_id); const copied = copyTaskAttachments(sessionId, attachedIds(a), t.id); orchestrator.sendMessage(t.id, [a.text, attachmentNote(copied)].filter(Boolean).join('\n')); done.push(`message for ${shortId(t)} queued`); break; }
         case 'assign_account': {
           const t = task(a.task_id);
           const id = accountRef(a.account);
@@ -296,13 +314,13 @@ export async function mergeCoordinatorWorkspace(projectId: string, message: stri
 /** One answer at a time per chat session: a resumed CLI conversation must not get two turns at once. */
 const chatLocks = new Map<string, Promise<unknown>>();
 
-export async function handleChat(projectId: string, text: string, sessionId?: string | null): Promise<void> {
+export async function handleChat(projectId: string, text: string, sessionId?: string | null, files: AttachmentRef[] = []): Promise<void> {
   mustProject(projectId);
   const session = sessionId ? mustSession(sessionId) : defaultSession(projectId);
   if (session.projectId !== projectId) throw new Error('chat session belongs to another project');
-  const userMsg = postMessage(projectId, 'user', text, null, session.id);
-  autoTitle(session.id, text);
-  const run = (chatLocks.get(session.id) ?? Promise.resolve()).catch(() => {}).then(() => answer(projectId, session.id, userMsg.id, text));
+  const userMsg = postMessage(projectId, 'user', text, files.length ? { attachments: files } : null, session.id);
+  autoTitle(session.id, text || files[0]?.name || 'Attachment');
+  const run = (chatLocks.get(session.id) ?? Promise.resolve()).catch(() => {}).then(() => answer(projectId, session.id, userMsg.id, text, files));
   chatLocks.set(session.id, run);
   try { await run; } finally { if (chatLocks.get(session.id) === run) chatLocks.delete(session.id); }
 }
@@ -343,9 +361,11 @@ export function coordinatorMcp(projectId: string, sessionId: string): McpServerS
   return plexusMcp({ PLEXUS_API: `http://127.0.0.1:${runtime.port}`, PLEXUS_TOKEN: runtime.token, PLEXUS_PROJECT: projectId, PLEXUS_SESSION: sessionId });
 }
 
-async function answer(projectId: string, sessionId: string, userMsgId: number, text: string): Promise<void> {
+async function answer(projectId: string, sessionId: string, userMsgId: number, text: string, files: AttachmentRef[] = []): Promise<void> {
   const p = mustProject(projectId);
   const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
+  const missing = folderProblem(p);
+  if (missing) { say('system', missing, { level: 'attention' }); return; }
   const { role, accounts, pinnedId, pinned, account, model, effort } = coordinatorTarget(p);
   if (pinnedId && !pinned && account) {
     const a = accounts.find(x => x.id === pinnedId);
@@ -365,15 +385,20 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const tools = !!mcp;
   const lastReply = listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);
   const lastCtx = Number((lastReply?.meta?.tokens as any)?.lastCtx ?? 0);
-  const fullPrompt = () => buildCoordinatorPrompt(p, role, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text, tools);
+  // Role, how it works and the output format: the system prompt, sent every turn (a Claude resume does not keep it).
+  const system = buildCoordinatorSystem(p, role, tools);
+  const available = sessionRefs(sessionId);
+  const fmtSize = (n?: number) => n == null ? '' : n < 1024 ? `, ${n} B` : n < 1024 * 1024 ? `, ${Math.max(1, Math.round(n / 1024))} KB` : `, ${(n / 1024 / 1024).toFixed(1)} MB`;
+  const attachmentIndex = available.length ? `\n\n# CHAT ATTACHMENTS\n${available.map(x => `${x.id}: ${x.name} (${x.kind === 'image' ? 'image' : x.mime}${fmtSize(x.size)}) ${x.path}`).join('\n')}` : '';
+  const fullPrompt = () => buildCoordinatorPrompt(p, statusDigest(projectId), listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.id < userMsgId), text);
   const deltaPrompt = () => buildCoordinatorTurnPrompt(p, statusDigest(projectId, lastReply?.createdAt ?? null),
     messagesAfter(sessionId, session.cliSyncedMessageId, userMsgId).filter(m => !(m.author === 'coordinator' && m.meta?.cli)), text, tools);
   const activity: ChatActivity = { tools: [], plan: null };
   const attempt = (resumeId: string | undefined, tag: string) => {
     const logPath = join(ensure(join(paths.logs, projectId)), `chat-${Date.now()}-${account.id}${tag}.log`);
-    const prompt = resumeId ? deltaPrompt() : fullPrompt();
+    const prompt = (resumeId ? deltaPrompt() : fullPrompt()) + attachmentIndex;
     // The prompt heads the log (the CLI's stream follows), and the user's message points to it: the chat shows it on demand.
-    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${prompt}\n\n# output\n`);
+    writeFileSync(logPath, `# prompt${resumeId ? ` (resuming ${resumeId})` : ''} (${now()})\n${system}\n\n${prompt}\n\n# output\n`);
     const um = getMessage(userMsgId);
     if (um) updateMessageMeta(userMsgId, { ...(um.meta ?? {}), promptLog: logPath, promptChars: prompt.length, promptResumed: !!resumeId });
     // The coordinator works in the project folder with full permissions (read, edit, run) and the plexus tools.
@@ -381,7 +406,7 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     activity.tools = []; activity.plan = null; activity.steps = [];
     bus.emitEvent('chat.activity', projectId, { sessionId, reset: true }, false);
     return adapterFor(account.provider).run({
-      account, cwd: p.path, prompt, resumeId, model, effort: eff.effort, readOnly: false,
+      account, cwd: p.path, prompt, system, systemOnResume: true, resumeId, model, effort: eff.effort, readOnly: false, ...runFiles(files),
       mcp, autocompact: p.settings.autocompactTokens, timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: appConfig().chatIdleTimeoutMin * 60_000, logPath,
       onEvent: e => {
         let text: string;

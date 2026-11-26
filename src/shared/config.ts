@@ -139,7 +139,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   chatHistoryMessages: 20,
   chatMessageChars: 1_500,
   chatCtxMaxK: 120,
-  digestEvents: 30,
+  digestEvents: 10,
   digestDone: 15,
 
   modelCacheHours: 12,

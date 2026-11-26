@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { quotaService } from './accounts.ts';
 import { buildApi } from './api.ts';
+import { startBranchWatch, stopBranchWatch } from './branch.ts';
 import { closeDb, getDb } from './db.ts';
 import { orchestrator } from './orchestrator.ts';
 import { paths } from './paths.ts';
@@ -28,6 +29,7 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
   await app.listen({ port, host });
   quotaService.start();
   orchestrator.start();
+  startBranchWatch();
   // Runs recorded before token usage was stored: read it back from their logs, once.
   setImmediate(() => {
     // A stored path may predate a move of the data folder (swarm → plexus): fall back to <logs>/<project>/<file>.
@@ -47,6 +49,7 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
     console.log(`data: ${paths.home}`);
   }
   const shutdown = async () => {
+    stopBranchWatch();
     await orchestrator.stopAll();
     quotaService.stop();
     await app.close();

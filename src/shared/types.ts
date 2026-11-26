@@ -131,6 +131,8 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  /** Set by the project list when `path` is gone (moved, renamed, deleted): the sidebar marks it. */
+  folderMissing?: boolean;
   goal: string;
   status: ProjectStatus;
   phase: string;
@@ -424,9 +426,9 @@ export const CoordinatorActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('pause') }),
   z.object({ type: z.literal('resume') }),
   z.object({ type: z.literal('stop') }),
-  z.object({ type: z.literal('add_task'), title: z.string(), description: z.string().default(''), role: z.string().default('implementer'), depends_on: z.array(z.string()).default([]), priority: z.number().optional() }),
+  z.object({ type: z.literal('add_task'), title: z.string(), description: z.string().default(''), role: z.string().default('implementer'), depends_on: z.array(z.string()).default([]), priority: z.number().optional(), images: z.array(z.string()).optional(), attachments: z.array(z.string()).optional() }),
   // `fresh`: start a new agent even when the last single agent could continue (its conversation is small and recent).
-  z.object({ type: z.literal('solo_task'), title: z.string(), description: z.string().default(''), account: z.string().optional(), fresh: z.boolean().optional() }),
+  z.object({ type: z.literal('solo_task'), title: z.string(), description: z.string().default(''), account: z.string().optional(), fresh: z.boolean().optional(), images: z.array(z.string()).optional(), attachments: z.array(z.string()).optional() }),
   z.object({ type: z.literal('cancel_task'), task_id: z.string() }),
   z.object({ type: z.literal('retry_task'), task_id: z.string() }),
   z.object({ type: z.literal('reprioritize'), task_id: z.string(), priority: z.number() }),
@@ -440,9 +442,9 @@ export const CoordinatorActionSchema = z.discriminatedUnion('type', [
   // Remove directives whose text contains `match` (case-insensitive).
   z.object({ type: z.literal('remove_directive'), match: z.string() }),
   // Give more work to the agent that did `task_id`, in its own conversation and worktree (no fresh context).
-  z.object({ type: z.literal('continue_task'), task_id: z.string(), title: z.string().default(''), instructions: z.string() }),
+  z.object({ type: z.literal('continue_task'), task_id: z.string(), title: z.string().default(''), instructions: z.string(), images: z.array(z.string()).optional(), attachments: z.array(z.string()).optional() }),
   // A message for the agent of `task_id`: delivered at the start of its next run (a running task gets it when its turn ends).
-  z.object({ type: z.literal('send_message'), task_id: z.string(), text: z.string() }),
+  z.object({ type: z.literal('send_message'), task_id: z.string(), text: z.string(), images: z.array(z.string()).optional(), attachments: z.array(z.string()).optional() }),
 ]);
 export type CoordinatorAction = z.infer<typeof CoordinatorActionSchema>;
 

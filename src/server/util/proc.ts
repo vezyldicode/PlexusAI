@@ -125,7 +125,12 @@ export function runStreaming(o: StreamRunOptions): Promise<StreamRunResult> {
       }
     });
     child.stderr!.on('data', (d: string) => { lastActivity = Date.now(); stderr += d; log?.write(`[stderr] ${d}`); });
-    child.on('error', err => { stderr += `\n[spawn error] ${err.message}`; });
+    // A process that cannot start (missing CLI, missing working folder) prints nothing: say why in the log too.
+    child.on('error', err => {
+      const why = (err as NodeJS.ErrnoException).code === 'ENOENT' && !existsSync(o.cwd) ? `working folder not found: ${o.cwd}` : err.message;
+      stderr += `\n[spawn error] ${why}`;
+      log?.write(`[spawn error] ${why}\n`);
+    });
     child.on('close', code => {
       if (partial.trim()) try { o.onLine?.(partial); } catch { /* ignore */ }
       if (wall) clearTimeout(wall);

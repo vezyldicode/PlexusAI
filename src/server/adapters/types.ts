@@ -12,7 +12,19 @@ export interface Classification {
   evidence: string[];
 }
 
+/** The prompt lines that point the agent at the files the user attached (they live outside its worktree). */
+export function attachmentsPrompt(spec: Pick<RunSpec, 'images' | 'files'>): string {
+  const images = spec.images ?? [], files = spec.files ?? [];
+  if (!images.length && !files.length) return '';
+  return '\n\nAttached files (outside the project; read them in place, do not copy them into the repository unless asked):\n' +
+    [...images.map(p => `- ${p} (image)`), ...files.map(p => `- ${p}`)].join('\n');
+}
+
 export interface RunSpec {
+  /** Attached images (PNG/JPEG/GIF/WebP): Codex gets them as `-i` images too. */
+  images?: string[];
+  /** Any other attached files: their paths are listed in the prompt. */
+  files?: string[];
   account: Account;
   cwd: string;
   prompt: string;
@@ -20,8 +32,10 @@ export interface RunSpec {
   /** Reasoning effort, already checked against the model's supported efforts (see models.ts). */
   effort?: string;
   readOnly: boolean;
-  /** Text for the CLI's system prompt (same for every task of a role, so it is cached); prepended to the prompt where unsupported. Not sent on resume. */
+  /** Text for the CLI's system prompt (same for every task of a role, so it is cached); prepended to the prompt where unsupported. Not sent on resume unless systemOnResume. */
   system?: string;
+  /** Send `system` on a resume too, where the CLI has a system-prompt option (Claude does not keep it across --resume). */
+  systemOnResume?: boolean;
   /** An MCP server the agent gets (the coordinator's `plexus` tools). */
   mcp?: McpServerSpec;
   /** Compact the conversation once its context passes this many tokens (0/undefined: the CLI's default). */

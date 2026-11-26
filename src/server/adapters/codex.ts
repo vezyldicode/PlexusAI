@@ -5,6 +5,7 @@ import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.
 import { invocationUsage } from '../usage.ts';
 import { codexMcpOverrides, withSystem } from './mcp-config.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { attachmentsPrompt } from './types.ts';
 import { appConfig } from '../config.ts';
 import { spentPercent, transientBackoffMs, unknownResetBackoffMs } from './claude-limits.ts';
 import { createRunTimer } from './timing.ts';
@@ -48,6 +49,8 @@ export function codexThreadId(stdout: string): string | undefined {
   }
   return undefined;
 }
+
+export const codexImageArgs = (images: string[] = []): string[] => images.flatMap(path => ['-i', path]);
 
 export interface CodexRunAnalysis extends Classification { finalText: string; usage?: Record<string, number> }
 
@@ -112,11 +115,12 @@ export const codexAdapter: ProviderAdapter = {
     args.push(...codexMcpOverrides(spec));
     if (spec.autocompact && spec.autocompact > 0) args.push('-c', `model_auto_compact_token_limit=${Math.floor(spec.autocompact)}`);
     if (spec.resumeId) args.push(spec.resumeId);
+    args.push(...codexImageArgs(spec.images));
     args.push('-');
     const since = Date.now();
     const timer = createRunTimer('codex', since);
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: withSystem(spec), logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: withSystem(spec) + attachmentsPrompt(spec), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },

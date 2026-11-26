@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowUp, Check, ChevronDown, ChevronRight, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
-import { api, clock, timeAgo } from '../api.ts';
+import { ArrowUp, Check, ChevronDown, ChevronRight, Download, FileText, Paperclip, PanelRightClose, PanelRightOpen, Pencil, Plus, RotateCcw, Square, Trash2, X, type LucideIcon } from 'lucide-react';
+import { api, clock, timeAgo, token } from '../api.ts';
 import type { LiveActivity, ProjectDetail, Plexus } from '../store.ts';
 import type { Account, ChatActivity, ChatMessage, ChatStep, ChatSession, Project, Provider, Role, RunTiming, Task, TaskModelInfo, TokenUsage } from '../types.ts';
 import { ContextMenu, Dot, Ic, label, Tokens, UsageBreakdown, fmtTokens } from '../ui.tsx';
@@ -55,7 +55,7 @@ export function ChatPanel({ s, detail, visible, mode, tabs, active, onActivate, 
           {mode === 'overlay' && <button className="icon-btn" title="Close chat" aria-label="Close chat" onClick={onHide}><Ic i={X} /></button>}
         </>} />
       {onCoordinator
-        ? <CoordinatorChat project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null}
+        ? <CoordinatorChat key={s.sessionId ?? ''} project={detail.project} accounts={s.accounts} sessionId={s.sessionId} messages={s.messages} thinking={s.sessionId ? s.thinking[s.sessionId] ?? null : null}
             live={s.sessionId ? s.live[s.sessionId] ?? null : null} onError={s.setError} reload={s.loadDetail} />
         : byId.get(active)!.kind === 'coordinator'
           ? <CoordinatorRecord key={active} task={byId.get(active)!} origin={origin(byId.get(active))} />
@@ -350,6 +350,8 @@ function Elapsed({ since }: { since: number }) {
 
 function CoordinatorChat({ project, accounts, sessionId, messages, thinking, live, onError, reload }: { project: Project; accounts: Account[]; sessionId: string | null; messages: ChatMessage[]; thinking: string | null; live: LiveActivity | null; onError: (e: string) => void; reload: () => void }) {
   const [text, setText] = useState('');
+  const fileInput = useRef<HTMLInputElement>(null);
+  const uploads = useUploads(sessionId, onError);
   const [picking, setPicking] = useState(false);
   const closePicker = useCallback(() => setPicking(false), []);
   const opts = useCoordinatorOptions(project, accounts, onError, reload, messages.length);
@@ -360,11 +362,13 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
   const plan = thinking ? live?.plan ?? null : answered?.plan ?? null;
   const send = async () => {
     const t = text.trim();
-    if (!t) return;
-    setText('');
-    // Sending is reading along: the answer should come into view as it arrives.
-    follow.toEnd();
-    await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId }).catch(e => onError(e.message));
+    if ((!t && !uploads.items.length) || uploads.busy) return;
+    try {
+      follow.toEnd();
+      await api('POST', `/api/projects/${project.id}/messages`, { text: t, sessionId, attachments: uploads.ids });
+      setText(''); uploads.sent();
+    }
+    catch (e: any) { onError(e.message); }
   };
   const decide = (id: number, approve: boolean) => api('POST', `/api/messages/${id}/proposal`, { approve }).catch(e => onError(e.message));
   return (
@@ -377,7 +381,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
           // Your message, and under it the prompt Plexus turned it into (when that turn's log exists).
           if (m.author === 'user' && typeof m.meta?.promptChars === 'number') return (
             <div key={m.id} className="ask">
-              <div className="msg m-user"><div className="msg-text">{m.text}</div></div>
+              <div className="msg m-user">{m.text && <div className="msg-text">{m.text}</div>}<MessageAttachments message={m} /></div>
               <PromptToggle url={`/api/messages/${m.id}/prompt`} chars={m.meta.promptChars as number} note={m.meta.promptResumed ? 'resumed' : 'new conversation'} />
             </div>
           );
@@ -389,6 +393,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
                 return a?.steps?.length ? <Steps steps={a.steps} /> : a?.tools.length ? <ToolGroup lines={toolLines(a.tools)} /> : null;
               })()}
               {m.author === 'coordinator' || m.author === 'agent' ? <Markdown className="msg-text" text={m.text} /> : <div className="msg-text">{m.text}</div>}
+              {m.author === 'user' && <MessageAttachments message={m} />}
               {Array.isArray(m.meta?.applied) && (m.meta!.applied as string[]).length > 0 && <div className="msg-applied">Applied: {(m.meta!.applied as string[]).join(', ')}</div>}
               {prop && (
                 <div className="proposal">
@@ -416,11 +421,20 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
         <JumpToEnd follow={follow} />
       </div>
       {plan &&<div className="agent-dock"><PlanCard items={plan} live={!!thinking} /></div>}
-      <div className="composer">
+      <div className="composer" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }} onDrop={e => { e.preventDefault(); uploads.add(Array.from(e.dataTransfer.files)); }}>
         {picking && <CoordinatorPicker o={opts} accounts={accounts} onClose={closePicker} />}
+        {!!uploads.items.length && <div className="chat-images">{uploads.items.map(x => (
+          <div className={`chat-image${x.preview ? '' : ' chat-file'}${x.error ? ' failed' : ''}`} key={x.key} title={x.error ?? `${x.file.name} · ${fmtBytes(x.file.size)}`}>
+            {x.preview ? <img src={x.preview} alt={x.file.name} /> : <FileChip name={x.file.name} size={x.file.size} />}
+            {x.progress < 1 && !x.error && <div className="upload-progress"><span style={{ width: `${Math.round(x.progress * 100)}%` }} /></div>}
+            <button aria-label={`Remove ${x.file.name}`} onClick={() => uploads.remove(x.key)}><Ic i={X} size={14} /></button>
+          </div>))}</div>}
         <textarea value={text} rows={3} placeholder="Message the coordinator" onChange={e => setText(e.target.value)}
+          onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); uploads.add(files); } }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} />
         <div className="composer-bar">
+          <input ref={fileInput} type="file" multiple hidden onChange={e => { uploads.add(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+          <button aria-label="Attach files" title={`Attach files (up to ${MAX_FILES}, ${MAX_FILE_MB} MB each)`} disabled={!sessionId} onClick={() => fileInput.current?.click()}><Ic i={Paperclip} size={16} /></button>
           <button className="coord-chip" aria-expanded={picking} onClick={() => setPicking(v => !v)} title="Choose the account, model and effort the coordinator uses">
             {opts.summary.state && <Dot state={opts.summary.state} />}
             <span className="coord-chip-acct">{opts.summary.account}</span>
@@ -428,9 +442,104 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
             {opts.summary.effort && <span className="coord-chip-effort">{opts.summary.effort}</span>}
             <Ic i={ChevronDown} size={14} />
           </button>
-          <button className="primary icon-send" disabled={!text.trim() || !sessionId} onClick={send} title="Send (Enter). Shift + Enter for a new line"><Ic i={ArrowUp} /></button>
+          <button className="primary icon-send" disabled={(!text.trim() && !uploads.items.length) || uploads.busy || !sessionId} onClick={send} title={uploads.busy ? 'Waiting for the files to upload' : 'Send (Enter). Shift + Enter for a new line'}><Ic i={ArrowUp} /></button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- attachments
+
+const MAX_FILES = 20;
+const MAX_FILE_MB = 30;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+function fmtBytes(n: number): string {
+  return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+interface Upload { key: string; file: File; preview: string | null; progress: number; id?: string; error?: string; xhr?: XMLHttpRequest }
+
+/**
+ * Files for the next message: each is uploaded as soon as it is added (with its progress), and the message then only
+ * names them. Removing one cancels its upload or deletes it on the server; switching chats drops the unsent ones.
+ */
+function useUploads(sessionId: string | null, onError: (e: string) => void) {
+  const [items, setItems] = useState<Upload[]>([]);
+  const live = useRef<Upload[]>([]);
+  live.current = items;
+  const patch = (key: string, p: Partial<Upload>) => setItems(old => old.map(x => x.key === key ? { ...x, ...p } : x));
+  const drop = (x: Upload, sid: string | null) => {
+    x.xhr?.abort();
+    if (x.preview) URL.revokeObjectURL(x.preview);
+    if (x.id && sid) void api('DELETE', `/api/chat-sessions/${sid}/attachments/${x.id}`).catch(() => {});
+  };
+  useEffect(() => () => { live.current.forEach(x => drop(x, sessionId)); setItems([]); }, [sessionId]);
+  const add = (files: File[]) => {
+    if (!sessionId || !files.length) return;
+    const big = files.filter(f => f.size > MAX_FILE_MB * 1024 * 1024);
+    const empty = files.filter(f => f.size === 0);
+    if (big.length) onError(`${big.map(f => f.name).join(', ')}: larger than ${MAX_FILE_MB} MB`);
+    else if (empty.length) onError(`${empty.map(f => f.name).join(', ')}: empty file`);
+    const ok = files.filter(f => f.size > 0 && f.size <= MAX_FILE_MB * 1024 * 1024);
+    const room = MAX_FILES - live.current.length;
+    if (ok.length > room) onError(`Up to ${MAX_FILES} files per message`);
+    const added = ok.slice(0, Math.max(0, room)).map((file): Upload => ({
+      key: `${Date.now()}-${Math.random()}`, file, progress: 0,
+      preview: IMAGE_TYPES.includes(file.type) && file.size <= 10 * 1024 * 1024 ? URL.createObjectURL(file) : null,
+    }));
+    for (const u of added) {
+      const xhr = new XMLHttpRequest();
+      u.xhr = xhr;
+      xhr.open('POST', `/api/chat-sessions/${sessionId}/attachments?name=${encodeURIComponent(u.file.name)}&mime=${encodeURIComponent(u.file.type)}`);
+      xhr.setRequestHeader('content-type', 'application/octet-stream');
+      xhr.setRequestHeader('x-plexus-token', token);
+      xhr.upload.onprogress = e => { if (e.lengthComputable) patch(u.key, { progress: Math.min(0.99, e.loaded / e.total) }); };
+      xhr.onload = () => {
+        let j: any = null;
+        try { j = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300 && j?.id) patch(u.key, { id: j.id, progress: 1, xhr: undefined });
+        else { const error = j?.error ?? `upload failed (${xhr.status})`; patch(u.key, { error, xhr: undefined }); onError(`${u.file.name}: ${error}`); }
+      };
+      xhr.onerror = () => { patch(u.key, { error: 'upload failed', xhr: undefined }); onError(`${u.file.name}: upload failed`); };
+      xhr.send(u.file);
+    }
+    setItems(old => [...old, ...added]);
+  };
+  const remove = (key: string) => {
+    const x = live.current.find(y => y.key === key);
+    if (x) drop(x, sessionId);
+    setItems(old => old.filter(y => y.key !== key));
+  };
+  /** The message holding them was sent: forget them here (the server keeps them). */
+  const sent = () => { live.current.forEach(x => { if (x.preview) URL.revokeObjectURL(x.preview); }); setItems([]); };
+  const busy = items.some(x => !x.id && !x.error);
+  const ids = items.filter(x => x.id).map(x => x.id!);
+  // A failed upload stays shown (with its error) until removed, but is not sent.
+  return { items, add, remove, sent, busy, ids };
+}
+
+function FileChip({ name, size }: { name: string; size?: number }) {
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 6 ? name.slice(dot + 1).toUpperCase() : '';
+  return (
+    <span className="file-chip">
+      <Ic i={FileText} size={18} />
+      <span className="file-chip-text"><span className="file-chip-name">{name}</span><span className="file-chip-meta num">{[ext, size != null ? fmtBytes(size) : ''].filter(Boolean).join(' · ')}</span></span>
+    </span>
+  );
+}
+
+/** A sent message's files: images as thumbnails (open full size), other files as chips that download. */
+function MessageAttachments({ message }: { message: ChatMessage }) {
+  const list = (message.meta?.attachments ?? message.meta?.images) as { id: string; name: string; kind?: string; size?: number }[] | undefined;
+  if (!list?.length) return null;
+  const url = (id: string, download = false) => `/api/messages/${message.id}/attachments/${id}?token=${encodeURIComponent(token)}${download ? '&download=1' : ''}`;
+  return (
+    <div className="chat-images">{list.map(x => (x.kind ?? 'image') === 'image'
+      ? <a key={x.id} href={url(x.id)} target="_blank" rel="noreferrer" title={x.name}><img src={url(x.id)} alt={x.name} /></a>
+      : <a key={x.id} className="chat-file" href={url(x.id, true)} download={x.name} title={`Download ${x.name}`}><FileChip name={x.name} size={x.size} /><Ic i={Download} size={14} /></a>)}
     </div>
   );
 }

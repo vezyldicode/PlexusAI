@@ -6,6 +6,7 @@ import { readClaudeStatus } from './claude-control.ts';
 import { invocationUsage } from '../usage.ts';
 import { writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { attachmentsPrompt } from './types.ts';
 import { appConfig } from '../config.ts';
 import { createRunTimer } from './timing.ts';
 import { PLAN_TOOL, planEvent, planItems, type StreamEvent } from './plan.ts';
@@ -59,6 +60,22 @@ function summarizeInput(input: any): string {
   return String(v).slice(0, 200);
 }
 
+/**
+ * Rules and role in the system prompt (identical across tasks of a role: cached), without the per-worktree sections
+ * (cwd, git status) that would make every worktree's system prompt different. A resume does not keep it: it is sent
+ * again when asked (systemOnResume: the coordinator's instructions every turn, the same text so it stays cached).
+ */
+export function systemArgs(spec: Pick<RunSpec, 'system' | 'resumeId' | 'systemOnResume'>): string[] {
+  return spec.system && (!spec.resumeId || spec.systemOnResume) ? ['--append-system-prompt', spec.system, '--exclude-dynamic-system-prompt-sections'] : [];
+}
+
+/**
+ * Claude Code adds a `Co-Authored-By: Claude …` trailer to the commits it makes (and a "Generated with Claude Code" line
+ * to PRs), which GitHub shows as a second author. Commits made through Plexus carry only Plexus's identity
+ * (gitIdentityEnv), so both are turned off: `attribution` on current CLIs, `includeCoAuthoredBy` on older ones.
+ */
+export const NO_ATTRIBUTION = { attribution: { commit: '', pr: '' }, includeCoAuthoredBy: false } as const;
+
 export const claudeAdapter: ProviderAdapter = {
   provider: 'claude',
 
@@ -74,18 +91,17 @@ export const claudeAdapter: ProviderAdapter = {
     if (spec.model) args.push('--model', spec.model);
     if (spec.effort) args.push('--effort', spec.effort);
     if (spec.readOnly) args.push('--tools', 'Read,Glob,Grep');
-    // Rules and role in the system prompt (identical across tasks of a role: cached), without the per-worktree sections
-    // (cwd, git status) that would make every worktree's system prompt different. A resume reuses the recorded one.
-    if (spec.system && !spec.resumeId) args.push('--append-system-prompt', spec.system, '--exclude-dynamic-system-prompt-sections');
+    args.push(...systemArgs(spec));
     // Only Plexus's own MCP server (if any): the user's MCP servers would add their tool schemas to every call.
     const mcp = writeMcpConfig(spec);
     if (mcp) args.push('--mcp-config', mcp);
     args.push('--strict-mcp-config');
     if (spec.autocompact && spec.autocompact >= 100_000) args.push('--autocompact', String(spec.autocompact));
+    args.push('--settings', JSON.stringify(NO_ATTRIBUTION));
     args.push('--dangerously-skip-permissions');
     const timer = createRunTimer('claude');
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: spec.prompt, logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: spec.prompt + attachmentsPrompt(spec), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); for (const d of describeClaudeEvents(line)) spec.onEvent?.(d); },

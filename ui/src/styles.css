@@ -154,10 +154,9 @@ body.resizing .net { pointer-events: none; }
 .nav-row.active .nav-ic { color: var(--text-2); }
 .nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-meta { font-size: 12px; color: var(--muted); flex: none; }
+.nav-meta.missing { color: var(--warn); }
 
 .nav-row.menu-open { background: var(--card); color: var(--text); }
-.nav-row.editing { padding: 0 4px 0 8px; background: var(--card); border-color: var(--line); }
-.nav-input { height: 26px; padding: 0 6px; margin: 0; }
 
 /* collapsed sidebar: one column of icons */
 .rail { align-items: center; padding-bottom: 12px; }
@@ -415,6 +414,20 @@ body.resizing .net { pointer-events: none; }
 
 .composer { padding: 12px 16px 16px; border-top: 1px solid var(--line); flex: none; }
 .composer textarea { resize: none; background: var(--card); }
+.chat-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.chat-images img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.chat-image { position: relative; }
+.chat-image button { position: absolute; top: 2px; right: 2px; padding: 2px; background: var(--raised); }
+.chat-image.failed img, .chat-image.failed .file-chip { opacity: .5; border-color: var(--bad, #d33); }
+.chat-file { display: inline-flex; align-items: center; gap: 6px; height: 72px; max-width: 240px; padding: 0 28px 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); color: inherit; text-decoration: none; }
+a.chat-file { padding-right: 10px; }
+a.chat-file:hover { border-color: var(--muted); }
+.file-chip { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.file-chip-text { display: flex; flex-direction: column; min-width: 0; }
+.file-chip-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.file-chip-meta { font-size: 11px; color: var(--muted); }
+.upload-progress { position: absolute; left: 4px; right: 4px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.upload-progress span { display: block; height: 100%; background: var(--accent, currentColor); transition: width .15s; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .hint { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; }
 
@@ -655,6 +668,16 @@ textarea.tall { min-height: 320px; font-family: var(--mono); font-size: 13px; }
 .dialog { width: min(520px, 92vw); padding: 24px; border-radius: 16px; background: var(--card); border: 1px solid var(--line-strong); animation: rise 300ms var(--ease); }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .dialog-head h2 { margin: 0; }
+
+/* Edit project: the folder change asks first */
+.field-hint { margin: 8px 0 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.field-hint.warn { color: var(--warn); }
+.move-paths { display: grid; grid-template-columns: 40px 1fr; gap: 4px 12px; margin: 16px 0; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.move-paths dt { font-size: 12px; color: var(--muted); }
+.move-paths dd { margin: 0; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.move-gone { margin-left: 8px; font-family: var(--sans); color: var(--warn); }
+.dialog-points { margin: 0; padding-left: 16px; display: grid; gap: 8px; font-size: 13px; color: var(--text-2); }
+.callout.warn { margin: 16px 0 4px; padding: 8px 12px; border-left: 2px solid var(--warn); border-radius: 0 8px 8px 0; background: rgba(214, 162, 74, 0.08); font-size: 13px; color: var(--text); }
 .drawer { width: min(860px, 92vw); height: 100%; overflow: auto; padding: 24px; background: var(--card); border-left: 1px solid var(--line-strong); }
 
 /* ---------------------------------------------------------------- narrow windows */

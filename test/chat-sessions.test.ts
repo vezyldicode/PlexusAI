@@ -1,7 +1,7 @@
 // Coordinator chat sessions: isolation, unread marks, routing of system/agent notices, and CLI conversation resume.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,8 @@ const { startDaemon } = await import('../src/server/main.ts');
 const chat = await import('../src/server/chat.ts');
 const { postMessage } = await import('../src/server/projects.ts');
 const { createTask } = await import('../src/server/tasks.ts');
+const { taskAttachmentRefs, sessionAttachments } = await import('../src/server/attachments.ts');
+const { mockAdapter } = await import('../src/server/adapters/mock.ts');
 
 async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms: number, label: string): Promise<T> {
   const end = Date.now() + ms;
@@ -79,6 +81,73 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 120_0
     assert.ok(inA.every((m: any) => m.sessionId === A) && inB.every((m: any) => m.sessionId === B));
     assert.ok(!inB.some((m: any) => /hello there|what now/.test(m.text)));
 
+    // Files are uploaded one by one (raw body, streamed to disk outside the repo) and a message names them by id.
+    const upload = async (sid: string, name: string, data: Buffer, mime = 'application/octet-stream') => {
+      const r = await fetch(`http://127.0.0.1:${d.port}/api/chat-sessions/${sid}/attachments?name=${encodeURIComponent(name)}&mime=${encodeURIComponent(mime)}`,
+        { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-plexus-token': d.token }, body: new Uint8Array(data) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(JSON.stringify(j));
+      return j;
+    };
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lZkAAAAASUVORK5CYII=', 'base64');
+    const up1 = await upload(B, 'screen.png', png, 'image/png');
+    assert.equal(up1.kind, 'image');
+    assert.equal(up1.path, undefined); // the server's path is not handed to the browser
+    const up2 = await upload(B, '../../notes v2.csv', Buffer.from('a,b\n1,2\n'), 'text/csv');
+    assert.deepEqual([up2.kind, up2.name, up2.mime, up2.size], ['file', 'notes v2.csv', 'text/csv', 8]);
+    // What claims to be a PNG but is not one is a plain file; an HTML page too.
+    const fake = await upload(B, 'fake.png', Buffer.from('not a png'), 'image/png');
+    assert.equal(fake.kind, 'file');
+    const page = await upload(B, 'x.html', Buffer.from('<script>alert(1)</script>'), 'text/html');
+    // An upload taken back before sending is removed.
+    assert.equal((await call('DELETE', `/api/chat-sessions/${B}/attachments/${fake.id}`)).ok, true);
+    await assert.rejects(upload(B, 'empty.txt', Buffer.alloc(0)), /empty file/);
+    await assert.rejects(call('POST', `/api/projects/${p.id}/messages`, { text: '', sessionId: B, attachments: [fake.id] }), /unknown file/);
+    await assert.rejects(call('POST', `/api/projects/${p.id}/messages`, { text: 'x', sessionId: B, attachments: Array.from({ length: 21 }, () => up1.id) }), /up to 20 files/);
+
+    await call('POST', `/api/projects/${p.id}/messages`, { text: '', sessionId: B, attachments: [up1.id, up2.id, page.id] });
+    await replies(B, 2);
+    const fileMessage = (await call('GET', `/api/projects/${p.id}/messages?session=${B}`)).find((m: any) => m.author === 'user' && m.meta?.attachments?.length);
+    const [image, csv, html] = fileMessage.meta.attachments;
+    assert.equal(image.name, 'screen.png');
+    assert.ok(existsSync(image.path) && existsSync(csv.path) && csv.path.endsWith('notes v2.csv'));
+    // A message's upload cannot be deleted any more.
+    assert.equal((await call('DELETE', `/api/chat-sessions/${B}/attachments/${csv.id}`)).ok, false);
+    const get = (aid: string) => fetch(`http://127.0.0.1:${d.port}/api/messages/${fileMessage.id}/attachments/${aid}`, { headers: { 'x-plexus-token': d.token } });
+    const served = await get(image.id);
+    assert.equal(served.headers.get('content-type'), 'image/png');
+    assert.match(served.headers.get('content-disposition') ?? '', /^inline/);
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), readFileSync(image.path));
+    const servedCsv = await get(csv.id);
+    assert.match(servedCsv.headers.get('content-disposition') ?? '', /^attachment; filename\*=UTF-8''notes%20v2\.csv/);
+    assert.equal(await servedCsv.text(), 'a,b\n1,2\n');
+    // HTML is never served as a page (it would run on Plexus's origin).
+    const servedHtml = await get(html.id);
+    assert.equal(servedHtml.headers.get('content-type'), 'application/octet-stream');
+    assert.match(servedHtml.headers.get('content-disposition') ?? '', /^attachment/);
+    assert.equal(servedHtml.headers.get('x-content-type-options'), 'nosniff');
+    // The old image URL still works for messages from before.
+    assert.equal((await fetch(`http://127.0.0.1:${d.port}/api/messages/${fileMessage.id}/images/${image.id}`, { headers: { 'x-plexus-token': d.token } })).status, 200);
+
+    // A chat task gets its own copy and the worker passes it to its adapter: images as images, others as files.
+    const seen: { images?: string[]; files?: string[] }[] = [];
+    const originalRun = mockAdapter.run.bind(mockAdapter);
+    mockAdapter.run = async spec => { if (spec.images?.length || spec.files?.length) seen.push({ images: spec.images, files: spec.files }); return originalRun(spec); };
+    const beforeTasks = (await call('GET', `/api/projects/${p.id}`)).tasks.length;
+    const rejected = await call('POST', `/api/projects/${p.id}/actions`, { sessionId: B, actions: [{ type: 'solo_task', title: 'Bad file', description: '', attachments: ['missing'] }] });
+    assert.match(rejected.applied[0], /unknown attachment/);
+    assert.equal((await call('GET', `/api/projects/${p.id}`)).tasks.length, beforeTasks);
+    // `images` (as older prompts wrote it) still works next to `attachments`.
+    const applied = await call('POST', `/api/projects/${p.id}/actions`, { sessionId: B, actions: [{ type: 'solo_task', title: 'Inspect screenshot', description: 'Use screenshot', images: [image.id], attachments: [csv.id] }] });
+    assert.match(applied.applied[0], /started/);
+    const taskWithImage = (await call('GET', `/api/projects/${p.id}`)).tasks.find((t: any) => t.title === 'Inspect screenshot');
+    const refs = taskAttachmentRefs(taskWithImage.id);
+    const copied = refs.find(r => r.kind === 'image')!.path, copiedCsv = refs.find(r => r.kind === 'file')!.path;
+    assert.ok(copied !== image.path && existsSync(copied) && copiedCsv.endsWith('notes v2.csv'));
+    await waitFor(() => Promise.resolve(seen.length ? seen[0] : null), 30_000, 'task attachments RunSpec');
+    assert.deepEqual(seen[0], { images: [copied], files: [copiedCsv] });
+    mockAdapter.run = originalRun;
+
     // Notices raise an unread mark on the session they belong to, and only there; opening it clears the mark.
     const unread = async () => Object.fromEntries((await call('GET', `/api/projects/${p.id}/chat-sessions`)).map((s: any) => [s.id, s.unread]));
     await call('POST', `/api/chat-sessions/${A}/read`);
@@ -119,6 +188,8 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 120_0
     // Rename / archive / delete; the last chat cannot be deleted.
     assert.equal((await call('PATCH', `/api/chat-sessions/${B}`, { title: 'Ideas' })).title, 'Ideas');
     await call('DELETE', `/api/chat-sessions/${B}`);
+    assert.ok(!existsSync(sessionAttachments(B)));
+    assert.ok(existsSync(copied));
     assert.ok(!(await call('GET', `/api/projects/${p.id}/messages`)).some((m: any) => m.sessionId === B));
     sessions = await call('GET', `/api/projects/${p.id}/chat-sessions`);
     assert.deepEqual(sessions.map((s: any) => s.id), [A]);

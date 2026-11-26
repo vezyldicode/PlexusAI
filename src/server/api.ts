@@ -1,20 +1,21 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
-import { existsSync, mkdtempSync, readFileSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
+import { syncBranch, unwatchBranch } from './branch.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
 import { applyActions, beginMainEdit, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
 import {
-  createProject, deleteProject, getMessage, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
+  createProject, deleteProject, folderProblem, getMessage, moveProject, postMessage, getProject, listMessages, listProjects, MEMORY_FILES, mustProject, readAcceptance, readMemory, plexusDir,
   updateProject, writeMemory,
 } from './projects.ts';
 import { deleteRole, listRoles, resetRole, saveRole } from './roles.ts';
@@ -31,6 +32,8 @@ import { appConfig, configOverrides, projectDefaults, updateConfig, updateProjec
 import { DEFAULT_APP_CONFIG, CONFIG_BOUNDS } from '../shared/config.ts';
 import { DEFAULT_PROJECT_SETTINGS } from '../shared/types.ts';
 import { chooseFolder } from './folder-picker.ts';
+import { deleteUpload, messageAttachments, resolveUploads, saveUpload } from './attachments.ts';
+import type { Readable } from 'node:stream';
 import { completeOnboarding, loginStatus, onboardingState, openInstall, setupChecks, INSTALL_COMMANDS, type InstallTool } from './setup.ts';
 
 /** The prompt section at the head of a run log (written by the worker before the "# output" marker). */
@@ -81,6 +84,8 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   await app.register(websocket);
   // Accept empty JSON bodies (POST /start etc. are sent with a JSON content type and no body).
   app.removeContentTypeParser('application/json');
+  // Uploads: the handler gets the request stream itself (it enforces its own size limit).
+  app.addContentTypeParser('application/octet-stream', (_req, payload, done) => done(null, payload));
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, raw, done) => {
     try { done(null, raw ? JSON.parse(String(raw)) : {}); } catch (e: any) { e.statusCode = 400; done(e, undefined); }
   });
@@ -143,7 +148,8 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
 
   // ---- projects
   app.post('/api/folder-picker', async () => ({ path: await (hooks.chooseFolder ?? chooseFolder)() }));
-  app.get('/api/projects', async () => listProjects().map(p => ({ ...p, counts: countByStatus(p.id) })));
+  // Both loads read the folder's branch first, so a reload shows the branch that is checked out now.
+  app.get('/api/projects', async () => { for (const p of listProjects()) syncBranch(p.id); return listProjects().map(p => ({ ...p, counts: countByStatus(p.id), folderMissing: !!folderProblem(p) })); });
   app.post('/api/projects', async req => {
     const b = body(req);
     if (!b.path) throw new Error('path is required');
@@ -152,6 +158,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return getProject(p.id);
   });
   app.get('/api/projects/:id', async req => {
+    syncBranch(id(req));
     const p = mustProject(id(req));
     const tasks = listTasks(p.id);
     return {
@@ -177,7 +184,17 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.get('/api/config', async () => configView());
   app.patch('/api/config', async req => { updateConfig(body(req)); return configView(); });
   app.patch('/api/config/project-defaults', async req => { updateProjectDefaults(body(req)); return configView(); });
-  app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); deleteProject(id(req)); return { ok: true }; });
+  app.delete('/api/projects/:id', async req => { orchestrator.stop(id(req)); unwatchBranch(id(req)); deleteProject(id(req)); return { ok: true }; });
+  // Point the project at another folder (Edit project in the sidebar). Same project, same history: only the path changes.
+  app.post('/api/projects/:id/folder', async req => {
+    const r = moveProject(id(req), String(body(req).path ?? ''));
+    if (r.from === r.project.path) return r;
+    syncBranch(r.project.id);
+    const memory = r.memory === 'copied' ? ' Memory (.plexus) was copied from the old folder.'
+      : r.memory === 'not_found' ? ' The old folder is gone, so its memory (.plexus) could not be copied; the new folder starts with the goal only.' : '';
+    postMessage(r.project.id, 'system', `Project folder changed from ${r.from} to ${r.project.path}.${memory} The coordinator starts a fresh conversation in the new folder.`);
+    return { ...r, project: mustProject(r.project.id) };
+  });
   // Open the project folder in the system file manager (the daemon runs on the user's own machine).
   app.post('/api/projects/:id/reveal', async req => {
     const p = mustProject(id(req));
@@ -261,15 +278,43 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     const t = coordinatorTarget(mustProject(id(req)));
     return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null, fallback: !!t.pinnedId && !t.pinned };
   });
+  // One file for a chat message, as the raw request body (streamed to disk). The message names it by id when sent.
+  app.post('/api/chat-sessions/:id/attachments', async req => {
+    mustSession(id(req));
+    if (!req.body || typeof (req.body as any).pipe !== 'function') throw new Error('send the file as application/octet-stream');
+    const q = req.query as any;
+    const { path: _path, ...ref } = await saveUpload(id(req), { name: q?.name, mime: q?.mime, stream: req.body as Readable });
+    return ref;
+  });
+  app.delete('/api/chat-sessions/:id/attachments/:aid', async req => {
+    mustSession(id(req));
+    return { ok: deleteUpload(id(req), String((req.params as any).aid)) };
+  });
   app.post('/api/projects/:id/messages', async (req, reply) => {
     const text = String(body(req).text ?? '').trim();
-    if (!text) throw new Error('empty message');
     mustProject(id(req));
     const sid = body(req).sessionId ? String(body(req).sessionId) : defaultSession(id(req)).id;
     if (mustSession(sid).projectId !== id(req)) throw new Error('chat session belongs to another project');
-    void handleChat(id(req), text, sid).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
+    const files = resolveUploads(sid, body(req).attachments);
+    if (!text && !files.length) throw new Error('empty message');
+    void handleChat(id(req), text, sid, files).catch(e => bus.emitEvent('orchestrator.error', id(req), { message: `chat: ${e?.message ?? e}` }));
     return reply.code(202).send({ ok: true });
   });
+  // A message's attachment. Only real raster images are shown inline; anything else (HTML, SVG, PDF...) is a download,
+  // so an uploaded page can never run script on Plexus's origin (where the token is).
+  const serveAttachment = async (req: FastifyRequest, reply: any) => {
+    const m = getMessage(Number(id(req)));
+    const aid = (req.params as any).aid;
+    const file = messageAttachments(m?.meta).find(x => x.id === aid);
+    if (!file || !existsSync(file.path)) return reply.code(404).send({ error: 'file not found' });
+    const inline = file.kind === 'image' && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.mime) && !(req.query as any)?.download;
+    reply.header('X-Content-Type-Options', 'nosniff').header('Content-Security-Policy', "default-src 'none'; sandbox")
+      .header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}`)
+      .header('Content-Length', statSync(file.path).size);
+    return reply.type(inline ? file.mime : 'application/octet-stream').send(createReadStream(file.path));
+  };
+  app.get('/api/messages/:id/attachments/:aid', serveAttachment);
+  app.get('/api/messages/:id/images/:aid', serveAttachment);
   app.post('/api/messages/:id/proposal', async req => ({ applied: resolveProposal(Number(id(req)), !!body(req).approve) }));
   // The prompt Plexus sent to the coordinator for this chat message (the last attempt of that turn).
   app.get('/api/messages/:id/prompt', async req => {

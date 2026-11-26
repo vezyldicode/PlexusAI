@@ -7,7 +7,29 @@ import { join } from 'node:path';
 
 process.env.PLEXUS_HOME = mkdtempSync(join(tmpdir(), 'plexus-unit-'));
 
-const { classifyCodexRun } = await import('../src/server/adapters/codex.ts');
+const { classifyCodexRun, codexImageArgs } = await import('../src/server/adapters/codex.ts');
+
+test('Codex image arguments work for initial and resumed prompts', () => {
+  assert.deepEqual(codexImageArgs(['/one.png', '/two.jpg']), ['-i', '/one.png', '-i', '/two.jpg']);
+});
+
+const { safeFileName, sniffImage } = await import('../src/server/attachments.ts');
+const { attachmentsPrompt } = await import('../src/server/adapters/types.ts');
+test('attachment names are safe on every OS and images are recognised by content', () => {
+  assert.equal(safeFileName('../../etc/passwd'), 'passwd');
+  assert.equal(safeFileName('C:\\Users\\x\\report.pdf'), 'report.pdf');
+  assert.equal(safeFileName('a<b>:c?.txt'), 'a_b__c_.txt');
+  assert.equal(safeFileName('  ..  '), 'file');
+  assert.equal(safeFileName('CON.txt'), '_CON.txt');
+  assert.equal(safeFileName('báo cáo.xlsx'), 'báo cáo.xlsx');
+  const long = safeFileName('x'.repeat(300) + '.json');
+  assert.ok(long.length === 200 && long.endsWith('.json'));
+  assert.equal(sniffImage(Buffer.from('89504e470d0a1a0a0000', 'hex')), 'image/png');
+  assert.equal(sniffImage(Buffer.from('GIF89a....')), 'image/gif');
+  assert.equal(sniffImage(Buffer.from('<svg xmlns=')), null);
+  assert.equal(attachmentsPrompt({}), '');
+  assert.match(attachmentsPrompt({ images: ['/a.png'], files: ['/b.csv'] }), /Attached files[^\n]*\n- \/a\.png \(image\)\n- \/b\.csv$/);
+});
 const { classifyClaudeRun } = await import('../src/server/adapters/claude-limits.ts');
 const { ensureRepo } = await import('../src/server/util/git.ts');
 const { pickAccount } = await import('../src/server/orchestrator.ts');
