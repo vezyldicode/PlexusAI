@@ -6,6 +6,7 @@ import { readClaudeStatus } from './claude-control.ts';
 import { invocationUsage } from '../usage.ts';
 import { writeMcpConfig } from './mcp-config.ts';
 import type { ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { attachmentsPrompt } from './types.ts';
 import { appConfig } from '../config.ts';
 import { createRunTimer } from './timing.ts';
 import { PLAN_TOOL, planEvent, planItems, type StreamEvent } from './plan.ts';
@@ -100,7 +101,7 @@ export const claudeAdapter: ProviderAdapter = {
     args.push('--dangerously-skip-permissions');
     const timer = createRunTimer('claude');
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: spec.prompt + (spec.images?.length ? `\n\nAttached images (open each with the Read tool):\n${spec.images.join('\n')}` : ''), logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: spec.prompt + attachmentsPrompt(spec), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); for (const d of describeClaudeEvents(line)) spec.onEvent?.(d); },

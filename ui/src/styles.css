@@ -418,6 +418,16 @@ body.resizing .net { pointer-events: none; }
 .chat-images img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .chat-image { position: relative; }
 .chat-image button { position: absolute; top: 2px; right: 2px; padding: 2px; background: var(--raised); }
+.chat-image.failed img, .chat-image.failed .file-chip { opacity: .5; border-color: var(--bad, #d33); }
+.chat-file { display: inline-flex; align-items: center; gap: 6px; height: 72px; max-width: 240px; padding: 0 28px 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); color: inherit; text-decoration: none; }
+a.chat-file { padding-right: 10px; }
+a.chat-file:hover { border-color: var(--muted); }
+.file-chip { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.file-chip-text { display: flex; flex-direction: column; min-width: 0; }
+.file-chip-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.file-chip-meta { font-size: 11px; color: var(--muted); }
+.upload-progress { position: absolute; left: 4px; right: 4px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.upload-progress span { display: block; height: 100%; background: var(--accent, currentColor); transition: width .15s; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .hint { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; }
 

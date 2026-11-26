@@ -16,7 +16,7 @@ import { baseRef, commitsSince, conflictNotice, FOLDER_SYNC_BRANCH, mergeIntoBas
 import { CONTEXT_DIR } from './context.ts';
 import { running, runAttempt, writesCode, type AttemptOutcome } from './worker.ts';
 import { appConfig } from './config.ts';
-import { copyTaskImages, validateTaskImages } from './attachments.ts';
+import { attachmentNote, copyTaskAttachments, validateTaskAttachments } from './attachments.ts';
 
 const UNAVAILABLE = new Set(['limited', 'transient', 'needs_login', 'blocked', 'disabled']);
 const INDEPENDENT_KINDS = new Set(['review', 'evaluate']);
@@ -245,21 +245,21 @@ export class Orchestrator {
    * More work for the agent that did `id`: a new task that continues its CLI conversation in the same worktree path
    * (a lane), so the agent does not re-read the project. Code-writing kinds continue as single-agent work.
    */
-  continueTask(id: string, instructions: string, title = '', sessionId?: string | null, fromUser = false, images?: string[]): Task {
+  continueTask(id: string, instructions: string, title = '', sessionId?: string | null, fromUser = false, attachments?: string[]): Task {
     const prev = getTask(id);
     if (!prev) throw new Error('no such task');
-    validateTaskImages(sessionId, images);
+    validateTaskAttachments(sessionId, attachments);
     if (ACTIVE.includes(prev.status) && prev.status !== 'blocked') {
       // Still running or queued: the instructions go to its inbox instead.
-      const copied = copyTaskImages(sessionId, images, prev.id);
-      return this.sendMessage(prev.id, [instructions, copied.length ? `Attached images: ${copied.join(', ')}` : ''].filter(Boolean).join('\n'));
+      const copied = copyTaskAttachments(sessionId, attachments, prev.id);
+      return this.sendMessage(prev.id, [instructions, attachmentNote(copied)].filter(Boolean).join('\n'));
     }
     const t = createTask(prev.projectId, {
       title: title || `${fromUser ? USER_FOLLOW_UP : 'Continue '}${shortId(prev)}: ${instructions.split('\n')[0].slice(0, 60)}`, description: instructions,
       role: 'solo', kind: 'solo', priority: 80, adhoc: true, originSessionId: sessionId ?? prev.originSessionId, laneFrom: prev,
       paths: prev.paths, pinnedAccountId: prev.pinnedAccountId,
     });
-    copyTaskImages(sessionId, images, t.id);
+    copyTaskAttachments(sessionId, attachments, t.id);
     // The model and effort chosen for that agent carry over to its continuation.
     if (Object.keys(prev.models).length || Object.keys(prev.efforts).length) updateTask(t.id, { models: prev.models, efforts: prev.efforts }, true);
     void this.tick();

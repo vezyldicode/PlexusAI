@@ -12,8 +12,19 @@ export interface Classification {
   evidence: string[];
 }
 
+/** The prompt lines that point the agent at the files the user attached (they live outside its worktree). */
+export function attachmentsPrompt(spec: Pick<RunSpec, 'images' | 'files'>): string {
+  const images = spec.images ?? [], files = spec.files ?? [];
+  if (!images.length && !files.length) return '';
+  return '\n\nAttached files (outside the project; read them in place, do not copy them into the repository unless asked):\n' +
+    [...images.map(p => `- ${p} (image)`), ...files.map(p => `- ${p}`)].join('\n');
+}
+
 export interface RunSpec {
+  /** Attached images (PNG/JPEG/GIF/WebP): Codex gets them as `-i` images too. */
   images?: string[];
+  /** Any other attached files: their paths are listed in the prompt. */
+  files?: string[];
   account: Account;
   cwd: string;
   prompt: string;

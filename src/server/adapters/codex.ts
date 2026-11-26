@@ -5,6 +5,7 @@ import { listCodexModelsOnce, readCodexRateLimitsOnce } from './codex-appserver.
 import { invocationUsage } from '../usage.ts';
 import { codexMcpOverrides, withSystem } from './mcp-config.ts';
 import type { Classification, ProviderAdapter, RunOutcome, RunSpec } from './types.ts';
+import { attachmentsPrompt } from './types.ts';
 import { appConfig } from '../config.ts';
 import { spentPercent, transientBackoffMs, unknownResetBackoffMs } from './claude-limits.ts';
 import { createRunTimer } from './timing.ts';
@@ -119,7 +120,7 @@ export const codexAdapter: ProviderAdapter = {
     const since = Date.now();
     const timer = createRunTimer('codex', since);
     const r = await runStreaming({
-      cmd, args, cwd: spec.cwd, stdin: withSystem(spec) + (spec.images?.length ? `\n\nAttached images: ${spec.images.join(', ')}` : ''), logPath: spec.logPath,
+      cmd, args, cwd: spec.cwd, stdin: withSystem(spec) + attachmentsPrompt(spec), logPath: spec.logPath,
       env: { ...process.env, ...gitIdentityEnv(), ...this.accountEnv(spec.account) },
       timeoutMs: spec.timeoutMs, idleTimeoutMs: spec.idleTimeoutMs, signal: spec.signal,
       onLine: line => { timer.line(line); const d = describeCodexEvent(line); if (d) spec.onEvent?.(d); },

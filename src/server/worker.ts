@@ -21,7 +21,7 @@ import { appConfig } from './config.ts';
 import { addTiming } from './adapters/timing.ts';
 import { forkClaudeConversation } from './adapters/claude-fork.ts';
 import { taskMcp } from './mcp/spec.ts';
-import { taskImagePaths } from './attachments.ts';
+import { runFiles, taskAttachmentRefs } from './attachments.ts';
 
 /**
  * Resume a CLI conversation only while that is cheaper than a fresh start with the hand-off notes: every later call
@@ -249,7 +249,7 @@ ${system ? `${system}\n\n` : ''}${prompt}
 # output
 ${note}`);
       return adapter.run({
-        account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, images: taskImagePaths(task.id), autocompact: p.settings.autocompactTokens, mcp: taskMcp(),
+        account, cwd: wt, prompt, system, model, effort: eff.effort, readOnly: false, resumeId, ...runFiles(taskAttachmentRefs(task.id)), autocompact: p.settings.autocompactTokens, mcp: taskMcp(),
         forkSession: opts.fork, systemOnResume: opts.systemOnResume, maxCompactions: opts.budget === false ? 0 : p.settings.maxCompactions,
         timeoutMs: role.maxRuntimeMin * 60_000, idleTimeoutMs: idleTimeoutMin(role.maxRuntimeMin) * 60_000,
         logPath, signal: ctl.signal,

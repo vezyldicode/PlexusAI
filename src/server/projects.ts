@@ -7,7 +7,7 @@ import { deleteProjectSessions, touchSession, routeSession } from './chat.ts';
 import { bus } from './events.ts';
 import { cleanProjectSettings, projectDefaults } from './config.ts';
 import { listTasks } from './tasks.ts';
-import { deleteTaskImages } from './attachments.ts';
+import { deleteTaskAttachments } from './attachments.ts';
 
 function rowToProject(r: any): Project {
   return {
@@ -124,7 +124,7 @@ export function setProjectStatus(id: string, status: ProjectStatus): Project {
 
 export function deleteProject(id: string): void {
   const db = getDb();
-  for (const t of listTasks(id)) deleteTaskImages(t.id);
+  for (const t of listTasks(id)) deleteTaskAttachments(t.id);
   db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id);
   db.prepare('DELETE FROM messages WHERE project_id = ?').run(id);
   deleteProjectSessions(id);
