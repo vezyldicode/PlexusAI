@@ -11,7 +11,7 @@ import {
 } from './projects.ts';
 import { getRole } from './roles.ts';
 import { ACTIVE, createTask, getTask, listTasks, pathsOverlap, runnableTasks, setStatus, shortId, updateTask, USER_FOLLOW_UP } from './tasks.ts';
-import { changedLines, git, hasCommitsAhead, removeWorktree } from './util/git.ts';
+import { changedLines, deleteBranchIfMerged, git, hasCommitsAhead, pruneTaskBranches, removeWorktree } from './util/git.ts';
 import { baseRef, commitsSince, conflictNotice, FOLDER_SYNC_BRANCH, mergeIntoBase, onFolderConflict, prepareProjectRepo, type MergeOutcome, type SyncResult } from './checkout.ts';
 import { CONTEXT_DIR } from './context.ts';
 import { running, runAttempt, writesCode, type AttemptOutcome } from './worker.ts';
@@ -124,6 +124,7 @@ export class Orchestrator {
     const stale = db.prepare(`SELECT id FROM tasks WHERE status = 'running'`).all() as any[];
     for (const r of stale) updateTask(r.id, { status: 'interrupted', accountId: null, error: 'daemon restarted while running' });
     this.loop();
+    void this.pruneBranches();
     bus.on('event', ev => { if (ev.type === 'account.available') this.accountAvailable((ev.data as any).id, (ev.data as any).label); });
   }
 
@@ -743,12 +744,30 @@ export class Orchestrator {
 
   private async finishNonCodeKeepWorktree(t: Task) { setStatus(t.id, 'done'); }
 
+  /** Delete a finished task's branch if it has nothing the base lacks and no task still in progress uses it. */
+  private async dropBranch(p: Project, branch: string) {
+    if (listTasks(p.id).some(x => x.branch === branch && ACTIVE.includes(x.status))) return;
+    await deleteBranchIfMerged(p.path, branch, baseRef(p)).catch(() => false);
+  }
+
+  /** Startup sweep: branches of finished tasks that an earlier version (or a failed worktree removal) left behind. */
+  private async pruneBranches() {
+    for (const p of listProjects()) {
+      if (folderProblem(p)) continue;
+      const keep = new Set(listTasks(p.id).filter(t => t.branch && ACTIVE.includes(t.status)).map(t => t.branch!));
+      const gone = await pruneTaskBranches(p.path, baseRef(p), keep).catch(() => [] as string[]);
+      if (gone.length) bus.emitEvent('branches.pruned', p.id, { branches: gone });
+    }
+  }
+
   /** Code task finished: send to review or merge. */
   private async integrate(p: Project, t: Task) {
     const hasCommits = t.branch ? await hasCommitsAhead(p.path, t.branch, baseRef(p)) : false;
     if (!hasCommits) {
       setStatus(t.id, 'done');
       if (t.worktree) await removeWorktree(p.path, t.worktree).catch(() => {});
+      // Nothing to merge (a read-only task, or its work is already in the base): the branch would only be left behind.
+      if (t.branch) await this.dropBranch(p, t.branch);
       this.markChainDone(t);
       return;
     }
