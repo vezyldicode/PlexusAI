@@ -129,6 +129,41 @@ export async function hasCommitsAhead(repo: string, branch: string, base: string
   return Number(r.stdout.trim()) > 0;
 }
 
+/** Branches checked out in some worktree of `repo` (git refuses to delete those). */
+async function checkedOutBranches(repo: string): Promise<Set<string>> {
+  const r = await git(repo, 'worktree', 'list', '--porcelain');
+  return new Set(r.stdout.split('\n').filter(l => l.startsWith('branch refs/heads/')).map(l => l.slice('branch refs/heads/'.length).trim()));
+}
+
+/**
+ * Delete `branch` when it holds nothing `base` does not have and no worktree has it checked out. A read-only task, or
+ * one whose work already reached the base, leaves such a branch; a branch with work of its own is never touched.
+ * Returns true if it was deleted.
+ */
+export async function deleteBranchIfMerged(repo: string, branch: string, base: string, checkedOut?: Set<string>): Promise<boolean> {
+  if ((checkedOut ?? await checkedOutBranches(repo)).has(branch)) return false;
+  const ahead = await git(repo, 'rev-list', '--count', `${base}..refs/heads/${branch}`);
+  if (ahead.code !== 0 || ahead.stdout.trim() !== '0') return false; // missing ref or base, or commits of its own
+  return (await git(repo, 'branch', '-D', branch)).code === 0;
+}
+
+/**
+ * Task branches (plexus/…, and swarm/… from before the rename) left over from finished tasks: every one that is fully
+ * in `base`, not checked out and not in `keep` (branches of tasks still in progress) is deleted. Returns the deleted names.
+ */
+export async function pruneTaskBranches(repo: string, base: string, keep: Set<string>): Promise<string[]> {
+  await git(repo, 'worktree', 'prune');
+  const r = await git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/plexus/', 'refs/heads/swarm/');
+  if (r.code !== 0) return [];
+  const checkedOut = await checkedOutBranches(repo);
+  const deleted: string[] = [];
+  for (const b of r.stdout.split('\n').map(s => s.trim()).filter(Boolean)) {
+    if (keep.has(b)) continue;
+    if (await deleteBranchIfMerged(repo, b, base, checkedOut)) deleted.push(b);
+  }
+  return deleted;
+}
+
 /** Merge a task branch into the main branch inside the main checkout. */
 export async function mergeBranch(repo: string, mainBranch: string, branch: string, message: string): Promise<{ ok: boolean; conflict: boolean; detail: string }> {
   const cur = await gitOk(repo, 'rev-parse', '--abbrev-ref', 'HEAD');

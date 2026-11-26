@@ -151,6 +151,33 @@ test('removing a worktree never deletes what a link inside it points to (node_mo
   assert.equal(existsSync(join(deps, 'index.js')), true);
 });
 
+test('finished task branches are pruned only when the base has all their work and no worktree uses them', async () => {
+  const { deleteBranchIfMerged, pruneTaskBranches } = await import('../src/server/util/git.ts');
+  const repo = mkdtempSync(join(tmpdir(), 'plexus-br-'));
+  const g = (...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo, encoding: 'utf8' }).trim();
+  g('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'a.txt'), 'a');
+  g('add', '-A'); g('commit', '-q', '-m', 'a');
+  g('branch', 'plexus/T1-read-only');                          // no commits of its own (read-only task)
+  g('branch', 'plexus/T2-active');                             // same, but a task still uses it
+  g('branch', 'swarm/T3-old-name');                            // from before the rename
+  g('checkout', '-q', '-b', 'plexus/T4-has-work');
+  writeFileSync(join(repo, 'b.txt'), 'b');
+  g('add', '-A'); g('commit', '-q', '-m', 'b');
+  g('checkout', '-q', 'main');
+  const wt = join(mkdtempSync(join(tmpdir(), 'plexus-br2-')), 'T5');
+  g('worktree', 'add', '-q', '-b', 'plexus/T5-checked-out', wt, 'main');
+  g('branch', 'feature/mine');                                 // the user's own branch: never Plexus's to delete
+
+  const gone = await pruneTaskBranches(repo, 'main', new Set(['plexus/T2-active']));
+  assert.deepEqual(gone.sort(), ['plexus/T1-read-only', 'swarm/T3-old-name']);
+  const left = g('branch', '--format=%(refname:short)').split('\n').sort();
+  assert.deepEqual(left, ['feature/mine', 'main', 'plexus/T2-active', 'plexus/T4-has-work', 'plexus/T5-checked-out']);
+  // A missing base never reads as "nothing ahead".
+  assert.equal(await deleteBranchIfMerged(repo, 'plexus/T2-active', 'refs/plexus/missing/base'), false);
+  assert.equal(await deleteBranchIfMerged(repo, 'plexus/T2-active', 'main'), true);
+});
+
 test('readResult accepts the near-miss shapes an agent writes after compaction (no extra run to fix the JSON)', () => {
   // Shape of a real solo result that was rejected and cost a whole extra run on a 105k context.
   const dir = mkdtempSync(join(tmpdir(), 'plexus-res-'));
