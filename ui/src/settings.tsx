@@ -8,7 +8,7 @@ import type { Account, ModelCatalog, Project, Provider, Role, Skill } from './ty
 import { ContextMenu, Dot, Ic, Meter, type MenuItem } from './ui.tsx';
 import { FALLBACK, effortsFor, useModels } from './models.tsx';
 import { accountItems } from './components/Sidebar.tsx';
-import { USER_COLORS, readUserColor, saveUserColor, readTheme, saveTheme, type Theme } from './appearance.ts';
+import { USER_COLORS, readUserColor, saveUserColor, readTheme, saveTheme } from './appearance.ts';
 import { EngineSettings, ProjectSettingsPanel, TooltipLayer, engineKeys, resetProjectTab, useConfig, type EngineTab } from './engine-settings.tsx';
 
 export type SettingsTab = 'accounts' | 'roles' | 'skills' | 'appearance' | 'project' | EngineTab;
@@ -132,17 +132,13 @@ function AppearanceSettings() {
       <div className="settings-head"><h2>Appearance</h2></div>
       <p className="lead">Saved on this device</p>
       <div className="cfg-group">
-        <div className="cfg-group-head"><h3>Theme</h3></div>
-        <div className="cfg-rows">
-          <div className="cfg-row">
-            <label className="cfg-label" htmlFor="appearance-theme"><span className="cfg-name">Color scheme</span></label>
-            <div className="cfg-control">
-              <select id="appearance-theme" value={theme} onChange={e => { const value = e.target.value as Theme; setTheme(value); saveTheme(value); }}>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </div>
-          </div>
+        <div className="cfg-group-head theme-picker">
+          <h3 id="appearance-theme-label">Theme</h3>
+          <select aria-labelledby="appearance-theme-label" value={theme}
+            onChange={e => { const value = e.target.value === 'light' ? 'light' : 'dark'; setTheme(value); saveTheme(value); }}>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
         </div>
       </div>
       <div className="cfg-group">

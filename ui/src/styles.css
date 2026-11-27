@@ -869,6 +869,8 @@ select.effort.bad { border-color: var(--warn, #b7791f); }
 .cfg-group { margin-top: 24px; }
 .cfg-group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 8px; }
 .cfg-group-head h3 { margin: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text); }
+.theme-picker { align-items: center; justify-content: space-between; }
+.theme-picker select { width: auto; height: 28px; font-size: 12px; }
 .cfg-rows { border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .cfg-row {
   display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 1.5fr); align-items: center; gap: 16px;
