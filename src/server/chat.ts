@@ -10,7 +10,7 @@ import { deleteSessionAttachments } from './attachments.ts';
 const rowToSession = (r: any): ChatSession => ({
   id: r.id, projectId: r.project_id, title: r.title, archived: !!r.archived, unread: r.unread ?? 0,
   cliSessionId: r.cli_session_id ?? null, cliAccountId: r.cli_account_id ?? null, cliSyncedMessageId: r.cli_synced_message_id ?? 0,
-  coordAccountId: r.coord_account_id ?? null, coordModel: r.coord_model ?? null, coordEffort: r.coord_effort ?? null,
+  coordAccountId: r.coord_account_id ?? null, coordModel: r.coord_model ?? null, coordEffort: r.coord_effort ?? null, coordAuto: r.coord_auto == null ? true : !!r.coord_auto,
   createdAt: r.created_at, updatedAt: r.updated_at,
 });
 
@@ -103,9 +103,9 @@ export function setCliSession(id: string, cli: { sessionId: string; accountId: s
 }
 
 /** Store the coordinator choice a session stays on; `null` clears it (the next turn picks one again). */
-export function setSessionCoordinator(id: string, c: { accountId: string; model: string | null; effort: string | null } | null): void {
-  getDb().prepare('UPDATE chat_sessions SET coord_account_id = ?, coord_model = ?, coord_effort = ? WHERE id = ?')
-    .run(c?.accountId ?? null, c?.model ?? null, c?.effort ?? null, id);
+export function setSessionCoordinator(id: string, c: { accountId: string; model: string | null; effort: string | null; auto?: boolean } | null): void {
+  getDb().prepare('UPDATE chat_sessions SET coord_account_id = ?, coord_model = ?, coord_effort = ?, coord_auto = ? WHERE id = ?')
+    .run(c?.accountId ?? null, c?.model ?? null, c?.effort ?? null, c?.auto === false ? 0 : 1, id);
 }
 
 /** The session that last started/paused/resumed/stopped the project; project-level notices go there. */

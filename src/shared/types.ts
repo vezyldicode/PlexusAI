@@ -324,6 +324,8 @@ export interface ChatSession {
   coordAccountId: string | null;
   coordModel: string | null;
   coordEffort: string | null;
+  /** The stored account was picked automatically (true) or chosen in this session's picker (false). */
+  coordAuto: boolean;
   createdAt: string;
   updatedAt: string;
 }

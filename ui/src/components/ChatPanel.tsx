@@ -240,22 +240,20 @@ function useCoordinatorOptions(project: Project, accounts: Account[], sessionId:
   useEffect(() => { api<Role[]>('GET', '/api/roles').then(r => setCoordRole(r.find(x => x.name === 'coordinator') ?? null)).catch(() => {}); }, []);
   const roleModels = coordRole?.models ?? {}, roleEfforts = coordRole?.efforts ?? {};
   const catalog = useModels();
-  const saved = project.settings.coordinatorModels ?? {};
-  const savedEfforts = project.settings.coordinatorEfforts ?? {};
-  const pinnedId = project.settings.coordinatorAccountId ?? null;
-  const pinned = pinnedId ? accounts.find(a => a.id === pinnedId) : undefined;
-  const providers: Provider[] = pinned ? [pinned.provider] : [...new Set(accounts.filter(a => a.enabled).map(a => a.provider))];
-  // A change here is the default for new chats and also this chat's own choice (other chats keep theirs).
-  const [saves, setSaves] = useState(0);
-  const save = (settings: Partial<Project['settings']>) =>
-    api('PATCH', `/api/projects/${project.id}`, { settings, ...(sessionId && { sessionId }) }).then(() => { setSaves(n => n + 1); reload(); }).catch(e => onError(e.message));
+  const projModels = project.settings.coordinatorModels ?? {};
+  const projEfforts = project.settings.coordinatorEfforts ?? {};
+  const projPinId = project.settings.coordinatorAccountId ?? null;
 
   // The account, model and effort this chat answers its next message with (its stored choice, or a new pick when that
-  // account cannot run). Re-asked whenever the settings, the accounts' states or the conversation change.
-  type Target = { accountId: string | null; provider: Provider | null; model: string | null; effort: string | null; fallback: boolean };
+  // account cannot run). Re-asked whenever the settings, the accounts' states, the session or the conversation change.
+  type Target = { accountId: string | null; provider: Provider | null; model: string | null; effort: string | null; fallback: boolean;
+    stored?: boolean; auto?: boolean; defaultModel?: string | null; defaultEffort?: string | null };
   const [target, setTarget] = useState<Target | null>(null);
+  const [saves, setSaves] = useState(0);
   const accountsKey = accounts.map(a => `${a.id}:${a.enabled}:${a.state}:${a.cooldownUntil ?? ''}`).join('|');
-  const settingsKey = JSON.stringify([pinnedId, saved, savedEfforts]);
+  const settingsKey = JSON.stringify([projPinId, projModels, projEfforts]);
+  // Switching chat drops the old chat's values at once rather than showing them until the new ones arrive.
+  useEffect(() => setTarget(null), [project.id, sessionId]);
   useEffect(() => {
     let live = true;
     api<Target>('GET', `/api/projects/${project.id}/coordinator-target${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`)
@@ -264,20 +262,44 @@ function useCoordinatorOptions(project: Project, accounts: Account[], sessionId:
   }, [project.id, sessionId, accountsKey, settingsKey, tick, saves]);
   const answering = target?.accountId ? accounts.find(a => a.id === target.accountId) : undefined;
 
+  // In a chat, the picker edits that chat's own choice (PATCH .../coordinator): project settings stay the default for
+  // new chats. Without a chat it edits the project settings.
+  const inSession = !!sessionId;
+  const own = inSession && !!target?.stored;
+  // The account the picker shows as chosen: this chat's own (Automatic when it was picked automatically), else the project's.
+  const pinnedId = own ? (target!.auto ? null : target!.accountId) : projPinId;
+  const pinned = pinnedId ? accounts.find(a => a.id === pinnedId) : undefined;
+  const sessionProvider = inSession ? target?.provider ?? null : null;
+  const providers: Provider[] = sessionProvider ? [sessionProvider] : pinned ? [pinned.provider] : [...new Set(accounts.filter(a => a.enabled).map(a => a.provider))];
+  const done = () => { setSaves(n => n + 1); reload(); };
+  const fail = (e: Error) => onError(e.message);
+  const patchSession = (b: Record<string, string | null>) => api('PATCH', `/api/chat-sessions/${sessionId}/coordinator`, b).then(done).catch(fail);
+  const patchProject = (settings: Partial<Project['settings']>) => api('PATCH', `/api/projects/${project.id}`, { settings }).then(done).catch(fail);
+  const setAccount = (id: string | null) => inSession ? patchSession({ accountId: id }) : patchProject({ coordinatorAccountId: id });
+  const setModel = (p: Provider, m: string | undefined) => inSession ? patchSession({ model: m ?? null }) : patchProject({ coordinatorModels: { ...projModels, [p]: m } });
+  const setEffort = (p: Provider, v: string | undefined) => inSession ? patchSession({ effort: v ?? null }) : patchProject({ coordinatorEfforts: { ...projEfforts, [p]: v } });
+  // What the model/effort controls show per provider: in a chat, the values it answers with ("Default" = the role's own).
+  const valuesFor = (p: Provider) => sessionProvider === p && target
+    ? { model: target.model && target.model !== target.defaultModel ? target.model : undefined,
+        effort: target.effort && target.effort !== target.defaultEffort ? target.effort : undefined,
+        inherited: { model: target.defaultModel ?? undefined, effort: target.defaultEffort ?? undefined } }
+    : { model: projModels[p], effort: projEfforts[p], inherited: { model: roleModels[p], effort: roleEfforts[p] } };
+
   // What the chip shows: the account, then the model and effort of the provider that will actually answer.
   const p = target ? target.provider ?? undefined : pinned?.provider ?? providers[0];
-  const model = target?.accountId ? target.model ?? undefined : p ? saved[p] || roleModels[p] : undefined;
-  const effort = target?.accountId && target.effort ? target.effort : p ? savedEfforts[p] || roleEfforts[p] || effortsFor(catalog, p, model).defaultEffort || undefined : undefined;
+  const model = target?.accountId ? target.model ?? undefined : p ? projModels[p] || roleModels[p] : undefined;
+  const effort = target?.accountId && target.effort ? target.effort : p ? projEfforts[p] || roleEfforts[p] || effortsFor(catalog, p, model).defaultEffort || undefined : undefined;
   const answeringName = answering ? answering.label || answering.id : target?.accountId ?? null;
+  const fallback = !!pinnedId && !!target?.accountId && target.accountId !== pinnedId;
   const summary = {
-    account: pinned && !target?.fallback ? pinned.label || pinned.id
+    account: pinned && !fallback ? pinned.label || pinned.id
       : pinnedId ? `${pinned ? pinned.label || pinned.id : `${pinnedId} (missing)`}${answeringName ? ` → ${answeringName}` : ''}`
       : answeringName ? `Automatic · ${answeringName}` : 'Automatic',
     model: p ? withProvider(PROVIDER_NAME[p], modelLabel(catalog, p, model)) : 'No account',
     effort,
     state: pinned ? (pinned.enabled ? pinned.state : 'disabled') : null,
   };
-  return { catalog, saved, savedEfforts, roleModels, roleEfforts, pinnedId, pinned, providers, save, summary };
+  return { catalog, pinnedId, pinned, providers, setAccount, setModel, setEffort, valuesFor, summary };
 }
 
 function CoordinatorPicker({ o, accounts, onClose }: { o: ReturnType<typeof useCoordinatorOptions>; accounts: Account[]; onClose: () => void }) {
@@ -300,10 +322,10 @@ function CoordinatorPicker({ o, accounts, onClose }: { o: ReturnType<typeof useC
         <div className="me-row">
           <span className="me-label">Account</span>
           <div className="seg" role="radiogroup" aria-label="Account">
-            <button role="radio" aria-checked={!o.pinnedId} title="Plexus picks an account with quota left" onClick={() => void o.save({ coordinatorAccountId: null })}>Automatic</button>
+            <button role="radio" aria-checked={!o.pinnedId} title="Plexus picks an account with quota left" onClick={() => void o.setAccount(null)}>Automatic</button>
             {enabled.map(a => (
               <button key={a.id} role="radio" aria-checked={o.pinnedId === a.id} title={`${a.id} · ${PROVIDER_NAME[a.provider]}${a.state === 'ok' ? '' : ` · ${label(a.state)}`}`}
-                onClick={() => void o.save({ coordinatorAccountId: a.id })}>
+                onClick={() => void o.setAccount(a.id)}>
                 <Dot state={a.state} />{a.label || a.id}
               </button>
             ))}
@@ -311,15 +333,16 @@ function CoordinatorPicker({ o, accounts, onClose }: { o: ReturnType<typeof useC
           </div>
         </div>
       </div>
-      {o.providers.map(p => (
-        <div key={p} className="coord-provider">
-          {!o.pinned && o.providers.length > 1 && <div className="coord-provider-name">On {PROVIDER_NAME[p]} accounts</div>}
-          <ModelEffort className="coord-me" provider={p} catalog={o.catalog} model={o.saved[p]} effort={o.savedEfforts[p]}
-            inherited={{ model: o.roleModels[p], effort: o.roleEfforts[p] }}
-            onModel={m => void o.save({ coordinatorModels: { ...o.saved, [p]: m } })}
-            onEffort={v => void o.save({ coordinatorEfforts: { ...o.savedEfforts, [p]: v } })} />
-        </div>
-      ))}
+      {o.providers.map(p => {
+        const v = o.valuesFor(p);
+        return (
+          <div key={p} className="coord-provider">
+            {!o.pinned && o.providers.length > 1 && <div className="coord-provider-name">On {PROVIDER_NAME[p]} accounts</div>}
+            <ModelEffort className="coord-me" provider={p} catalog={o.catalog} model={v.model} effort={v.effort} inherited={v.inherited}
+              onModel={m => void o.setModel(p, m)} onEffort={e => void o.setEffort(p, e)} />
+          </div>
+        );
+      })}
       {!o.providers.length && <div className="sub coord-empty">Enable an account in Settings to choose a model</div>}
     </div>
   );

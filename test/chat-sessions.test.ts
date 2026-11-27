@@ -187,8 +187,8 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 60_00
 test('a chat session keeps its coordinator account, model and effort until that account cannot run', { timeout: 60_000 }, async () => {
   const { getDb } = await import('../src/server/db.ts');
   const { addAccount, removeAccount, updateAccount } = await import('../src/server/accounts.ts');
-  const { createProject, updateProject } = await import('../src/server/projects.ts');
-  const { coordinatorTarget, applyPickerToSession, handleChat } = await import('../src/server/coordinator.ts');
+  const { createProject, getProject, updateProject } = await import('../src/server/projects.ts');
+  const { coordinatorTarget, setSessionChoice, handleChat } = await import('../src/server/coordinator.ts');
   const dir = join(root, 'sticky');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'README.md'), '# Sticky\n');
@@ -245,16 +245,75 @@ test('a chat session keeps its coordinator account, model and effort until that 
 
     // A picker change in one session is that session's choice only.
     chat.setSessionCoordinator(s2.id, { accountId: 'stk-b', model: null, effort: 'low' });
-    const p2 = updateProject(p.id, { settings: { coordinatorAccountId: 'stk-a' } });
-    applyPickerToSession(p2, s1.id, { coordinatorAccountId: 'stk-a' });
-    assert.equal(chat.getSession(s1.id)!.coordAccountId, 'stk-a');
+    setSessionChoice(s1.id, { accountId: 'stk-a' });
+    assert.deepEqual([chat.getSession(s1.id)!.coordAccountId, chat.getSession(s1.id)!.coordAuto], ['stk-a', false]);
     assert.deepEqual([chat.getSession(s2.id)!.coordAccountId, chat.getSession(s2.id)!.coordEffort], ['stk-b', 'low']);
-    // "Automatic" clears only that session's choice.
-    applyPickerToSession(updateProject(p.id, { settings: { coordinatorAccountId: null } }), s1.id, { coordinatorAccountId: null });
-    assert.equal(chat.getSession(s1.id)!.coordAccountId, null);
+    // "Automatic" drops only that session's own account: it gets an automatic pick, and the project pin does not take it over.
+    updateProject(p.id, { settings: { coordinatorAccountId: 'stk-a' } });
+    setSessionChoice(s1.id, { accountId: null });
+    assert.deepEqual([chat.getSession(s1.id)!.coordAccountId, chat.getSession(s1.id)!.coordAuto], ['stk-b', true]);
     assert.equal(chat.getSession(s2.id)!.coordAccountId, 'stk-b');
+    setState('stk-b', 'limited');
+    assert.equal(coordinatorTarget(getProject(p.id)!, chat.getSession(s1.id)).account?.id, 'stk-a');
+    reset();
+    updateProject(p.id, { settings: { coordinatorAccountId: null } });
   } finally {
     for (const o of others()) updateAccount(o.id, { enabled: true });
     for (const id of ['stk-a', 'stk-b']) removeAccount(id);
+  }
+});
+
+test('the coordinator picker of one chat changes only that chat; the target endpoint returns its values', { timeout: 60_000 }, async () => {
+  const { getDb } = await import('../src/server/db.ts');
+  const { updateAccount } = await import('../src/server/accounts.ts');
+  const d = await startTestDaemon();
+  const { call } = d;
+  const others = () => getDb().prepare("SELECT id FROM accounts WHERE id NOT IN ('pk-a', 'pk-b')").all() as { id: string }[];
+  try {
+    for (const id of ['pk-a', 'pk-b']) await call('POST', '/api/accounts', { provider: 'mock', id });
+    for (const o of others()) updateAccount(o.id, { enabled: false });
+    const dir = join(root, 'picker');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '# Picker\n');
+    const p = await call('POST', '/api/projects', { path: dir, goal: 'picker' });
+    const settings = JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings);
+    const s1 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const s2 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const target = (sid: string) => call('GET', `/api/projects/${p.id}/coordinator-target?session=${sid}`);
+    const before2 = await target(s2);
+    assert.equal(before2.stored, false);
+
+    // Account, model and effort chosen in s1 are s1's own.
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { accountId: 'pk-a' });
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { model: 'mock-big' });
+    const s = await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { effort: 'high' });
+    assert.deepEqual([s.coordAccountId, s.coordModel, s.coordEffort, s.coordAuto], ['pk-a', 'mock-big', 'high', false]);
+    const t1 = await target(s1);
+    assert.deepEqual([t1.accountId, t1.model, t1.effort, t1.stored, t1.auto], ['pk-a', 'mock-big', 'high', true, false]);
+
+    // Project settings and the other chat are untouched.
+    assert.equal(JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings), settings);
+    assert.deepEqual(await target(s2), before2);
+    const raw2 = chat.getSession(s2)!;
+    assert.deepEqual([raw2.coordAccountId, raw2.coordModel, raw2.coordEffort], [null, null, null]);
+
+    // Automatic: an automatic pick kept by s1, shown as Automatic; Default model/effort = the role's.
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { accountId: null });
+    const t2 = await target(s1);
+    assert.deepEqual([t2.stored, t2.auto], [true, true]);
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { model: null, effort: null });
+    const t3 = await target(s1);
+    assert.deepEqual([t3.model, t3.effort], [t3.defaultModel, t3.defaultEffort]);
+    assert.equal(JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings), settings);
+
+    // A new chat starts from the project defaults.
+    await call('PATCH', `/api/projects/${p.id}`, { settings: { coordinatorAccountId: 'pk-b', coordinatorEfforts: { mock: 'low' } } });
+    const s3 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const t4 = await target(s3);
+    assert.deepEqual([t4.accountId, t4.effort, t4.stored], ['pk-b', 'low', false]);
+    assert.equal((await target(s1)).stored, true);
+  } finally {
+    for (const o of others()) updateAccount(o.id, { enabled: true });
+    await d.shutdown();
   }
 });

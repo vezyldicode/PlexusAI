@@ -82,6 +82,8 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE chat_sessions ADD COLUMN coord_account_id TEXT;
    ALTER TABLE chat_sessions ADD COLUMN coord_model TEXT;
    ALTER TABLE chat_sessions ADD COLUMN coord_effort TEXT;`,
+  // Whether that account was picked automatically (the picker shows Automatic) or chosen by the user for this session.
+  `ALTER TABLE chat_sessions ADD COLUMN coord_auto INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 export function getDb(): DatabaseSync {
