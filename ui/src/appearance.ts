@@ -15,6 +15,21 @@ export const USER_COLORS: UserColor[] = [
 ];
 
 const KEY = 'plexus.chat.userColor';
+const THEME_KEY = 'plexus.appearance.theme';
+export type Theme = 'dark' | 'light';
+
+export function readTheme(): Theme {
+  try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+}
+
+export function applyTheme(theme: Theme) {
+  document.documentElement.dataset.theme = theme;
+}
+
+export function saveTheme(theme: Theme) {
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* still apply when storage is unavailable */ }
+  applyTheme(theme);
+}
 
 export function readUserColor(): string {
   try { const v = localStorage.getItem(KEY); return USER_COLORS.some(c => c.id === v) ? v! : 'graphite'; } catch { return 'graphite'; }
