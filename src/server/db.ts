@@ -78,6 +78,12 @@ const MIGRATIONS: string[] = [
   // working directory (the coordinator's chat, held in the project folder) instead of resuming it in place.
   `ALTER TABLE runs ADD COLUMN timing TEXT;
    ALTER TABLE tasks ADD COLUMN cli_fork_cwd TEXT;`,
+  // The account, model and effort a chat session's coordinator stays on (changed only when that account cannot run).
+  `ALTER TABLE chat_sessions ADD COLUMN coord_account_id TEXT;
+   ALTER TABLE chat_sessions ADD COLUMN coord_model TEXT;
+   ALTER TABLE chat_sessions ADD COLUMN coord_effort TEXT;`,
+  // Whether that account was picked automatically (the picker shows Automatic) or chosen by the user for this session.
+  `ALTER TABLE chat_sessions ADD COLUMN coord_auto INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 export function getDb(): DatabaseSync {

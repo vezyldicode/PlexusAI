@@ -8,7 +8,7 @@ import { startTestDaemon, testHome } from './helpers.ts';
 const root = testHome('plexus-chat');
 
 const chat = await import('../src/server/chat.ts');
-const { postMessage } = await import('../src/server/projects.ts');
+const { listMessages, postMessage } = await import('../src/server/projects.ts');
 const { createTask } = await import('../src/server/tasks.ts');
 const { taskAttachmentRefs, sessionAttachments } = await import('../src/server/attachments.ts');
 const { mockAdapter } = await import('../src/server/adapters/mock.ts');
@@ -180,6 +180,140 @@ test('chat sessions: isolation, unread routing and CLI resume', { timeout: 60_00
     // A task whose session was deleted routes its notices to the default session again.
     assert.equal(chat.routeSession(p.id, { taskId: child.id }), A);
   } finally {
+    await d.shutdown();
+  }
+});
+
+test('a chat session keeps its coordinator account, model and effort until that account cannot run', { timeout: 60_000 }, async () => {
+  const { getDb } = await import('../src/server/db.ts');
+  const { addAccount, removeAccount, updateAccount } = await import('../src/server/accounts.ts');
+  const { createProject, getProject, updateProject } = await import('../src/server/projects.ts');
+  const { coordinatorTarget, setSessionChoice, handleChat } = await import('../src/server/coordinator.ts');
+  const dir = join(root, 'sticky');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'README.md'), '# Sticky\n');
+  const p = createProject({ path: dir, goal: 'sticky coordinator' });
+  for (const id of ['stk-a', 'stk-b']) addAccount({ provider: 'mock', id });
+  const used = (id: string, pct: number) => getDb().prepare('UPDATE accounts SET state = ?, quota = ?, cooldown_until = NULL WHERE id = ?')
+    .run('ok', JSON.stringify({ primary: { usedPercent: pct }, secondary: null, source: 'probe', at: new Date().toISOString() }), id);
+  const setState = (id: string, state: string, cooldownUntil: string | null = null) =>
+    getDb().prepare('UPDATE accounts SET state = ?, cooldown_until = ? WHERE id = ?').run(state, cooldownUntil, id);
+  const reset = () => { used('stk-a', 90); used('stk-b', 10); updateAccount('stk-a', { enabled: true }); };
+  const others = () => getDb().prepare("SELECT id FROM accounts WHERE id NOT IN ('stk-a', 'stk-b')").all() as { id: string }[];
+  for (const o of others()) updateAccount(o.id, { enabled: false });
+  try {
+    reset();
+    const s1 = chat.createSession(p.id), s2 = chat.createSession(p.id);
+    // Without a stored choice, automatic selection spreads by quota: B.
+    assert.equal(coordinatorTarget(p, chat.getSession(s1.id)).account?.id, 'stk-b');
+    // A stored choice wins over quota: A stays, with its own model and effort.
+    chat.setSessionCoordinator(s1.id, { accountId: 'stk-a', model: 'model-a', effort: 'high' });
+    for (let turn = 0; turn < 3; turn++) {
+      const t = coordinatorTarget(p, chat.getSession(s1.id));
+      assert.deepEqual([t.account?.id, t.model, t.effort, t.moved], ['stk-a', 'model-a', 'high', null]);
+    }
+    // The project's pinned account does not take a session back from an account that can run.
+    updateProject(p.id, { settings: { coordinatorAccountId: 'stk-b' } });
+    assert.equal(coordinatorTarget(p, chat.getSession(s1.id)).account?.id, 'stk-a');
+    updateProject(p.id, { settings: { coordinatorAccountId: null } });
+
+    // It moves only when A cannot run: limited, cooling down, disabled, logged out.
+    const breaks: [string, () => void][] = [
+      ['limited', () => setState('stk-a', 'limited')],
+      ['cooldown', () => setState('stk-a', 'ok', new Date(Date.now() + 3_600_000).toISOString())],
+      ['disabled', () => updateAccount('stk-a', { enabled: false })],
+      ['needs_login', () => setState('stk-a', 'needs_login')],
+    ];
+    for (const [name, breakA] of breaks) {
+      reset(); breakA();
+      const t = coordinatorTarget(p, chat.getSession(s1.id));
+      assert.equal(t.account?.id, 'stk-b', name);
+      assert.ok(t.moved && /stk-a/.test(t.moved.from), name);
+    }
+
+    // A turn on the moved session stores the new choice and says so once.
+    reset(); setState('stk-a', 'limited');
+    await handleChat(p.id, 'hello', s1.id);
+    assert.equal(chat.getSession(s1.id)!.coordAccountId, 'stk-b');
+    const notices = () => listMessages(p.id, 100, s1.id).filter((m: any) => m.author === 'system' && /this chat moves to/.test(m.text));
+    assert.equal(notices().length, 1);
+    // Back to normal: the session stays on B (no switch back), no new notice.
+    reset();
+    await handleChat(p.id, 'again', s1.id);
+    assert.equal(chat.getSession(s1.id)!.coordAccountId, 'stk-b');
+    assert.equal(notices().length, 1);
+
+    // A picker change in one session is that session's choice only.
+    chat.setSessionCoordinator(s2.id, { accountId: 'stk-b', model: null, effort: 'low' });
+    setSessionChoice(s1.id, { accountId: 'stk-a' });
+    assert.deepEqual([chat.getSession(s1.id)!.coordAccountId, chat.getSession(s1.id)!.coordAuto], ['stk-a', false]);
+    assert.deepEqual([chat.getSession(s2.id)!.coordAccountId, chat.getSession(s2.id)!.coordEffort], ['stk-b', 'low']);
+    // "Automatic" drops only that session's own account: it gets an automatic pick, and the project pin does not take it over.
+    updateProject(p.id, { settings: { coordinatorAccountId: 'stk-a' } });
+    setSessionChoice(s1.id, { accountId: null });
+    assert.deepEqual([chat.getSession(s1.id)!.coordAccountId, chat.getSession(s1.id)!.coordAuto], ['stk-b', true]);
+    assert.equal(chat.getSession(s2.id)!.coordAccountId, 'stk-b');
+    setState('stk-b', 'limited');
+    assert.equal(coordinatorTarget(getProject(p.id)!, chat.getSession(s1.id)).account?.id, 'stk-a');
+    reset();
+    updateProject(p.id, { settings: { coordinatorAccountId: null } });
+  } finally {
+    for (const o of others()) updateAccount(o.id, { enabled: true });
+    for (const id of ['stk-a', 'stk-b']) removeAccount(id);
+  }
+});
+
+test('the coordinator picker of one chat changes only that chat; the target endpoint returns its values', { timeout: 60_000 }, async () => {
+  const { getDb } = await import('../src/server/db.ts');
+  const { updateAccount } = await import('../src/server/accounts.ts');
+  const d = await startTestDaemon();
+  const { call } = d;
+  const others = () => getDb().prepare("SELECT id FROM accounts WHERE id NOT IN ('pk-a', 'pk-b')").all() as { id: string }[];
+  try {
+    for (const id of ['pk-a', 'pk-b']) await call('POST', '/api/accounts', { provider: 'mock', id });
+    for (const o of others()) updateAccount(o.id, { enabled: false });
+    const dir = join(root, 'picker');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '# Picker\n');
+    const p = await call('POST', '/api/projects', { path: dir, goal: 'picker' });
+    const settings = JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings);
+    const s1 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const s2 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const target = (sid: string) => call('GET', `/api/projects/${p.id}/coordinator-target?session=${sid}`);
+    const before2 = await target(s2);
+    assert.equal(before2.stored, false);
+
+    // Account, model and effort chosen in s1 are s1's own.
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { accountId: 'pk-a' });
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { model: 'mock-big' });
+    const s = await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { effort: 'high' });
+    assert.deepEqual([s.coordAccountId, s.coordModel, s.coordEffort, s.coordAuto], ['pk-a', 'mock-big', 'high', false]);
+    const t1 = await target(s1);
+    assert.deepEqual([t1.accountId, t1.model, t1.effort, t1.stored, t1.auto], ['pk-a', 'mock-big', 'high', true, false]);
+
+    // Project settings and the other chat are untouched.
+    assert.equal(JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings), settings);
+    assert.deepEqual(await target(s2), before2);
+    const raw2 = chat.getSession(s2)!;
+    assert.deepEqual([raw2.coordAccountId, raw2.coordModel, raw2.coordEffort], [null, null, null]);
+
+    // Automatic: an automatic pick kept by s1, shown as Automatic; Default model/effort = the role's.
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { accountId: null });
+    const t2 = await target(s1);
+    assert.deepEqual([t2.stored, t2.auto], [true, true]);
+    await call('PATCH', `/api/chat-sessions/${s1}/coordinator`, { model: null, effort: null });
+    const t3 = await target(s1);
+    assert.deepEqual([t3.model, t3.effort], [t3.defaultModel, t3.defaultEffort]);
+    assert.equal(JSON.stringify((await call('GET', `/api/projects/${p.id}`)).settings), settings);
+
+    // A new chat starts from the project defaults.
+    await call('PATCH', `/api/projects/${p.id}`, { settings: { coordinatorAccountId: 'pk-b', coordinatorEfforts: { mock: 'low' } } });
+    const s3 = (await call('POST', `/api/projects/${p.id}/chat-sessions`, {})).id;
+    const t4 = await target(s3);
+    assert.deepEqual([t4.accountId, t4.effort, t4.stored], ['pk-b', 'low', false]);
+    assert.equal((await target(s1)).stored, true);
+  } finally {
+    for (const o of others()) updateAccount(o.id, { enabled: true });
     await d.shutdown();
   }
 });

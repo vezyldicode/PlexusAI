@@ -10,7 +10,7 @@ import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
 import { syncBranch, unwatchBranch } from './branch.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
-import { applyActions, beginMainEdit, closeSessionWorkspace, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
+import { applyActions, beginMainEdit, closeSessionWorkspace, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, setSessionChoice, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
@@ -24,7 +24,7 @@ import { countByStatus, findTask, getTask, listRuns, listTasks, shortId, updateT
 import type { Run } from '../shared/types.ts';
 import { projectUsage } from './usage.ts';
 import { readLogTurns, turnMessages } from './runlog.ts';
-import { taskModelInfo } from './worker.ts';
+import { ROLE_EFFORT, taskModelInfo } from './worker.ts';
 import { describeClaudeEvent } from './adapters/claude.ts';
 import { describeCodexEvent } from './adapters/codex.ts';
 import { cleanEfforts, modelCatalog } from './models.ts';
@@ -274,10 +274,28 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     return { ok: true };
   });
   app.post('/api/chat-sessions/:id/read', async req => markRead(id(req)));
+  // The coordinator picker of one chat: { accountId?: id | null (Automatic), model?: id | null, effort?: level | null }.
+  // Changes only this session's choice; project settings stay the default for new chats.
+  app.patch('/api/chat-sessions/:id/coordinator', async req => {
+    const b = body(req);
+    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : null);
+    return setSessionChoice(id(req), { ...('accountId' in b && { accountId: str(b.accountId) }), ...('model' in b && { model: str(b.model) }),
+      ...('effort' in b && { effort: str(b.effort) }) });
+  });
   // The account/model the coordinator would answer the next message with (what the chat's chip shows).
   app.get('/api/projects/:id/coordinator-target', async req => {
-    const t = coordinatorTarget(mustProject(id(req)));
-    return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null, fallback: !!t.pinnedId && !t.pinned };
+    const p = mustProject(id(req));
+    const sid = (req.query as any)?.session;
+    const s = sid ? mustSession(String(sid)) : null;
+    if (s && s.projectId !== p.id) throw new Error('chat session belongs to another project');
+    const t = coordinatorTarget(p, s);
+    return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null,
+      fallback: !!t.pinnedId && t.account?.id !== t.pinnedId,
+      // stored: the session has its own choice (then auto says whether its picker shows Automatic or that account).
+      stored: t.stored, auto: t.auto,
+      // What "Default" means for this provider's model/effort in a session (the coordinator role's own default).
+      defaultModel: t.account ? t.role.models[t.account.provider] ?? null : null,
+      defaultEffort: t.account ? t.role.efforts?.[t.account.provider] || ROLE_EFFORT.coordinator : null };
   });
   // One file for a chat message, as the raw request body (streamed to disk). The message names it by id when sent.
   app.post('/api/chat-sessions/:id/attachments', async req => {
