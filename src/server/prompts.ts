@@ -4,6 +4,7 @@ import type { Account, ChatMessage, Project, Role, Task } from '../shared/types.
 import { appRoot, paths } from './paths.ts';
 import { laneNotes, profileFor, PROFILES, projectContext } from './context.ts';
 import { readDecisions, readMemory } from './projects.ts';
+import { directivesChangedAt, directivesFor, readerOf } from './directives.ts';
 import { getTask, isUserFollowUp, shortId } from './tasks.ts';
 import { appConfig } from './config.ts';
 import { autoCommit, baseRef } from './checkout.ts';
@@ -134,6 +135,19 @@ export function buildTaskPrompt(p: Project, t: Task, role: Role, account: Accoun
 }
 
 /** Decisions recorded after `since` (ISO time), the ones a resumed agent has not seen yet. */
+/**
+ * Directives in a resumed conversation: they are already in it, so they are sent again only when directives.md changed
+ * since its last call, or when a new task continues the conversation (its role, and so its directives, may differ).
+ */
+function resumeDirectives(p: Project, t: Task): string {
+  const changed = directivesChangedAt(p);
+  const newTask = !!t.laneFrom && t.attempts === 0 && !t.error;
+  if (!newTask && (!changed || (t.cliUsedAt && changed <= t.cliUsedAt))) return '';
+  const mine = directivesFor(p, readerOf(t));
+  if (!mine && !changed) return '';
+  return `## Directives from the user (must be followed; this list replaces any earlier one)\n${mine || '(none for you now: earlier directives no longer apply)'}`;
+}
+
 function newDecisions(p: Project, since: string | null): string {
   if (!since) return '';
   const fresh = readDecisions(p).filter(d => d.at && d.at > since);
@@ -148,7 +162,7 @@ function newDecisions(p: Project, since: string | null): string {
  * follow-up given to the same agent cheap.
  */
 export function buildResumePrompt(p: Project, t: Task, role: Role, progress: string): string {
-  const directives = readMemory(p, 'directives.md').trim();
+  const directives = resumeDirectives(p, t);
   const again = t.attempts > 0 || !!t.error;
   const how = again
     ? `The previous attempt ended early (${t.error ?? 'interrupted'}): check \`git status\` and \`${PROGRESS_FILE}\`, then continue without redoing finished work.`
@@ -164,7 +178,7 @@ unfinished earlier work unless the message asks for it.`
   return [
     `# NEXT STEP IN THIS CONVERSATION\nYou are continuing in the same worktree and conversation as before, now as the ${role.name}. The rules, project\ncontext and your earlier work above still apply. ${how}${fromUser}`,
     t.kind === 'ingest' ? `## Goal (may have changed)\n${readMemory(p, 'goal.md') || p.goal || '(see documentation)'}` : '',
-    directives ? `## Directives from the user (must be followed)\n${directives}` : '',
+    directives,
     newDecisions(p, t.cliUsedAt),
     taskSection(p, t),
     inboxSection(t),
@@ -180,7 +194,8 @@ unfinished earlier work unless the message asks for it.`
  * (the coordinator has its own), so they come here, with the task and the output contract; the project context does not.
  */
 export function buildForkPrompt(p: Project, t: Task, role: Role, system: string): string {
-  const directives = readMemory(p, 'directives.md').trim();
+  // The coordinator's directives are in the conversation above; an agent follows only its own (they replace those).
+  const directives = directivesFor(p, readerOf(t));
   return [
     `# YOU ARE NOW THE AGENT DOING THE WORK
 The conversation above was the coordinator's chat with the user. You continue it as a separate agent: you are no longer
@@ -189,7 +204,7 @@ checklist), and your reply is not shown in the chat. You work in a new git workt
 current directory, branch ${t.branch ?? '(see TASK)'}, created from ${baseRef(p)}); the project folder you saw above is
 not yours to edit. Use what you already learned above (files, causes, decisions) instead of searching again.`,
     system,
-    directives ? `## Directives from the user (must be followed)\n${directives}` : '',
+    `## Directives from the user for you (must be followed; they replace any directives in the conversation above)\n${directives || '(none)'}`,
     taskSection(p, t),
     inboxSection(t),
     `${outputContract(t.kind)}\n${DECISION_SCOPE}`,
@@ -244,7 +259,14 @@ ${where}
 ${how}
 - "Give X to account Y" means assign_account (or \`account\` on solo_task): which account runs a task is Plexus's job. Never
   put account or provider names in directives or task descriptions (agents read them as limits on their work); remove a
-  wrong directive with remove_directive.`;
+  wrong directive with remove_directive.
+- Standing instructions: when the user says how things must be done from now on ("from now on", "always", "never",
+  "every time", or corrects how you or the agents work), save it with add_directive in the same turn; a request for one
+  piece of work is not a directive. Set "for": "coordinator" for how you yourself work with the user (e.g. propose a
+  plan before changing code, ask before starting tasks, reply in some language): agents work alone and cannot ask, so
+  such a rule must not reach them. "agents" or role names for how the work is done; "paths" when it only concerns some
+  files. Omit "for" only when it really is for everyone. If it contradicts an existing directive, remove that one first.
+  Say in your reply what you saved and for whom. Follow the directives that apply to you (tagged coordinator or untagged).`;
 }
 
 /**
@@ -304,7 +326,7 @@ End with ONLY one JSON object (no prose after it):
 {"type":"reprioritize","task_id":"T5","priority":90}
 {"type":"update_task","task_id":"T5","description":"new description"}
 {"type":"record_decision","title":"...","decision":"...","rationale":"..."}
-{"type":"add_directive","text":"instruction all agents must follow from now on"}
+{"type":"add_directive","text":"instruction to follow from now on","for":["coordinator" | "agents" | role names],"paths":["optional globs"]}
 {"type":"remove_directive","match":"text in it"}
 {"type":"set_goal","goal":"..."}
 {"type":"replan","reason":"..."}`;

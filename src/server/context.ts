@@ -9,6 +9,7 @@ import type { Project, Task, TaskKind } from '../shared/types.ts';
 import { acMark, handoffDir, readAcceptance, readDecisions, readHandoff, readMemory, type AcceptanceItem, type DecisionEntry } from './projects.ts';
 import { getTask, normAcIds, pathsOverlap, shortId } from './tasks.ts';
 import { appConfig } from './config.ts';
+import { directivesFor, readerOf } from './directives.ts';
 
 export const CONTEXT_DIR = '.plexus-task/context';
 
@@ -185,7 +186,8 @@ export function laneNotes(p: Project, t: Task): string {
  * providers that cache by prefix can reuse it), `task` depends on the task itself.
  */
 export function projectContext(p: Project, prof: ContextProfile, t: Task | null): { shared: string; task: string } {
-  const goal = (readMemory(p, 'goal.md') || p.goal || '').trim(), directives = readMemory(p, 'directives.md').trim();
+  const goal = (readMemory(p, 'goal.md') || p.goal || '').trim();
+  const directives = directivesFor(p, t ? readerOf(t) : { role: 'coordinator' });
   const shared = [
     `# PROJECT: ${p.name}`,
     goal || !prof.skipEmpty ? `## Goal\n${orNone(goal, '(see documentation in the repository)')}` : '',
@@ -203,11 +205,13 @@ export function projectContext(p: Project, prof: ContextProfile, t: Task | null)
 }
 
 /** Full copies of the project memory in the task's worktree (git-ignored), for the agent to read on demand. */
-export function writeContextFiles(p: Project, wt: string): void {
+export function writeContextFiles(p: Project, wt: string, t?: Pick<Task, 'role' | 'paths'>): void {
   const dir = join(wt, CONTEXT_DIR);
   mkdirSync(dir, { recursive: true });
   for (const f of ['goal.md', 'summary.md', 'brief.md', 'acceptance.md', 'decisions.md', 'directives.md', 'known-issues.md', 'codemap.md', 'open-gaps.md']) {
-    writeFileSync(join(dir, f), readMemory(p, f) || '(empty)\n');
+    // Directives: only the ones for this agent (a coordinator-only rule read here would make it wait for a reply).
+    const text = f === 'directives.md' && t ? directivesFor(p, readerOf(t)) : readMemory(p, f);
+    writeFileSync(join(dir, f), text ? (text.endsWith('\n') ? text : text + '\n') : '(empty)\n');
   }
   // Hand-off notes of earlier tasks (the newest few), so evidence written in one round is still there in the next.
   const src = handoffDir(p);
