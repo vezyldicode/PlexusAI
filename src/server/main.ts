@@ -18,7 +18,8 @@ export function loadToken(): string {
   return t;
 }
 
-export async function startDaemon(opts: { port?: number; host?: string; quiet?: boolean } = {}) {
+/** `tickMs`: fixed scheduler interval (tests); otherwise Settings → Scheduler. */
+export async function startDaemon(opts: { port?: number; host?: string; quiet?: boolean; tickMs?: number } = {}) {
   getDb();
   seedRoles();
   const token = loadToken();
@@ -28,7 +29,7 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
   const host = opts.host ?? process.env.PLEXUS_HOST ?? '127.0.0.1';
   await app.listen({ port, host });
   quotaService.start();
-  orchestrator.start();
+  orchestrator.start(opts.tickMs);
   startBranchWatch();
   // Runs recorded before token usage was stored: read it back from their logs, once.
   setImmediate(() => {

@@ -3,43 +3,25 @@
 // while one account hits its quota limit mid-run and its task is handed off to another account.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { startTestDaemon, testHome } from './helpers.ts';
 
-const root = mkdtempSync(join(tmpdir(), 'plexus-e2e-'));
-process.env.PLEXUS_HOME = join(root, 'home');
-
-const { startDaemon } = await import('../src/server/main.ts');
+const root = testHome('plexus-e2e');
 const { orchestrator } = await import('../src/server/orchestrator.ts');
 
-async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms: number, label: string): Promise<T> {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const v = await fn();
-    if (v) return v;
-    await new Promise(r => setTimeout(r, 300));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
-
-test('mock Plexus completes a project with handoff, review and evaluation', { timeout: 240_000 }, async () => {
-  const d = await startDaemon({ port: 0, quiet: true });
-  const call = async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': d.token }, body: body ? JSON.stringify(body) : undefined });
-    const j = await r.json();
-    if (!r.ok) throw new Error(`${method} ${path}: ${JSON.stringify(j)}`);
-    return j;
-  };
+test('mock Plexus completes a project with handoff, review and evaluation', { timeout: 120_000 }, async () => {
+  const d = await startTestDaemon();
+  const { call } = d;
   try {
     // unauthorized without token
     assert.equal((await fetch(`http://127.0.0.1:${d.port}/api/accounts`)).status, 401);
 
     const a1 = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-a' });
     const a2 = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-b' });
-    writeFileSync(join(a1.home, 'mock.json'), JSON.stringify({ limitAfterRuns: 5, delayMs: 30, architectNoPlan: true }));
-    writeFileSync(join(a2.home, 'mock.json'), JSON.stringify({ delayMs: 30, rejectReviewOnce: true, architectNoPlan: true }));
+    writeFileSync(join(a1.home, 'mock.json'), JSON.stringify({ limitAfterRuns: 5, delayMs: 10, architectNoPlan: true }));
+    writeFileSync(join(a2.home, 'mock.json'), JSON.stringify({ delayMs: 10, rejectReviewOnce: true, architectNoPlan: true }));
 
     const proj = join(root, 'proj');
     mkdirSync(join(proj, 'docs'), { recursive: true });
@@ -47,15 +29,11 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
     const p = await call('POST', '/api/projects', { path: proj, goal: 'Create alpha.txt and beta.txt', settings: { maxParallel: 2, independentReviewWaitMin: 0, pipeline: 'team', reviewPolicy: 'always', qaPhase: true } });
     await call('POST', `/api/projects/${p.id}/start`);
 
-    const final = await waitFor(async () => {
+    const final = await d.waitFor(async () => {
       const s = await call('GET', `/api/projects/${p.id}`);
       return s.project.status === 'completed' ? s : null;
-    }, Number(process.env.E2E_TIMEOUT ?? 200_000), 'project completion').catch(async e => {
-      const s = await call('GET', `/api/projects/${p.id}`);
-      console.log('PROJECT', s.project.status, s.project.phase);
-      for (const t of s.tasks) console.log(`T${t.seq} ${t.kind} ${t.status} acct=${t.accountId} last=${t.lastAccountId} att=${t.attempts} err=${t.error}`);
+    }, 100_000, 'project completion').catch(async e => {
       for (const m of await call('GET', `/api/projects/${p.id}/messages`)) console.log('MSG', m.author, m.text.slice(0, 300));
-      for (const ev of (await call('GET', `/api/projects/${p.id}/events`)).filter((e: any) => /error/.test(e.type))) console.log('EV', JSON.stringify(ev.data).slice(0, 800));
       console.log('ACCTS', JSON.stringify(await call('GET', '/api/accounts')).slice(0, 1500));
       throw e;
     });
@@ -106,9 +84,12 @@ test('mock Plexus completes a project with handoff, review and evaluation', { ti
 
     // chat → coordinator applies an action
     await call('POST', `/api/projects/${p.id}/messages`, { text: 'add task: gamma' });
-    await waitFor(async () => (await call('GET', `/api/projects/${p.id}/messages`)).find((m: any) => m.author === 'coordinator'), 30_000, 'coordinator reply');
+    await d.waitFor(async () => (await call('GET', `/api/projects/${p.id}/messages`)).find((m: any) => m.author === 'coordinator'), 30_000, 'coordinator reply');
     const after = await call('GET', `/api/projects/${p.id}`);
     assert.ok(after.tasks.some((t: any) => t.title === 'gamma'), 'coordinator created the task');
+    // Done checking: stop the work the new task started, so shutdown does not wait for it.
+    orchestrator.pause(p.id);
+    await orchestrator.idle();
   } finally {
     await d.shutdown();
   }

@@ -2,30 +2,22 @@
 // without the pipeline, the unfinished pipeline tasks stay untouched, and the coordinator cannot resume them on its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { startTestDaemon, testHome } from './helpers.ts';
 
-const root = mkdtempSync(join(tmpdir(), 'plexus-paused-'));
-process.env.PLEXUS_HOME = join(root, 'home');
-
-const { startDaemon } = await import('../src/server/main.ts');
+const root = testHome('plexus-paused');
 const { orchestrator } = await import('../src/server/orchestrator.ts');
 const { applyActions } = await import('../src/server/coordinator.ts');
 const { createTask, getTask, listTasks, updateTask } = await import('../src/server/tasks.ts');
 const { mustProject, updateProject } = await import('../src/server/projects.ts');
 
-test('a request task while paused runs to completion; the paused pipeline is not touched', { timeout: 120_000 }, async () => {
-  const d = await startDaemon({ port: 0, quiet: true });
-  const call = async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': d.token }, body: body ? JSON.stringify(body) : undefined });
-    const out = await r.json();
-    if (!r.ok) throw new Error(`${method} ${path}: ${JSON.stringify(out)}`);
-    return out;
-  };
+test('a request task while paused runs to completion; the paused pipeline is not touched', { timeout: 60_000 }, async () => {
+  const d = await startTestDaemon();
+  const { call } = d;
   try {
     const acct = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-p', maxConcurrency: 2 });
-    writeFileSync(join(acct.home, 'mock.json'), JSON.stringify({ delayMs: 30, rejectReviewOnce: true }));
+    writeFileSync(join(acct.home, 'mock.json'), JSON.stringify({ delayMs: 10, rejectReviewOnce: true }));
     const dir = join(root, 'proj');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'README.md'), '# Paused\n');
@@ -45,8 +37,7 @@ test('a request task while paused runs to completion; the paused pipeline is not
     assert.equal(req.adhoc, true);
     assert.deepEqual(req.deps, []);
 
-    const end = Date.now() + 60_000;
-    while (Date.now() < end && !['done', 'failed', 'cancelled'].includes(getTask(req.id)!.status)) await new Promise(r => setTimeout(r, 150));
+    await d.waitFor(() => ['done', 'failed', 'cancelled'].includes(getTask(req.id)!.status), 45_000, 'request task finished');
     await orchestrator.idle();
 
     const done = getTask(req.id)!;

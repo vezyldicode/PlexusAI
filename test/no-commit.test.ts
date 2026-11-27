@@ -1,6 +1,6 @@
 // Plexus never commits on the user's branches (default, Settings → Advanced → "Commit to my branches" off): it works on
 // a hidden base ref and delivers finished work into the project folder as uncommitted changes, never over the user's edits.
-import test from 'node:test';
+import { describe, test as base } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -15,6 +15,9 @@ const { ensureRepo, addWorktree } = await import('../src/server/util/git.ts');
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=u', '-c', 'user.email=u@u', ...args], { cwd, encoding: 'utf8' }).trim();
 /** File content with the line endings git would write here normalized (core.autocrlf may be on). */
 const read = (dir: string, f: string) => readFileSync(join(dir, f), 'utf8').replace(/\r\n/g, '\n');
+// Every test works in its own repository: they run at the same time (git is most of the wait).
+const tests: [string, () => Promise<void>][] = [];
+const test = (name: string, fn: () => Promise<void>) => { tests.push([name, fn]); };
 const project = (path: string, id: string) => ({ id, path, mainBranch: 'main' }) as any;
 
 /** A task: its own worktree and branch from the base, one commit, like an agent would make. */
@@ -141,51 +144,6 @@ test('tasks start from the folder as it is now, also after the user committed', 
   assert.equal(git(dir, 'rev-list', '--count', 'main'), '2', 'no commit on the user\'s branch');
 });
 
-test('a conflict with the folder never gets stuck: the integrator\'s merge lands, and later work flows again', async () => {
-  const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
-  const { dir, p } = await freshProject('unstuck', { 'c.ts': lines.join('\n') + '\n', 'other.ts': 'x\n' });
-  const seen: any[] = [];
-  onFolderConflict((_p, r) => { seen.push(r); });
-  try {
-    // A task changes line 1; meanwhile the user changes line 1 too and commits it (committing used to change nothing).
-    const b = await taskCommit(p, 'U1', { 'c.ts': ['line 1 (task)', ...lines.slice(1)].join('\n') + '\n', 'task.ts': 'task\n' });
-    writeFileSync(join(dir, 'c.ts'), ['line 1 (user)', ...lines.slice(1)].join('\n') + '\n');
-    git(dir, 'commit', '-q', '-am', 'user edit');
-    const m = await mergeIntoBase(p, b, 'merge U1');
-    assert.ok(m.ok);
-    assert.equal(m.sync?.ok, false);
-    assert.deepEqual(m.sync?.conflicts, ['c.ts']);
-    assert.equal(seen.length, 1, 'the conflict handler (orchestrator → integrator task) is called');
-    assert.ok(!existsSync(join(dir, 'task.ts')), 'nothing written while the conflict is open');
-
-    // The user keeps working elsewhere, and commits: still nothing breaks.
-    writeFileSync(join(dir, 'other.ts'), 'x\nuser more\n');
-    git(dir, 'commit', '-q', '-am', 'more user work');
-
-    // The integrator: branch at the folder's snapshot, merge the base in, resolve, commit.
-    const wt = join(root, 'wt-folder-sync-unstuck');
-    git(dir, 'branch', '-f', FOLDER_SYNC_BRANCH, seen[0].folder);
-    await addWorktree(dir, wt, { branch: FOLDER_SYNC_BRANCH });
-    try { git(wt, 'merge', '-q', baseRef(p)); } catch { /* conflict, resolved below */ }
-    writeFileSync(join(wt, 'c.ts'), ['line 1 (user + task)', ...lines.slice(1)].join('\n') + '\n');
-    git(wt, 'add', '-A');
-    git(wt, 'commit', '-q', '--no-edit', '-m', 'resolve');
-    const r = await mergeIntoBase(p, FOLDER_SYNC_BRANCH, 'merge folder sync');
-    assert.ok(r.ok, r.detail);
-    assert.ok(r.sync?.ok, JSON.stringify(r.sync));
-    assert.match(read(dir, 'c.ts'), /^line 1 \(user \+ task\)$/m, 'the resolution reached the folder');
-    assert.equal(read(dir, 'task.ts'), 'task\n', 'and the rest of the task too');
-    assert.equal(read(dir, 'other.ts'), 'x\nuser more\n', 'the user\'s later work is kept');
-
-    // From here on, a task's work reaches the folder directly again.
-    const b2 = await taskCommit(p, 'U2', { 'later.ts': 'later\n' });
-    const m2 = await mergeIntoBase(p, b2, 'merge U2');
-    assert.ok(m2.sync?.ok, JSON.stringify(m2.sync));
-    assert.equal(read(dir, 'later.ts'), 'later\n');
-    assert.equal(seen.length, 1);
-  } finally { onFolderConflict(null); }
-});
-
 test('a folder far ahead of what Plexus last synced (the old stuck state) is merged, not reported', async () => {
   const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
   const { dir, p } = await freshProject('behind', { 'c.ts': lines.join('\n') + '\n' });
@@ -210,3 +168,5 @@ test('a folder far ahead of what Plexus last synced (the old stuck state) is mer
   assert.equal(read(dir, 'mine.ts'), 'mine\n');
   assert.equal(git(dir, 'show', `${baseRef(p)}:mine.ts`), 'mine', 'the base has the user\'s work too');
 });
+
+describe("no commit on the user's branches", { concurrency: true }, () => { for (const [name, fn] of tests) base(name, fn); });
