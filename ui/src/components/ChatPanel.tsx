@@ -235,7 +235,7 @@ const PROVIDER_NAME: Record<Provider, string> = { claude: 'Claude', codex: 'Code
 /** "Claude opus", but "Claude Opus 5" stays as is instead of becoming "Claude Claude Opus 5". */
 const withProvider = (provider: string, model: string) => (model.toLowerCase().startsWith(provider.toLowerCase()) ? model : `${provider} ${model}`);
 
-function useCoordinatorOptions(project: Project, accounts: Account[], onError: (e: string) => void, reload: () => void, tick = 0) {
+function useCoordinatorOptions(project: Project, accounts: Account[], sessionId: string | null, onError: (e: string) => void, reload: () => void, tick = 0) {
   const [coordRole, setCoordRole] = useState<Role | null>(null);
   useEffect(() => { api<Role[]>('GET', '/api/roles').then(r => setCoordRole(r.find(x => x.name === 'coordinator') ?? null)).catch(() => {}); }, []);
   const roleModels = coordRole?.models ?? {}, roleEfforts = coordRole?.efforts ?? {};
@@ -245,26 +245,29 @@ function useCoordinatorOptions(project: Project, accounts: Account[], onError: (
   const pinnedId = project.settings.coordinatorAccountId ?? null;
   const pinned = pinnedId ? accounts.find(a => a.id === pinnedId) : undefined;
   const providers: Provider[] = pinned ? [pinned.provider] : [...new Set(accounts.filter(a => a.enabled).map(a => a.provider))];
+  // A change here is the default for new chats and also this chat's own choice (other chats keep theirs).
+  const [saves, setSaves] = useState(0);
   const save = (settings: Partial<Project['settings']>) =>
-    api('PATCH', `/api/projects/${project.id}`, { settings }).then(reload).catch(e => onError(e.message));
+    api('PATCH', `/api/projects/${project.id}`, { settings, ...(sessionId && { sessionId }) }).then(() => { setSaves(n => n + 1); reload(); }).catch(e => onError(e.message));
 
-  // The account the backend would answer the next message on (automatic selection, or the fallback of an unavailable pin).
-  // Re-asked whenever the settings, the accounts' states or the conversation change.
-  const [target, setTarget] = useState<{ accountId: string | null; provider: Provider | null; fallback: boolean } | null>(null);
+  // The account, model and effort this chat answers its next message with (its stored choice, or a new pick when that
+  // account cannot run). Re-asked whenever the settings, the accounts' states or the conversation change.
+  type Target = { accountId: string | null; provider: Provider | null; model: string | null; effort: string | null; fallback: boolean };
+  const [target, setTarget] = useState<Target | null>(null);
   const accountsKey = accounts.map(a => `${a.id}:${a.enabled}:${a.state}:${a.cooldownUntil ?? ''}`).join('|');
   const settingsKey = JSON.stringify([pinnedId, saved, savedEfforts]);
   useEffect(() => {
     let live = true;
-    api<{ accountId: string | null; provider: Provider | null; fallback: boolean }>('GET', `/api/projects/${project.id}/coordinator-target`)
+    api<Target>('GET', `/api/projects/${project.id}/coordinator-target${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`)
       .then(t => { if (live) setTarget(t); }).catch(() => {});
     return () => { live = false; };
-  }, [project.id, accountsKey, settingsKey, tick]);
+  }, [project.id, sessionId, accountsKey, settingsKey, tick, saves]);
   const answering = target?.accountId ? accounts.find(a => a.id === target.accountId) : undefined;
 
   // What the chip shows: the account, then the model and effort of the provider that will actually answer.
   const p = target ? target.provider ?? undefined : pinned?.provider ?? providers[0];
-  const model = p ? saved[p] || roleModels[p] : undefined;
-  const effort = p ? savedEfforts[p] || roleEfforts[p] || effortsFor(catalog, p, model).defaultEffort || undefined : undefined;
+  const model = target?.accountId ? target.model ?? undefined : p ? saved[p] || roleModels[p] : undefined;
+  const effort = target?.accountId && target.effort ? target.effort : p ? savedEfforts[p] || roleEfforts[p] || effortsFor(catalog, p, model).defaultEffort || undefined : undefined;
   const answeringName = answering ? answering.label || answering.id : target?.accountId ?? null;
   const summary = {
     account: pinned && !target?.fallback ? pinned.label || pinned.id
@@ -354,7 +357,7 @@ function CoordinatorChat({ project, accounts, sessionId, messages, thinking, liv
   const uploads = useUploads(sessionId, onError);
   const [picking, setPicking] = useState(false);
   const closePicker = useCallback(() => setPicking(false), []);
-  const opts = useCoordinatorOptions(project, accounts, onError, reload, messages.length);
+  const opts = useCoordinatorOptions(project, accounts, sessionId, onError, reload, messages.length);
   const follow = useFollow(`${messages.length}:${thinking}:${live?.steps.length}`, sessionId);
   // The checklist of the turn in progress, else of the last answer to your last message.
   const lastUser = messages.findLastIndex(m => m.author === 'user');

@@ -1,13 +1,13 @@
 import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AgentResultSchema, CoordinatorOutputSchema, type ChatActivity, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
+import { AgentResultSchema, CoordinatorOutputSchema, type ChatActivity, type ChatSession, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
 import { adapterFor } from './adapters/index.ts';
 import type { McpServerSpec } from './adapters/types.ts';
 import { parsePlan } from './adapters/plan.ts';
 import { plexusMcp } from './mcp/spec.ts';
 import { addUsage } from './usage.ts';
-import { autoTitle, defaultSession, listSessions, mustSession, setCliSession } from './chat.ts';
+import { autoTitle, defaultSession, listSessions, mustSession, setCliSession, setSessionCoordinator } from './chat.ts';
 import { now } from './db.ts';
 import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
@@ -411,19 +411,49 @@ export async function handleChat(projectId: string, text: string, sessionId?: st
 }
 
 /** The account the coordinator would answer the next message on, and with which model/effort setting. */
-export function coordinatorTarget(p: Project) {
+export function coordinatorTarget(p: Project, session?: Pick<ChatSession, 'coordAccountId' | 'coordModel' | 'coordEffort'> | null) {
   const role = getRole('coordinator');
   const fake = { role: 'coordinator', kind: 'custom', status: 'pending', authorAccountId: null, lastAccountId: null, pinnedAccountId: null, cliAccountId: null } as unknown as Task;
   // Chat must stay responsive: the coordinator may share an account with a running worker
   // (a CLI account can run several sessions; they just share its quota).
   const accounts = listAccounts().map(a => ({ ...a, running: 0 }));
+  const canRun = (id: string) => pickAccount(p, fake, accounts.filter(a => a.id === id));
   const pinnedId = p.settings.coordinatorAccountId;
-  // A pinned account is used whenever it can run; otherwise fall back to automatic selection.
-  const pinned = pinnedId ? pickAccount(p, fake, accounts.filter(a => a.id === pinnedId)) : null;
-  const account = pinned ?? pickAccount(p, fake, accounts);
+  // A session stays on the account, model and effort it was given while that account can run: no re-ranking by quota.
+  const storedId = session?.coordAccountId ?? null;
+  const stored = storedId ? canRun(storedId) : null;
+  if (stored) {
+    return { role, accounts, pinnedId, pinned: stored.id === pinnedId ? stored : null, account: stored,
+      model: session!.coordModel ?? undefined, effort: session!.coordEffort ?? undefined, moved: null };
+  }
+  // No choice yet, or the stored account cannot run: the pinned account when it can run, else automatic selection.
+  const pinned = pinnedId && pinnedId !== storedId ? canRun(pinnedId) : null;
+  const account = pinned ?? pickAccount(p, fake, accounts.filter(a => a.id !== storedId));
   const model = account ? p.settings.coordinatorModels?.[account.provider] || role.models[account.provider] : undefined;
   const effort = account ? p.settings.coordinatorEfforts?.[account.provider] || role.efforts?.[account.provider] || ROLE_EFFORT.coordinator : undefined;
-  return { role, accounts, pinnedId, pinned, account, model, effort };
+  let moved: { from: string; why: string } | null = null;
+  if (storedId) {
+    const a = accounts.find(x => x.id === storedId);
+    const why = !a ? 'no longer exists' : !a.enabled ? 'is disabled'
+      : a.cooldownUntil && a.cooldownUntil > now() ? `is out of quota until ${a.cooldownUntil}` : `is ${a.state}`;
+    moved = { from: a ? a.label || a.id : storedId, why };
+  }
+  return { role, accounts, pinnedId, pinned, account, model, effort, moved };
+}
+
+/**
+ * A coordinator picker change made in a session also becomes that session's choice (other sessions keep theirs):
+ * "Automatic" clears it, an account or a model/effort sets it from the project's (just updated) settings.
+ */
+export function applyPickerToSession(p: Project, sessionId: string, changed: { coordinatorAccountId?: string | null }): void {
+  const s = mustSession(sessionId);
+  if (s.projectId !== p.id) throw new Error('chat session belongs to another project');
+  if ('coordinatorAccountId' in changed && !changed.coordinatorAccountId) { setSessionCoordinator(s.id, null); return; }
+  const acc = getAccount(('coordinatorAccountId' in changed ? changed.coordinatorAccountId : s.coordAccountId) ?? '');
+  if (!acc) return;
+  const role = getRole('coordinator');
+  setSessionCoordinator(s.id, { accountId: acc.id, model: p.settings.coordinatorModels?.[acc.provider] || role.models[acc.provider] || null,
+    effort: p.settings.coordinatorEfforts?.[acc.provider] || role.efforts?.[acc.provider] || ROLE_EFFORT.coordinator || null });
 }
 
 /** Tool calls kept with one coordinator reply (the rest are in its log). */
@@ -451,8 +481,10 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
   const say = (author: 'system' | 'coordinator', body: string, meta: Record<string, unknown> | null = null) => postMessage(projectId, author, body, meta, sessionId);
   const missing = folderProblem(p);
   if (missing) { say('system', missing, { level: 'attention' }); return; }
-  const { role, accounts, pinnedId, pinned, account, model, effort } = coordinatorTarget(p);
-  if (pinnedId && !pinned && account) {
+  const session = mustSession(sessionId);
+  const { role, accounts, pinnedId, pinned, account, model, effort, moved } = coordinatorTarget(p, session);
+  if (moved && account) say('system', `${moved.from} ${moved.why}; this chat moves to ${account.label || account.id}.`);
+  else if (pinnedId && !pinned && account && !session.coordAccountId) {
     const a = accounts.find(x => x.id === pinnedId);
     say('system', `${a ? `${a.label || a.id} is ${a.enabled ? a.state : 'disabled'}` : `Account ${pinnedId} no longer exists`}; the coordinator answers on ${account.label || account.id} instead.`);
   }
@@ -460,12 +492,12 @@ async function answer(projectId: string, sessionId: string, userMsgId: number, t
     say('system', 'No account is available to answer right now. The controls (pause/stop/resume, task actions) still work; your message is kept in the history.', { level: 'attention' });
     return;
   }
+  if (session.coordAccountId !== account.id) setSessionCoordinator(sessionId, { accountId: account.id, model: model ?? null, effort: effort ?? null });
   const eff = await effortForRun(account, model, effort);
   if (eff.warning) say('system', `Coordinator: ${eff.warning}.`);
 
   // Continue the provider CLI conversation when it belongs to this very account (its history lives in the account's home)
   // and has not grown too large; otherwise start one with the recent chat history of this session in the prompt.
-  const session = mustSession(sessionId);
   const mcp = coordinatorMcp(projectId, sessionId);
   const tools = !!mcp;
   const lastReply = listMessages(projectId, Math.max(40, appConfig().chatHistoryMessages * 2), sessionId).filter(m => m.author === 'coordinator' && m.id < userMsgId).at(-1);

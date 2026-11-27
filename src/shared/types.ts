@@ -320,6 +320,10 @@ export interface ChatSession {
   cliAccountId: string | null;
   /** Last message id the CLI conversation already knows about. */
   cliSyncedMessageId: number;
+  /** The coordinator's account, model and effort for this session (null = not chosen yet; model/effort null = CLI default). */
+  coordAccountId: string | null;
+  coordModel: string | null;
+  coordEffort: string | null;
   createdAt: string;
   updatedAt: string;
 }

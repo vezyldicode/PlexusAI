@@ -10,7 +10,7 @@ import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
 import { syncBranch, unwatchBranch } from './branch.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
-import { applyActions, beginMainEdit, closeSessionWorkspace, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
+import { applyActions, applyPickerToSession, beginMainEdit, closeSessionWorkspace, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
@@ -176,7 +176,10 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     }
     if (st && 'coordinatorModels' in st) st.coordinatorModels = st.coordinatorModels && typeof st.coordinatorModels === 'object' ? cleanModels(st.coordinatorModels) : {};
     if (st && 'coordinatorEfforts' in st) st.coordinatorEfforts = st.coordinatorEfforts && typeof st.coordinatorEfforts === 'object' ? cleanEfforts(st.coordinatorEfforts) : {};
-    return updateProject(id(req), { ...b, ...(st && { settings: st }) });
+    const { sessionId, ...patch } = b;
+    const out = updateProject(id(req), { ...patch, ...(st && { settings: st }) });
+    if (sessionId && st && ['coordinatorAccountId', 'coordinatorModels', 'coordinatorEfforts'].some(k => k in st)) applyPickerToSession(out, String(sessionId), st);
+    return out;
   });
   // Engine settings (Settings → Quota, Scheduler, Context, Coordinator, Advanced) and the defaults of new projects.
   const configView = () => ({ config: appConfig(), overrides: configOverrides(), defaults: DEFAULT_APP_CONFIG, bounds: CONFIG_BOUNDS,
@@ -276,8 +279,13 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.post('/api/chat-sessions/:id/read', async req => markRead(id(req)));
   // The account/model the coordinator would answer the next message with (what the chat's chip shows).
   app.get('/api/projects/:id/coordinator-target', async req => {
-    const t = coordinatorTarget(mustProject(id(req)));
-    return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null, fallback: !!t.pinnedId && !t.pinned };
+    const p = mustProject(id(req));
+    const sid = (req.query as any)?.session;
+    const s = sid ? mustSession(String(sid)) : null;
+    if (s && s.projectId !== p.id) throw new Error('chat session belongs to another project');
+    const t = coordinatorTarget(p, s);
+    return { accountId: t.account?.id ?? null, provider: t.account?.provider ?? null, model: t.model ?? null, effort: t.effort ?? null,
+      fallback: !!t.pinnedId && t.account?.id !== t.pinnedId };
   });
   // One file for a chat message, as the raw request body (streamed to disk). The message names it by id when sent.
   app.post('/api/chat-sessions/:id/attachments', async req => {
