@@ -1,8 +1,8 @@
 // Speed and quota pieces: run timing, forking the coordinator's conversation, the user's Codex model, per-role effort
-// defaults, scope/fork/checkpoint prompts, and the context budget (stop, checkpoint turn, partial result) with mock agents.
+// defaults, and scope/fork/checkpoint prompts. (The context budget with mock agents: e2e-budget.test.ts.)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,46 +127,4 @@ test("a solo task from the coordinator's Claude chat forks that conversation", (
   const big = applyActions(p.id, [{ type: 'solo_task', title: 'Other', description: 'x' } as any], 'coordinator', s.id, { ctx: 500_000, at: new Date().toISOString() });
   assert.doesNotMatch(big.join(), /continuing from this conversation/);
   assert.equal(getTask(`${p.id}-T2`)!.cliForkCwd, null);
-});
-
-test('context budget: the run is stopped, checkpoints in a short turn and reports partial', { timeout: 120_000 }, async () => {
-  const { startDaemon } = await import('../src/server/main.ts');
-  const { orchestrator } = await import('../src/server/orchestrator.ts');
-  const { paths } = await import('../src/server/paths.ts');
-  const d = await startDaemon({ port: 0, quiet: true });
-  const call = async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': d.token }, body: body ? JSON.stringify(body) : undefined });
-    const out = await r.json();
-    if (!r.ok) throw new Error(`${method} ${path}: ${JSON.stringify(out)}`);
-    return out;
-  };
-  try {
-    const acct = await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-speed', maxConcurrency: 2 });
-    writeFileSync(join(acct.home, 'mock.json'), JSON.stringify({ delayMs: 400, steps: 1, compactions: 5 }));
-    const dir = join(root, 'budget');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'README.md'), '# Budget\n');
-    const p = await call('POST', '/api/projects', { path: dir, goal: 'demo of the context budget' });
-    const t = createTask(p.id, { title: 'Big work', description: 'FILE: big.txt', role: 'implementer', kind: 'build', adhoc: true });
-    void orchestrator.tick();
-    const end = Date.now() + 60_000;
-    while (Date.now() < end && !['done', 'failed', 'in_review'].includes(getTask(t.id)!.status)) await new Promise(r => setTimeout(r, 150));
-    orchestrator.pause(p.id);
-    await orchestrator.idle();
-    const done = getTask(t.id)!;
-    // A partial result is reviewed before it is merged (reviewPolicy auto): that is the normal path.
-    assert.ok(['done', 'in_review'].includes(done.status), `${done.status} ${done.error}`);
-    assert.equal(done.result?.status, 'partial');
-    const runs = (await call('GET', `/api/tasks/${t.id}`)).runs;
-    assert.equal(runs.length, 1, 'stop and checkpoint happen in one attempt');
-    const timing = runs[0].timing;
-    assert.ok(timing, 'the run records where its time went');
-    assert.ok(timing.compactions >= 2 && timing.compactions < 5, `stopped after the second compaction (default budget): ${timing.compactions}`);
-    assert.ok(timing.totalMs >= timing.modelMs && timing.startupMs > 0);
-    const log = readFileSync(join(paths.logs, p.id, readdirSync(join(paths.logs, p.id)).find(f => f.startsWith(`T${done.seq}-r1-`))!), 'utf8');
-    assert.match(log, /STOP: CONTEXT BUDGET SPENT/);
-    assert.match(log, /# prompt \(resuming mock-/, 'the checkpoint continues the same conversation');
-  } finally {
-    await d.shutdown();
-  }
 });

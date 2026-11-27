@@ -1,38 +1,21 @@
 // Coordinator chat sessions: isolation, unread marks, routing of system/agent notices, and CLI conversation resume.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { startTestDaemon, testHome } from './helpers.ts';
 
-const root = mkdtempSync(join(tmpdir(), 'plexus-chat-'));
-process.env.PLEXUS_HOME = join(root, 'home');
+const root = testHome('plexus-chat');
 
-const { startDaemon } = await import('../src/server/main.ts');
 const chat = await import('../src/server/chat.ts');
 const { postMessage } = await import('../src/server/projects.ts');
 const { createTask } = await import('../src/server/tasks.ts');
 const { taskAttachmentRefs, sessionAttachments } = await import('../src/server/attachments.ts');
 const { mockAdapter } = await import('../src/server/adapters/mock.ts');
 
-async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms: number, label: string): Promise<T> {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const v = await fn();
-    if (v) return v;
-    await new Promise(r => setTimeout(r, 100));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
-
-test('chat sessions: isolation, unread routing and CLI resume', { timeout: 120_000 }, async () => {
-  const d = await startDaemon({ port: 0, quiet: true });
-  const call = async (method: string, path: string, body?: unknown) => {
-    const r = await fetch(`http://127.0.0.1:${d.port}${path}`, { method, headers: { 'content-type': 'application/json', 'x-plexus-token': d.token }, body: body ? JSON.stringify(body) : undefined });
-    const j = await r.json();
-    if (!r.ok) throw new Error(`${method} ${path}: ${JSON.stringify(j)}`);
-    return j;
-  };
+test('chat sessions: isolation, unread routing and CLI resume', { timeout: 60_000 }, async () => {
+  const d = await startTestDaemon();
+  const { call, waitFor } = d;
   try {
     await call('POST', '/api/accounts', { provider: 'mock', id: 'mock-c' });
     const proj = join(root, 'proj');

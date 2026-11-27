@@ -434,7 +434,9 @@ export const CoordinatorActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('reprioritize'), task_id: z.string(), priority: z.number() }),
   z.object({ type: z.literal('update_task'), task_id: z.string(), description: z.string() }),
   z.object({ type: z.literal('record_decision'), title: z.string(), decision: z.string(), rationale: z.string().default('') }),
-  z.object({ type: z.literal('add_directive'), text: z.string() }),
+  // `for`: who must follow it: "coordinator", "agents" (every agent) or role names; omitted = everyone.
+  // `paths`: only agents whose task touches these paths (globs) get it. The same text again replaces the earlier line.
+  z.object({ type: z.literal('add_directive'), text: z.string(), for: z.array(z.string()).optional(), paths: z.array(z.string()).optional() }),
   z.object({ type: z.literal('set_goal'), goal: z.string() }),
   z.object({ type: z.literal('replan'), reason: z.string() }),
   // Run a task on one account (another takes over while it cannot run). "auto" clears the pin.

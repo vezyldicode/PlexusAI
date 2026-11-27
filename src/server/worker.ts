@@ -140,7 +140,7 @@ export async function prepareWorktree(p: Project, t: Task): Promise<string> {
   const brief = `# ${shortId(t)}: ${t.title}\n\n${t.description}\n`;
   writeFileSync(join(wt, TASK_DIR, 'brief.md'), brief);
   if (!existsSync(join(wt, PROGRESS_FILE))) writeFileSync(join(wt, PROGRESS_FILE), '');
-  writeContextFiles(p, wt);
+  writeContextFiles(p, wt, t);
   return wt;
 }
 

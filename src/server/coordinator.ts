@@ -22,6 +22,7 @@ import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, upd
 import { orchestrator, pickAccount } from './orchestrator.ts';
 import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit } from './util/git.ts';
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
+import { addDirective, formatScope } from './directives.ts';
 import { appConfig } from './config.ts';
 import { absorbCheckout, autoCommit, baseRef, ensureBase } from './checkout.ts';
 import { attachmentNote, copyTaskAttachments, runFiles, sessionRefs, validateTaskAttachments } from './attachments.ts';
@@ -198,7 +199,12 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
         case 'reprioritize': { const t = task(a.task_id); updateTask(t.id, { priority: a.priority }); done.push(`${shortId(t)} priority → ${a.priority}`); break; }
         case 'update_task': { const t = task(a.task_id); updateTask(t.id, { description: a.description }); done.push(`updated ${shortId(t)}`); break; }
         case 'record_decision': recordDecision(p, a, `user via ${by}`); done.push(`decision "${a.title}" recorded`); break;
-        case 'add_directive': appendMemory(p, 'directives.md', `- ${a.text} _(${now().slice(0, 16)})_`); done.push('directive added'); break;
+        case 'add_directive': {
+          const scope = { for: (a.for ?? []).map(x => x.trim().toLowerCase()).filter(Boolean), paths: (a.paths ?? []).map(x => x.trim()).filter(Boolean) };
+          const replaced = addDirective(p, a.text, scope, now());
+          done.push(`directive ${replaced ? 'updated' : 'added'}${formatScope(scope) ? ` ${formatScope(scope).trim()}` : ' (for everyone)'}`);
+          break;
+        }
         case 'set_goal': updateProject(projectId, { goal: a.goal }); done.push('goal updated'); break;
         case 'replan': {
           let n = 0;

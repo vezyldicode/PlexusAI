@@ -66,8 +66,19 @@ export function addExcludes(repo: string, patterns: string[]) {
   if (missing.length) appendFileSync(file, (cur.endsWith('\n') || !cur ? '' : '\n') + '# plexus\n' + missing.join('\n') + '\n');
 }
 
+/**
+ * Make an existing worktree folder usable again when its link to the repo broke, as it does when the project folder is
+ * moved or renamed: the worktree's `.git` file still names the old path. Returns whether the folder is a working
+ * worktree now.
+ */
+export async function repairWorktree(repo: string, path: string): Promise<boolean> {
+  if ((await git(path, 'rev-parse', '--git-dir')).code === 0) return true;
+  await git(repo, 'worktree', 'repair', path);
+  return (await git(path, 'rev-parse', '--git-dir')).code === 0;
+}
+
 export async function addWorktree(repo: string, path: string, opts: { branch?: string; newBranchFrom?: string; detachAt?: string }): Promise<void> {
-  if (existsSync(path)) return;
+  if (existsSync(path)) { await repairWorktree(repo, path); return; }
   if (opts.detachAt) await gitOk(repo, 'worktree', 'add', '--detach', path, opts.detachAt);
   else if (opts.newBranchFrom) {
     const exists = (await git(repo, 'rev-parse', '--verify', `refs/heads/${opts.branch}`)).code === 0;
@@ -296,6 +307,8 @@ async function mergeFile(repo: string, from: string, to: string, path: string): 
  * checkout. Returns the merge commit; the caller moves its hidden ref there.
  */
 export async function mergeDetached(repo: string, wt: string, base: string, branch: string, message: string): Promise<{ ok: boolean; conflict: boolean; detail: string; head?: string }> {
+  // A folder whose link to the repo cannot be repaired holds nothing of value (Plexus's own scratch worktree): rebuild it.
+  if (existsSync(wt) && !(await repairWorktree(repo, wt))) await removeWorktree(repo, wt);
   if (!existsSync(wt)) await addWorktree(repo, wt, { detachAt: base });
   else {
     await git(wt, 'merge', '--abort');
