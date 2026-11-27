@@ -66,8 +66,8 @@ const all: Tool[] = [
     call: async a => (await api('POST', `/api/projects/${P}/actions`, { actions: [a.action], sessionId: SESSION, by: 'coordinator' })).applied.join('\n'),
   },
   {
-    name: 'plexus_main_begin', description: 'Before editing files in the main checkout: holds merges back until plexus_main_commit (10 minutes at most).',
-    inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/main/begin`, {})).text,
+    name: 'plexus_main_begin', description: 'Before editing files in the main checkout: holds merges back until plexus_main_commit (10 minutes at most). One chat at a time: if another chat is editing the folder, it says so and you use plexus_workspace instead.',
+    inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/main/begin`, { sessionId: SESSION })).text,
   },
   {
     name: 'plexus_main_commit', description: 'Finish your edits in the main checkout and let merges continue. The edits stay uncommitted for the user to review (Plexus commits them only when auto-commit is on in Settings).',
@@ -75,8 +75,8 @@ const all: Tool[] = [
     call: async a => (await api('POST', `/api/projects/${P}/main/commit`, { message: a.message, sessionId: SESSION })).text,
   },
   {
-    name: 'plexus_workspace', description: 'Your own git worktree (internal branch plexus/coordinator) for larger changes; returns its path.',
-    inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/coordinator-workspace`, {})).text,
+    name: 'plexus_workspace', description: 'Your own git worktree (an internal branch of this chat only) for larger changes; returns its path.',
+    inputSchema: obj(), call: async () => (await api('POST', `/api/projects/${P}/coordinator-workspace`, { sessionId: SESSION })).text,
   },
   {
     name: 'plexus_workspace_merge', description: 'Merge your worktree through the merge queue; the result reaches the project folder as uncommitted changes (committed on the branch only with auto-commit on).',

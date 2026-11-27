@@ -269,19 +269,25 @@ export class Orchestrator {
 
   // ---------------- coordinator edits on the main checkout ----------------
 
-  private mainHolds = new Map<string, { release: () => void; timer: NodeJS.Timeout }>();
+  private mainHolds = new Map<string, { release: () => void; timer: NodeJS.Timeout; owner: string | null }>();
+
+  /** The chat session holding the main checkout: `undefined` when nobody holds it, `null` for a holder without one. */
+  mainHolder(projectId: string): string | null | undefined {
+    return this.mainHolds.get(projectId)?.owner;
+  }
 
   /**
    * The coordinator edits the main checkout: merges wait until it commits (plexus_main_commit) or 10 minutes pass, so a
-   * merge never meets a half-edited working tree.
+   * merge never meets a half-edited working tree. `owner` is the chat session editing (see mainHolder); a second hold
+   * while one is in place changes nothing, so callers check the holder first.
    */
-  holdMain(projectId: string, maxMs = appConfig().mainHoldMin * 60_000): Promise<void> {
+  holdMain(projectId: string, owner: string | null = null, maxMs = appConfig().mainHoldMin * 60_000): Promise<void> {
     if (this.mainHolds.has(projectId)) return Promise.resolve();
     const prev = this.mergeLocks.get(projectId) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>(r => { release = r; });
     const timer = setTimeout(() => this.releaseMain(projectId), maxMs);
-    this.mainHolds.set(projectId, { release, timer });
+    this.mainHolds.set(projectId, { release, timer, owner });
     const acquired: Promise<void> = prev.then(() => {}, () => {});
     this.mergeLocks.set(projectId, acquired.then(() => held));
     return acquired;

@@ -10,7 +10,7 @@ import type { Provider } from '../shared/types.ts';
 import { addAccount, getAccount, listAccounts, openLogin, probeAccount, removeAccount, updateAccount } from './accounts.ts';
 import { syncBranch, unwatchBranch } from './branch.ts';
 import { createSession, defaultSession, deleteSession, listSessions, markRead, mustSession, updateSession } from './chat.ts';
-import { applyActions, beginMainEdit, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
+import { applyActions, beginMainEdit, closeSessionWorkspace, commitMainEdit, coordinatorTarget, coordinatorWorkspace, handleChat, mergeCoordinatorWorkspace, resolveProposal, statusDigest } from './coordinator.ts';
 import { bus, recentEvents } from './events.ts';
 import { orchestrator } from './orchestrator.ts';
 import { appRoot } from './paths.ts';
@@ -237,9 +237,9 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
     const tail = Math.max(1, Math.min(2000, Number(q.tail ?? 120) || 120));
     return { header: `${shortId(t)} run ${run.id} on ${run.accountId} (${run.outcome ?? 'running'}), log: ${run.logPath}${lines.length > tail ? ` — last ${tail} of ${lines.length} lines` : ''}`, lines: lines.slice(-tail) };
   });
-  app.post('/api/projects/:id/main/begin', async req => ({ text: await beginMainEdit(id(req)) }));
+  app.post('/api/projects/:id/main/begin', async req => ({ text: await beginMainEdit(id(req), body(req).sessionId ?? null) }));
   app.post('/api/projects/:id/main/commit', async req => ({ text: await commitMainEdit(id(req), String(body(req).message ?? ''), body(req).sessionId ?? null) }));
-  app.post('/api/projects/:id/coordinator-workspace', async req => ({ text: await coordinatorWorkspace(id(req)) }));
+  app.post('/api/projects/:id/coordinator-workspace', async req => ({ text: await coordinatorWorkspace(id(req), body(req).sessionId ?? null) }));
   app.post('/api/projects/:id/coordinator-workspace/merge', async req => ({ text: await mergeCoordinatorWorkspace(id(req), String(body(req).message ?? ''), body(req).sessionId ?? null) }));
   app.get('/api/projects/:id/memory', async req => {
     const p = mustProject(id(req));
@@ -269,6 +269,7 @@ export async function buildApi(token: string, hooks: { shutdown: () => Promise<v
   app.delete('/api/chat-sessions/:id', async req => {
     const s = mustSession(id(req));
     if (listSessions(s.projectId).filter(x => x.id !== s.id).length === 0) throw new Error('the last chat cannot be deleted; start a new one first');
+    await closeSessionWorkspace(s.projectId, s.id);
     deleteSession(s.id);
     return { ok: true };
   });

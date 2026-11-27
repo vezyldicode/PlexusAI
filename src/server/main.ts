@@ -6,6 +6,7 @@ import { buildApi } from './api.ts';
 import { startBranchWatch, stopBranchWatch } from './branch.ts';
 import { closeDb, getDb } from './db.ts';
 import { orchestrator } from './orchestrator.ts';
+import { sweepCoordinatorWorkspaces } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { seedRoles } from './roles.ts';
 import { backfillRunUsage } from './usage.ts';
@@ -30,6 +31,7 @@ export async function startDaemon(opts: { port?: number; host?: string; quiet?: 
   await app.listen({ port, host });
   quotaService.start();
   orchestrator.start(opts.tickMs);
+  void sweepCoordinatorWorkspaces();
   startBranchWatch();
   // Runs recorded before token usage was stored: read it back from their logs, once.
   setImmediate(() => {
