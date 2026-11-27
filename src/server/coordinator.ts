@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AgentResultSchema, CoordinatorOutputSchema, type ChatActivity, type CoordinatorAction, type CoordinatorOutput, type Project, type Task } from '../shared/types.ts';
 import { applyClassification, getAccount, listAccounts, runningByAccount } from './accounts.ts';
@@ -7,20 +7,20 @@ import type { McpServerSpec } from './adapters/types.ts';
 import { parsePlan } from './adapters/plan.ts';
 import { plexusMcp } from './mcp/spec.ts';
 import { addUsage } from './usage.ts';
-import { autoTitle, defaultSession, mustSession, setCliSession } from './chat.ts';
+import { autoTitle, defaultSession, listSessions, mustSession, setCliSession } from './chat.ts';
 import { now } from './db.ts';
 import { effortForRun } from './models.ts';
 import { bus, recentEvents } from './events.ts';
 import { appRoot, ensure, paths } from './paths.ts';
 import {
-  appendMemory, folderProblem, getMessage, listMessages, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
+  appendMemory, folderProblem, getMessage, listMessages, listProjects, messagesAfter, mustProject, postMessage, recordDecision, removeDirectives, updateMessageMeta, updateProject,
 } from './projects.ts';
 import { buildCoordinatorPrompt, buildCoordinatorSystem, buildCoordinatorTurnPrompt, type StatusDigest } from './prompts.ts';
 import { getRole } from './roles.ts';
 import { runtime } from './runtime.ts';
 import { countByStatus, createTask, findTask, listTasks, setStatus, shortId, updateTask } from './tasks.ts';
 import { orchestrator, pickAccount } from './orchestrator.ts';
-import { addWorktree, commitAll, git, hasCommitsAhead, revParse, snapshotCommit } from './util/git.ts';
+import { addWorktree, commitAll, deleteBranchIfMerged, git, hasCommitsAhead, removeWorktree, revParse, snapshotCommit } from './util/git.ts';
 import { resumeWorthIt, ROLE_EFFORT } from './worker.ts';
 import { addDirective, formatScope } from './directives.ts';
 import { appConfig } from './config.ts';
@@ -83,9 +83,12 @@ export function parseCoordinatorOutput(text: string): CoordinatorOutput | null {
   return null;
 }
 
-/** The single agent a new chat request can continue: the last solo task, if its conversation is still cheap to resume. */
-function soloLane(projectId: string): Task | null {
-  const last = listTasks(projectId).filter(t => t.kind === 'solo' && t.status === 'done' && t.cliSessionId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+/**
+ * The single agent a new chat request can continue: the last solo task of the same chat session, if its conversation is
+ * still cheap to resume. Another session's agent worked on another request, so its conversation is not reused here.
+ */
+function soloLane(projectId: string, sessionId?: string | null): Task | null {
+  const last = listTasks(projectId).filter(t => t.kind === 'solo' && t.status === 'done' && t.cliSessionId && (!sessionId || t.originSessionId === sessionId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   return last && resumeWorthIt(last.cliCtxTokens, last.cliUsedAt) ? last : null;
 }
 
@@ -166,7 +169,7 @@ export function applyActions(projectId: string, actions: CoordinatorAction[], by
           const pin = a.account ? accountRef(a.account) : null;
           const fork = a.fresh ? null : coordinatorFork(projectId, sessionId, turn);
           const forkOk = fork && (!pin || pin === fork.cliAccountId);
-          const lane = a.fresh || forkOk ? null : soloLane(projectId);
+          const lane = a.fresh || forkOk ? null : soloLane(projectId, sessionId);
           const t = createTask(projectId, { title: a.title, description: a.description, role: 'solo', kind: 'solo', priority: 75, originSessionId: sessionId, adhoc: true, laneFrom: lane, pinnedAccountId: pin });
           copyTaskAttachments(sessionId, attachedIds(a), t.id);
           if (forkOk) updateTask(t.id, fork!, true);
@@ -245,10 +248,23 @@ const folderSnapshot = async (p: Project) =>
 const changedFiles = async (repo: string, ...range: string[]) =>
   (await git(repo, 'diff', '--name-only', '--no-renames', ...range)).stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
 
-/** Start editing the main checkout: merges wait until plexus_main_commit (or 10 minutes). */
-export async function beginMainEdit(projectId: string): Promise<string> {
+/** Another chat session holds the main checkout (a holder or caller without a session never conflicts). */
+const heldByOther = (projectId: string, sessionId?: string | null) => {
+  const holder = orchestrator.mainHolder(projectId);
+  return holder && sessionId && holder !== sessionId ? holder : null;
+};
+
+/**
+ * Start editing the main checkout: merges wait until plexus_main_commit (or 10 minutes). One chat session at a time:
+ * while another one edits the folder, the answer says so at once (waiting would stall the tool call for minutes).
+ */
+export async function beginMainEdit(projectId: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
-  await orchestrator.holdMain(p.id);
+  if (heldByOther(p.id, sessionId)) {
+    return `Not started: another chat session is editing ${p.path} right now (until its plexus_main_commit, ${appConfig().mainHoldMin} min at most). ` +
+      'Do not edit the project folder. Use plexus_workspace (your own worktree) or a solo_task instead, or try again later.';
+  }
+  await orchestrator.holdMain(p.id, sessionId ?? null);
   // A second begin within the same hold keeps the first snapshot; an old one (the hold timed out) is replaced.
   const held = mainSnaps.get(p.id);
   if (!held || Date.now() - held.at > appConfig().mainHoldMin * 60_000) {
@@ -266,9 +282,14 @@ ${st}` : '');
 /**
  * The coordinator finished editing the main checkout: let merges continue. Without auto-commit nothing is committed; the
  * folder (with the edits) becomes the base later tasks start from. With auto-commit the edits are committed on the branch.
+ * A session that does not hold the folder (its hold timed out and another session took it) changes nothing.
  */
 export async function commitMainEdit(projectId: string, message: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
+  if (heldByOther(p.id, sessionId)) {
+    return 'Nothing done: your hold on the project folder ran out and another chat session is editing it now. ' +
+      "Your edits stay in the folder as they are; that session's commit takes them in.";
+  }
   const before = mainSnaps.get(p.id)?.snap;
   mainSnaps.delete(p.id);
   try {
@@ -283,36 +304,94 @@ export async function commitMainEdit(projectId: string, message: string, session
   } finally { orchestrator.releaseMain(p.id); }
 }
 
-const COORD_BRANCH = 'plexus/coordinator';
-const coordWorktree = (p: Project) => join(ensure(join(paths.worktrees, p.id)), 'coordinator');
+/**
+ * Each chat session has its own coordinator worktree and branch, so two chats working at once never share (or reset)
+ * each other's edits. Session ids are `<project>-c<hex>`: the last part names the worktree and branch.
+ */
+const LEGACY_COORD_BRANCH = 'plexus/coordinator';
+const COORD_DIR = 'coordinator-';
+const coordKey = (sessionId: string) => sessionId.split('-').pop()!;
+const coordBranch = (sessionId: string) => `plexus/coord-${coordKey(sessionId)}`;
+const coordWorktree = (p: Project, sessionId: string) => join(ensure(join(paths.worktrees, p.id)), COORD_DIR + coordKey(sessionId));
+/** The session a workspace call belongs to: the one named, or the project's default chat (older callers name none). */
+const workspaceSession = (projectId: string, sessionId?: string | null) => {
+  const s = sessionId ? mustSession(sessionId) : defaultSession(projectId);
+  if (s.projectId !== projectId) throw new Error('chat session belongs to another project');
+  return s.id;
+};
 
 /** The coordinator's own worktree for larger edits, on its branch, fresh from the base when nothing is pending. */
-export async function coordinatorWorkspace(projectId: string): Promise<string> {
+export async function coordinatorWorkspace(projectId: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
+  const sid = workspaceSession(p.id, sessionId);
   await ensureBase(p);
   const base = baseRef(p);
-  const wt = coordWorktree(p);
-  if (!existsSync(wt)) await addWorktree(p.path, wt, { branch: COORD_BRANCH, newBranchFrom: base });
-  else if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base)) && !(await git(wt, 'status', '--porcelain')).stdout.trim()) {
+  const wt = coordWorktree(p, sid), branch = coordBranch(sid);
+  if (!existsSync(wt)) await addWorktree(p.path, wt, { branch, newBranchFrom: base });
+  else if (!(await hasCommitsAhead(p.path, branch, base)) && !(await git(wt, 'status', '--porcelain')).stdout.trim()) {
     await git(wt, 'reset', '--hard', base);
   }
-  return `Your worktree: ${wt} (branch ${COORD_BRANCH}, Plexus-internal). Edit and test there, then call plexus_workspace_merge.` +
+  return `Your worktree: ${wt} (branch ${branch}, Plexus-internal, used by this chat only). Edit and test there, then call plexus_workspace_merge.` +
     (autoCommit() ? '' : ' The result reaches the project folder as uncommitted changes; the user commits them.');
 }
 
 /** Merge the coordinator's worktree into the base through the merge queue (its branch is internal to Plexus). */
 export async function mergeCoordinatorWorkspace(projectId: string, message: string, sessionId?: string | null): Promise<string> {
   const p = mustProject(projectId);
-  const wt = coordWorktree(p);
+  const sid = workspaceSession(p.id, sessionId);
+  const wt = coordWorktree(p, sid), branch = coordBranch(sid);
   if (!existsSync(wt)) return 'No coordinator worktree: call plexus_workspace first.';
   const base = baseRef(p);
   await commitAll(wt, message.trim() || 'chore: coordinator change');
-  if (!(await hasCommitsAhead(p.path, COORD_BRANCH, base))) return 'Nothing to merge.';
-  const files = await changedFiles(p.path, `${base}...${COORD_BRANCH}`).catch(() => [] as string[]);
-  const r = await orchestrator.mergeCoordinatorBranch(p, COORD_BRANCH, `merge coordinator: ${message.trim() || 'change'}`);
-  if (r.ok) { await git(wt, 'reset', '--hard', base); recordCoordinatorWork(p.id, 'workspace', message, files, sessionId); }
+  if (!(await hasCommitsAhead(p.path, branch, base))) return 'Nothing to merge.';
+  const files = await changedFiles(p.path, `${base}...${branch}`).catch(() => [] as string[]);
+  const r = await orchestrator.mergeCoordinatorBranch(p, branch, `merge coordinator: ${message.trim() || 'change'}`);
+  if (r.ok) { await git(wt, 'reset', '--hard', base); recordCoordinatorWork(p.id, 'workspace', message, files, sid); }
   const done = autoCommit() ? `Merged into ${p.mainBranch}.` : 'Merged; the changes are in the project folder, uncommitted (the user commits them).';
   return r.ok ? done : `Not merged (${r.detail.slice(0, 800)}). Resolve it in your worktree (git merge ${base}) and try again.`;
+}
+
+/**
+ * Remove a coordinator worktree. Unmerged edits are committed on its branch first, and a branch with commits of its own
+ * stays (plexus/coord-…), so nothing is lost; a branch fully in the base is deleted.
+ */
+async function dropWorkspace(p: Project, wt: string, branch: string): Promise<void> {
+  if (!existsSync(wt)) return;
+  await commitAll(wt, 'wip: coordinator chat closed').catch(() => false);
+  await removeWorktree(p.path, wt).catch(() => {});
+  await deleteBranchIfMerged(p.path, branch, baseRef(p)).catch(() => false);
+}
+
+/** A chat session is being deleted: its hold on the project folder ends and its worktree goes. */
+export async function closeSessionWorkspace(projectId: string, sessionId: string): Promise<void> {
+  const p = mustProject(projectId);
+  if (orchestrator.mainHolder(p.id) === sessionId) { mainSnaps.delete(p.id); orchestrator.releaseMain(p.id); }
+  if (folderProblem(p)) return;
+  await dropWorkspace(p, coordWorktree(p, sessionId), coordBranch(sessionId));
+}
+
+/**
+ * Startup sweep: worktrees of deleted chat sessions, and the single shared worktree of earlier versions when it holds
+ * nothing (with unmerged work it stays, on branch plexus/coordinator, for the user to merge or delete).
+ */
+export async function sweepCoordinatorWorkspaces(): Promise<void> {
+  for (const p of listProjects()) {
+    if (folderProblem(p)) continue;
+    const dir = join(paths.worktrees, p.id);
+    if (!existsSync(dir)) continue;
+    try {
+      const live = new Set(listSessions(p.id, true).map(s => coordKey(s.id)));
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith(COORD_DIR) || live.has(name.slice(COORD_DIR.length))) continue;
+        await dropWorkspace(p, join(dir, name), `plexus/coord-${name.slice(COORD_DIR.length)}`);
+      }
+      const legacy = join(dir, 'coordinator');
+      if (existsSync(legacy) && !(await hasCommitsAhead(p.path, LEGACY_COORD_BRANCH, baseRef(p))) && !(await git(legacy, 'status', '--porcelain')).stdout.trim()) {
+        await removeWorktree(p.path, legacy);
+        await deleteBranchIfMerged(p.path, LEGACY_COORD_BRANCH, baseRef(p));
+      }
+    } catch { /* the next start tries again */ }
+  }
 }
 
 // ---------------- chat ----------------

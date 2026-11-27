@@ -200,4 +200,57 @@ test('a main-checkout edit becomes a done coordinator task with its message, fil
   await commitMainEdit(p.id, 'noop', s.id);
   assert.equal(listTasks(p.id).filter(t => t.kind === 'coordinator').length, 1);
 });
+
+const { coordinatorWorkspace, mergeCoordinatorWorkspace, closeSessionWorkspace } = await import('../src/server/coordinator.ts');
+const { orchestrator } = await import('../src/server/orchestrator.ts');
+
+async function freshProject(name: string) {
+  const p = createProject({ path: join(root, name), goal: 'x' });
+  writeFileSync(join(p.path, 'a.txt'), 'a\n');
+  git(p.path, 'init', '-q', '-b', 'main');
+  git(p.path, 'add', '-A');
+  git(p.path, 'commit', '-qm', 'init');
+  const { mainBranch } = await prepareProjectRepo(p);
+  updateProject(p.id, { mainBranch });
+  return p;
+}
+const wtPath = (text: string) => text.match(/Your worktree: (.+?) \(branch/)![1];
+
+test('two chat sessions get their own coordinator worktrees: merging one keeps the other one\'s work', async () => {
+  const p = await freshProject('two-ws');
+  const a = createSession(p.id, 'light theme'), b = createSession(p.id, 'vietnamese');
+  const wa = wtPath(await coordinatorWorkspace(p.id, a.id));
+  const wb = wtPath(await coordinatorWorkspace(p.id, b.id));
+  assert.notEqual(wa, wb);
+  writeFileSync(join(wa, 'theme.css'), 'light\n');
+  writeFileSync(join(wb, 'vi.json'), '{}\n');
+
+  assert.match(await mergeCoordinatorWorkspace(p.id, 'feat: light theme', a.id), /Merged/);
+  assert.ok(existsSync(join(wb, 'vi.json')), "b's unfinished edit survives a's merge");
+  assert.ok(!existsSync(join(wb, 'theme.css')), "a's work is not in b's worktree");
+  const rec = listTasks(p.id).filter(t => t.kind === 'coordinator');
+  assert.deepEqual(rec.map(t => [t.originSessionId, t.paths]), [[a.id, ['theme.css']]]);
+
+  // Deleting b keeps its unmerged edit on its branch and removes the worktree.
+  await closeSessionWorkspace(p.id, b.id);
+  assert.ok(!existsSync(wb));
+  const branch = git(p.path, 'branch', '--list', 'plexus/coord-*', '--format=%(refname:short)').split('\n').filter(x => x.includes(b.id.split('-').pop()!));
+  assert.equal(branch.length, 1, "b's branch with its work stays");
+  assert.match(git(p.path, 'show', '--stat', '--format=', branch[0]), /vi\.json/);
+});
+
+test('only one chat session edits the main checkout at a time', async () => {
+  const p = await freshProject('one-main');
+  const a = createSession(p.id, 'a'), b = createSession(p.id, 'b');
+  assert.match(await beginMainEdit(p.id, a.id), /You may edit/);
+  assert.match(await beginMainEdit(p.id, b.id), /Not started: another chat session/);
+  assert.match(await commitMainEdit(p.id, 'x', b.id), /Nothing done/);
+  assert.equal(orchestrator.mainHolder(p.id), a.id, "b's commit does not release a's hold");
+  writeFileSync(join(p.path, 'a.txt'), 'by a\n');
+  await commitMainEdit(p.id, 'edit a', a.id);
+  assert.equal(orchestrator.mainHolder(p.id), undefined);
+  assert.match(await beginMainEdit(p.id, b.id), /You may edit/);
+  await closeSessionWorkspace(p.id, b.id);
+  assert.equal(orchestrator.mainHolder(p.id), undefined, 'deleting the holding session releases the folder');
+});
 }
