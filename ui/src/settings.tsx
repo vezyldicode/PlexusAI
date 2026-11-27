@@ -8,7 +8,7 @@ import type { Account, ModelCatalog, Project, Provider, Role, Skill } from './ty
 import { ContextMenu, Dot, Ic, Meter, type MenuItem } from './ui.tsx';
 import { FALLBACK, effortsFor, useModels } from './models.tsx';
 import { accountItems } from './components/Sidebar.tsx';
-import { USER_COLORS, readUserColor, saveUserColor } from './appearance.ts';
+import { USER_COLORS, readUserColor, saveUserColor, readTheme, saveTheme } from './appearance.ts';
 import { EngineSettings, ProjectSettingsPanel, TooltipLayer, engineKeys, resetProjectTab, useConfig, type EngineTab } from './engine-settings.tsx';
 
 export type SettingsTab = 'accounts' | 'roles' | 'skills' | 'appearance' | 'project' | EngineTab;
@@ -18,7 +18,7 @@ const SECTIONS: { title: string; tabs: TabDef[] }[] = [
     { id: 'accounts', label: 'Accounts', icon: Users, tip: 'Claude and Codex accounts, their quota and how many tasks each runs' },
     { id: 'roles', label: 'Roles', icon: UserCog, tip: 'What each kind of agent does, and the model it runs on' },
     { id: 'skills', label: 'Skills', icon: Blocks, tip: 'Instruction folders copied into the workspace of the roles that use them' },
-    { id: 'appearance', label: 'Appearance', icon: Palette, tip: 'The background of your own messages in chat, on this device' },
+    { id: 'appearance', label: 'Appearance', icon: Palette, tip: 'Theme and message background, on this device' },
   ] },
   { title: 'Project', tabs: [
     { id: 'project', label: 'Pipeline', icon: FolderCog, tip: 'How a project is built, reviewed and spread over accounts' },
@@ -124,12 +124,23 @@ export function SettingsDialog({ tab, onTab, onClose, accounts, reloadAccounts, 
 // ---------------------------------------------------------------- appearance
 
 function AppearanceSettings() {
+  const [theme, setTheme] = useState(readTheme);
   const [color, setColor] = useState(readUserColor);
   const pick = (id: string) => { setColor(id); saveUserColor(id); };
   return (
     <section className="cfg">
       <div className="settings-head"><h2>Appearance</h2></div>
       <p className="lead">Saved on this device</p>
+      <div className="cfg-group">
+        <div className="cfg-group-head theme-picker">
+          <h3 id="appearance-theme-label">Theme</h3>
+          <select aria-labelledby="appearance-theme-label" value={theme}
+            onChange={e => { const value = e.target.value === 'light' ? 'light' : 'dark'; setTheme(value); saveTheme(value); }}>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+      </div>
       <div className="cfg-group">
         <div className="cfg-group-head"><h3>Your messages</h3></div>
         <div className="cfg-rows">
